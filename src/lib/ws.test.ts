@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, expect, it, jest } from "bun:test";
-import { HerdrSocket } from "./ws.ts";
+import { HerdrSocket, type SocketEndpoint } from "./ws.ts";
 import type { ClientConnectionTrace, PendingMessage } from "../../shared/protocol.ts";
 import { OUTPUT_STALLED_CLOSE_CODE } from "../../shared/terminal-flow.ts";
 
@@ -11,7 +11,7 @@ class FakeSocket {
   readyState = FakeSocket.CONNECTING;
   readonly sent: { type: string; [key: string]: unknown }[] = [];
   private readonly listeners = new Map<string, ((event: any) => void)[]>();
-  constructor(readonly url: string) { FakeSocket.last = this; }
+  constructor(readonly url: string, readonly protocols?: string[]) { FakeSocket.last = this; }
   addEventListener(type: string, listener: (event: any) => void): void { this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]); }
   send(data: string): void { const frame = JSON.parse(data); this.sent.push(frame); this.emit("sent", frame); }
   nextSubmission(): Promise<{ id: number }> {
@@ -40,6 +40,215 @@ afterAll(() => { globals.WebSocket = before.WebSocket; globals.window = before.w
 const snapshot = (features: string[]) => ({ type: "snapshot", snapshot: { workspaces: [], panes: [], agents: [], layouts: [] }, features });
 const secrets = (socket: FakeSocket) => socket.sent.filter((frame) => frame.type === "secret");
 const submissions = (socket: FakeSocket) => socket.sent.filter((frame) => ["submit", "input", "keys"].includes(frame.type));
+
+/** Discovery the test can finish even after its caller has aborted it. */
+function endpointRequest() {
+  let resolve!: (endpoint: SocketEndpoint) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<SocketEndpoint>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+it("resolves fresh endpoint URLs and protocols on every retry, reporting only unopened failures", async () => {
+  jest.useFakeTimers();
+  let resolutions = 0;
+  const opened: number[] = [];
+  const failed: number[] = [];
+  const client = new HerdrSocket(async () => {
+    const id = ++resolutions;
+    return { url: `wss://direct/ws?ticket=${id}`, protocols: ["ovis", `ticket-${id}`],
+      opened: () => { opened.push(id); }, failed: () => { failed.push(id); } };
+  }, "ws://test/ws?machine_id=remote");
+  try {
+    client.setMode("observe");
+    client.attach("w1:p1", 100, 30, true);
+    client.connect();
+    await settle();
+    const first = FakeSocket.last;
+    expect(first.url).toBe("wss://direct/ws?ticket=1");
+    expect(first.protocols).toEqual(["ovis", "ticket-1"]);
+    first.disconnect();
+    first.closeEvent(1006);
+    expect(failed).toEqual([1]);
+    jest.advanceTimersByTime(250);
+    await settle();
+    const second = FakeSocket.last;
+    expect(second.url).toBe("wss://direct/ws?ticket=2");
+    expect(second.protocols).toEqual(["ovis", "ticket-2"]);
+    second.open();
+    expect(opened).toEqual([2]);
+    expect(second.sent).toEqual([{ type: "role", mode: "observe" },
+      { type: "attach", pane_id: "w1:p1", cols: 100, rows: 30, flow_control: "ack", keep_size: true }]);
+    second.disconnect();
+    expect(failed).toEqual([1]);
+  } finally { client.close(); jest.useRealTimers(); }
+});
+
+it("ignores late resolver results and rejections after close or explicit replacement", async () => {
+  jest.useFakeTimers();
+  const requests: ReturnType<typeof endpointRequest>[] = [];
+  const signals: AbortSignal[] = [];
+  const client = new HerdrSocket((signal) => {
+    signals.push(signal);
+    const request = endpointRequest();
+    requests.push(request);
+    return request.promise;
+  });
+  let staleOpened = 0;
+  let staleFailed = 0;
+  try {
+    const before = FakeSocket.last;
+    client.connect();
+    client.reconnect();
+    expect(signals[0]!.aborted).toBe(true);
+    expect(requests).toHaveLength(2);
+    requests[0]!.resolve({ url: "ws://stale", opened: () => { staleOpened++; }, failed: () => { staleFailed++; } });
+    await settle();
+    expect(FakeSocket.last).toBe(before);
+    client.reconnect();
+    expect(signals[1]!.aborted).toBe(true);
+    requests[1]!.reject(new Error("obsolete discovery failure"));
+    requests[2]!.resolve({ url: "ws://current" });
+    await settle();
+    const current = FakeSocket.last;
+    expect(current.url).toBe("ws://current");
+    current.open();
+    client.reconnect();
+    // Old WebSocket events must not bind, emit errors, or close the new transport either.
+    const errors: string[] = [];
+    client.on((message) => { if (message.type === "error") errors.push(message.code); });
+    current.open();
+    current.receive({ type: "error", code: "stale", message: "stale" });
+    (current as unknown as { emit(type: string, event: unknown): void }).emit("error", {});
+    expect(errors).toEqual([]);
+    client.close();
+    expect(signals[3]!.aborted).toBe(true);
+    requests[3]!.resolve({ url: "ws://after-close" });
+    await settle();
+    expect(FakeSocket.last).toBe(current);
+    expect(client.state).toBe("closed");
+    expect(staleOpened).toBe(0);
+    expect(staleFailed).toBe(0);
+  } finally { client.close(); jest.useRealTimers(); }
+});
+
+it("bounds discovery plus handshake by one deadline and aborts overdue discovery", async () => {
+  jest.useFakeTimers();
+  const requests: ReturnType<typeof endpointRequest>[] = [];
+  const signals: AbortSignal[] = [];
+  let failures = 0;
+  const client = new HerdrSocket((signal) => {
+    signals.push(signal);
+    const request = endpointRequest(); requests.push(request);
+    return request.promise;
+  });
+  try {
+    client.connect();
+    jest.advanceTimersByTime(7_999);
+    expect(signals[0]!.aborted).toBe(false);
+    jest.advanceTimersByTime(1);
+    expect(signals[0]!.aborted).toBe(true);
+    expect(client.state).toBe("waiting");
+    jest.advanceTimersByTime(250);
+    expect(requests).toHaveLength(2);
+    // The second deadline grew to 16s; 12s spent resolving leaves only 4s to open.
+    jest.advanceTimersByTime(12_000);
+    requests[1]!.resolve({ url: "ws://slow", failed: () => { failures++; } });
+    await settle();
+    const socket = FakeSocket.last;
+    jest.advanceTimersByTime(3_999);
+    expect(socket.readyState).toBe(FakeSocket.CONNECTING);
+    jest.advanceTimersByTime(1);
+    expect(socket.readyState).toBe(3);
+    expect(signals[1]!.aborted).toBe(true);
+    expect(failures).toBe(1);
+    socket.closeEvent(1006);
+    expect(failures).toBe(1);
+    requests[0]!.resolve({ url: "ws://overdue" });
+    await settle();
+    expect(FakeSocket.last).toBe(socket);
+  } finally { client.close(); jest.useRealTimers(); }
+});
+
+it("does not start concurrent discovery on duplicate connect or wake", async () => {
+  jest.useFakeTimers();
+  const request = endpointRequest();
+  let resolutions = 0;
+  const client = new HerdrSocket(() => { resolutions++; return request.promise; });
+  try {
+    client.connect(); client.connect(); client.wake(); client.connect();
+    expect(resolutions).toBe(1);
+    expect(client.state).toBe("connecting");
+    request.resolve({ url: "ws://one" });
+    await settle();
+    const socket = FakeSocket.last;
+    client.connect(); client.wake();
+    expect(resolutions).toBe(1);
+    expect(FakeSocket.last).toBe(socket);
+  } finally { client.close(); jest.useRealTimers(); }
+});
+
+it("explicit replacement settles sent and unsent submits without replaying input or old ACKs", async () => {
+  jest.useFakeTimers();
+  const client = new HerdrSocket(async () => ({ url: "ws://test/ws", protocols: ["fresh"] }));
+  let disconnects = 0;
+  client.onDisconnect(() => { disconnects++; });
+  try {
+    client.attach("w1:p1", 100, 30);
+    client.connect(); await settle();
+    const first = FakeSocket.last;
+    first.open(); first.receive(snapshot(["submit", "pending-input", "input-ready"]));
+    first.receive({ type: "input-ready", pane_id: "w1:p1" });
+    const ack = client.outputAcknowledgement({ type: "pty-data", pane_id: "w1:p1", data: "screen", flow: { stream_id: "old", offset: 6 } });
+    const sent = client.submit("w1:p1", "do not replay", "do not replay", false, "queue");
+    await settle();
+    expect(submissions(first)).toHaveLength(1);
+    client.reconnect();
+    expect(await sent).toMatchObject({ ok: false, code: "disconnected" });
+    expect(disconnects).toBe(1);
+    await settle();
+    const second = FakeSocket.last;
+    second.open();
+    // No snapshot yet: this submit is waiting and must not migrate to the next socket.
+    const unsent = client.submit("w1:p1", "keep draft", "keep draft");
+    client.reconnect();
+    expect(await unsent).toMatchObject({ ok: false, code: "not_transmitted" });
+    await settle();
+    const third = FakeSocket.last;
+    third.open(); third.receive(snapshot(["submit", "pending-input", "input-ready"]));
+    ack?.();
+    expect(third.sent.map((frame) => frame.type)).toEqual(["role", "attach"]);
+    expect(submissions(second)).toEqual([]);
+    expect(disconnects).toBe(2);
+  } finally { client.close(); jest.useRealTimers(); }
+});
+
+it("aborts discovery on pagehide and waits for pageshow before resolving again", async () => {
+  jest.useFakeTimers();
+  const requests: ReturnType<typeof endpointRequest>[] = [];
+  const signals: AbortSignal[] = [];
+  const client = new HerdrSocket((signal) => {
+    signals.push(signal);
+    const request = endpointRequest(); requests.push(request); return request.promise;
+  });
+  try {
+    client.connect();
+    const before = FakeSocket.last;
+    globalThis.dispatchEvent(new Event("pagehide"));
+    expect(signals[0]!.aborted).toBe(true);
+    requests[0]!.resolve({ url: "ws://hidden" });
+    await settle();
+    jest.advanceTimersByTime(60_000);
+    client.connect(); globalThis.dispatchEvent(new Event("online"));
+    expect(requests).toHaveLength(1);
+    expect(FakeSocket.last).toBe(before);
+    globalThis.dispatchEvent(new Event("pageshow"));
+    expect(requests).toHaveLength(2);
+    requests[1]!.resolve({ url: "ws://shown" });
+    await settle();
+    expect(FakeSocket.last.url).toBe("ws://shown");
+  } finally { client.close(); jest.useRealTimers(); }
+});
 
 it("refuses clear-and-send on a legacy bridge without sending payload or Enter", async () => {
   const client = new HerdrSocket("ws://test/ws");

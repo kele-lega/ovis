@@ -1,3 +1,5 @@
+import { directFetch } from "./directTransport.ts";
+
 /** Only this app's API gets correlation metadata; never change the global fetch function. */
 export function apiFetch(url: string, init?: RequestInit): Promise<Response> {
   const origin = typeof location === "undefined" ? "http://localhost" : location.origin;
@@ -12,5 +14,5 @@ export function apiFetch(url: string, init?: RequestInit): Promise<Response> {
     }).join("");
     headers.set("x-request-id", `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`);
   }
-  return fetch(url, { ...init, headers });
+  return directFetch(url, { ...init, headers });
 }
