@@ -4,6 +4,7 @@ import { afterSend, afterSettled, greetingMemory, rememberGreeting } from "./gre
 import { pendingMessages, type PendingMessageStore } from "./pendingMessages.ts";
 import { watchPageInUse } from "./presence.ts";
 import { HerdrSocket } from "./ws.ts";
+import { resolveMachineSocket } from "./directTransport.ts";
 
 type Handler = (message: ServerMessage, sent: boolean) => void;
 type RoleAck = Extract<ServerMessage, { type: "role-ack" }>;
@@ -12,6 +13,14 @@ export interface MachineSessionOptions {
   pendingStore?: PendingMessageStore;
 }
 let nextSession = 1;
+
+function socketTraceUrl(machineId: string): string {
+  const origin = typeof window !== "undefined" ? window.location.origin : typeof location !== "undefined" ? location.origin : "http://localhost";
+  const url = new URL("/ws", origin);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.searchParams.set("machine_id", machineId);
+  return url.href;
+}
 
 /** A PC's connection outlives its pane views. Detaching a view releases its input lease,
  * while this connection still receives the bridge's held state and delivery receipts. */
@@ -30,7 +39,7 @@ export class MachineSession {
   private closed = false;
 
   constructor(readonly machineId: string, options: MachineSessionOptions = {}) {
-    this.socket = options.socket ?? new HerdrSocket(`${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws?machine_id=${encodeURIComponent(machineId)}`);
+    this.socket = options.socket ?? new HerdrSocket(resolveMachineSocket(machineId), socketTraceUrl(machineId));
     this.store = options.pendingStore ?? pendingMessages;
     // Installed before view subscribers, and kept even while this PC has no mounted pane.
     this.offMessage = this.socket.on((message) => {

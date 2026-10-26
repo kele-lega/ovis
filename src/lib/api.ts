@@ -1,4 +1,5 @@
 import { apiFetch as fetch } from "./api-request-id.ts";
+import { clearDirectTransports } from "./directTransport.ts";
 import type { PreferencesChange, SharedPreferences } from "../../shared/preferences.ts";
 import type { SeenFinish } from "../../shared/seen.ts";
 import { resumeConnectionTraces } from "./connectionTrace.ts";
@@ -432,6 +433,7 @@ export async function revokeDevice(id: string): Promise<void> {
 
 /** DELETE /api/auth: clears the session and device cookies, so the next health check reports the gate again. */
 export async function signOut(): Promise<void> {
+  clearDirectTransports();
   const response = await fetch("/api/auth", { method: "DELETE" });
   if (!response.ok) throw await errorFrom("/api/auth", response);
 }
