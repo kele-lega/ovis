@@ -3,6 +3,9 @@ import { normalizeDirectOrigin, type DirectCredentialResponse } from "../shared/
 import { DirectSigner } from "./direct-auth.ts";
 import type { MachineManager } from "./machines.ts";
 
+// Backdate issuance instead of relaxing the bridge's future-time and maximum-TTL checks.
+const SIGNING_MARGIN_MS = 5000;
+
 export interface DirectConfig { endpoints: Record<string, string>; origins: string[] }
 
 /** Administrator-owned addresses, never a URL supplied by a browser or an SSH alias. */
@@ -46,7 +49,7 @@ export class DirectBroker {
 
   private refresh(id: string, lease: Lease): Promise<void> {
     if (lease.updating) return lease.updating;
-    lease.updating = this.control(lease, lease.signer.trust(id, this.config.origins)).finally(() => { lease.updating = undefined; });
+    lease.updating = this.control(lease, lease.signer.trust(id, this.config.origins, Date.now() - SIGNING_MARGIN_MS)).finally(() => { lease.updating = undefined; });
     return lease.updating;
   }
 
@@ -79,8 +82,9 @@ export class DirectBroker {
         captured.revocations.set(subject, unwatch);
       }
       const fields = { aud: id, sub: scopedSubject, origin, role: readOnly ? "observe" as const : "interact" as const };
-      const ticket = captured.signer.issue({ ...fields, kind: "ws" });
-      const http = captured.signer.issue({ ...fields, kind: "http" });
+      const signingNow = Date.now() - SIGNING_MARGIN_MS;
+      const ticket = captured.signer.issue({ ...fields, kind: "ws" }, signingNow);
+      const http = captured.signer.issue({ ...fields, kind: "http" }, signingNow);
       return { origin: target, ticket: ticket.token, access_token: http.token, expires_at: http.expires_at };
     } catch (error) { unwatch?.(); if (revoked) this.drop(id); throw error; }
   }
