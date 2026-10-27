@@ -88,6 +88,23 @@ describe("memory-only per-PC direct transport", () => {
     expect((await transport.resolveMachineSocket("local")(signal())).url).toBe("wss://manager.example/ws?machine_id=local");
   });
 
+  it("accepts conservatively shortened credentials and renews HTTP access at their actual expiry", async () => {
+    let elapsed = 0;
+    const { transport, calls, advance } = harness(({ url }) => url.endsWith("direct-access")
+      ? Response.json({ ...credential("a"), expires_at: NOW + elapsed + 55_000 }) : Response.json({ ok: true }));
+    expect((await transport.resolveMachineSocket("a")(signal())).url).toBe("wss://a.example/ws");
+    await transport.directFetch("/api/machines/a/session");
+    elapsed += 54_999;
+    advance(54_999);
+    await transport.directFetch("/api/machines/a/session");
+    expect(calls.filter((call) => call.url.endsWith("direct-access"))).toHaveLength(1);
+    elapsed++;
+    advance(1);
+    await transport.directFetch("/api/machines/a/session");
+    expect(calls.filter((call) => call.url.endsWith("direct-access"))).toHaveLength(2);
+    expect(calls.filter((call) => call.url === "https://a.example/api/session")).toHaveLength(3);
+  });
+
   it("propagates caller abort and clear, ignores late credentials, and keeps other coalesced readers alive", async () => {
     const late = deferred<Response>();
     const { transport, calls } = harness(() => late.promise);
