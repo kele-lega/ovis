@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import { describeProgress } from "../src/lib/bridgeProgress.ts";
 import type { SetupJob } from "../shared/machines.ts";
@@ -11,7 +11,7 @@ import { canSendSecret, sameOrigin, shellQuote, validateTarget } from "./machine
 import { handleMachineRequest, MACHINE_PROXY_PATH } from "./machine-api.ts";
 import type { BridgeDescriptor } from "./bridge.ts";
 import { createServer } from "./index.ts";
-import { MachineManager } from "./machines.ts";
+import { localMachineName, MachineManager } from "./machines.ts";
 import { detectHost, psQuote, UNSUPPORTED_HOST, windowsBridgeFiles, windowsHost } from "./remote-host.ts";
 import { decodeClixml, SshConnection } from "./ssh.ts";
 import { terminalAttachSupported } from "./herdr/client.ts";
@@ -20,6 +20,20 @@ import { CompletionTracker } from "./completion.ts";
 import type { PushService } from "./push.ts";
 import { recentSshOutput } from "./ssh.ts";
 import { RemoteResponseInvalid, RemoteResponseTooLarge } from "./remote-json.ts";
+
+describe("local machine display name", () => {
+  it("uses the hostname without a usable override", () => {
+    for (const name of ["", "   ", "bad\u0000name", "bad\nname", "x".repeat(129)]) {
+      expect(localMachineName(name)).toBe(hostname());
+    }
+  });
+
+  it("trims the configured display name without changing machine identity", () => {
+    expect(localMachineName(" hongkong ")).toBe("hongkong");
+    expect(localMachineName("suzhou")).toBe("suzhou");
+    expect(localMachineName("x".repeat(128))).toHaveLength(128);
+  });
+});
 
 const MiB = 1024 * 1024;
 /**
