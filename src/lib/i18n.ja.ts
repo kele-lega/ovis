@@ -23,6 +23,7 @@ import { PALETTE_JA } from "./i18n/palette.ja.ts";
  * in English. Placeholders in braces keep their English names.
  */
 const BASE: Record<string, string> = {
+  "Save": "保存",
   "Back": "戻る",
   "Scroll pane up": "ペインを上にスクロール",
   "Scroll pane down": "ペインを下にスクロール",
@@ -271,6 +272,7 @@ const BASE: Record<string, string> = {
 
 /** The parts JA is made of; src/lib/i18n.test.ts fails when a key is in two parts, since a spread keeps only the last. */
 export const JA_PARTS: Record<string, Record<string, string>> = {
+
   base: BASE,
   settings: SETTINGS_JA,
   terminal: TERMINAL_JA,

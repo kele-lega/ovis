@@ -7,6 +7,7 @@ import { machinePath, type BridgeHealth, type HerdrIdentity, type Machine, type 
 import type {
   WorkspaceMoved,
   AgentKind,
+  AgentsResponse,
   AgentRenameRequest,
   CommandOutcome,
   ConversationResponse,
@@ -381,6 +382,7 @@ export async function fetchPaneConversation(paneId: string, machineId = "local",
 
 export interface HealthInfo {
   ok: boolean;
+  launch_command?: boolean;
   herdr: HerdrIdentity;
   web_ui?: { boot_id: string | null; revision: string | null };
   /** Absent only on a server that predates the token gate. */
@@ -612,11 +614,12 @@ export async function clearPane(paneId: string, machineId = "local"): Promise<vo
   await sendJson(machinePath(machineId, "pane/clear"), "POST", { pane_id: paneId });
 }
 
-/** GET /api/agents: of the agent kinds herdr can start, the ones this app supports and that PC has installed, for the new-session dialog. */
-export async function fetchAgentKinds(machineId = "local"): Promise<AgentKind[]> {
-  // filtered here, not on the server: a remote PC's older bridge still answers every manifest,
-  // and says nothing of what is installed, so its supported kinds are all offered
-  return (await getJson<{ agents: AgentKind[] }>(machinePath(machineId, "agents"))).agents.filter((agent) => SUPPORTED_AGENT_KINDS.has(agent.kind) && agent.installed !== false);
+/** GET /api/agents: supported kinds this PC can start, including kinds whose configured command supplies its own executable. */
+export async function fetchAgentKinds(machineId = "local", onCapabilities?: (capabilities: Pick<AgentsResponse, "launch_command">) => void, configuredKinds: readonly string[] = []): Promise<AgentKind[]> {
+  // Capability is read from the same PC and answer as its catalog, never inferred from the web UI's version.
+  const response = await getJson<AgentsResponse>(machinePath(machineId, "agents"));
+  onCapabilities?.({ launch_command: response.launch_command === true });
+  return response.agents.filter((agent) => SUPPORTED_AGENT_KINDS.has(agent.kind) && (agent.installed !== false || configuredKinds.includes(agent.kind)));
 }
 
 /** GET /api/integrations: herdr's agent integrations on that PC and whether each is installed. */

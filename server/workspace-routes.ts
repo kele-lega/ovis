@@ -103,7 +103,7 @@ export async function handleWorkspaceRequest(request: Request, url: URL, pathnam
     setRequestRoute(pathname);
     const inWorkspace = pathname === "/api/tab/create";
     if (request.method !== "POST") return badRequest("method_not_allowed", "use POST");
-    const payload = await readJsonObject<{ workspace_id?: unknown; cwd?: unknown; label?: unknown; agent?: { kind?: unknown; name?: unknown; args?: unknown } | null; first_message?: unknown; first_message_connection?: unknown }>(request);
+    const payload = await readJsonObject<{ workspace_id?: unknown; cwd?: unknown; label?: unknown; agent?: AgentPayload | null; first_message?: unknown; first_message_connection?: unknown }>(request);
     if (payload instanceof Response) return payload;
     if (inWorkspace && (typeof payload.workspace_id !== "string" || payload.workspace_id.trim() === "")) {
       return badRequest("missing_workspace_id", "workspace_id is required");

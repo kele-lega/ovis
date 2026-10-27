@@ -74,6 +74,17 @@ describe("saved theme migration", () => {
     expect(loadSettings().terminalFontSize).toBe(18);
   });
 
+  it("keeps exact custom commands outside an old tab's unrelated whole-record settings save", () => {
+    const command = "  wrapper --profile work  ";
+    saveSettings(sanitizeSettings({ agentCommands: { codex: command } }));
+    expect(JSON.parse(records.get(main) ?? "{}")).not.toHaveProperty("agentCommands");
+    oldSaveSettings({ ...readOld(), terminalFontSize: 18 });
+    expect(loadSettings().agentCommands).toEqual({ codex: command });
+    expect(loadSettings().terminalFontSize).toBe(18);
+    saveSettings(sanitizeSettings({ ...loadSettings(), agentCommands: {} }));
+    expect(loadSettings().agentCommands).toEqual({});
+  });
+
   it("keeps the interface font in its own key, out of an old tab's whole-record save", () => {
     saveSettings(sanitizeSettings({ uiFontFamily: "system-ui" }));
     expect(JSON.parse(records.get(main) ?? "{}")).not.toHaveProperty("uiFontFamily");
@@ -1040,6 +1051,37 @@ it("keeps where web links open to a tab or the panel, a tab by default", () => {
     expect(sanitizeSettings({ claudeLaunchMode: bad }).claudeLaunchMode).toBe("default");
     expect(sanitizeSettings({ codexLaunchMode: bad }).codexLaunchMode).toBe("default");
   }
+});
+
+describe("custom agent commands", () => {
+  it("defaults to no overrides and shares saved commands without changing exact text", () => {
+    const command = "  env PROFILE=work /opt/bin/wrapper --name 'two words'  ";
+    expect(DEFAULT_SETTINGS.agentCommands).toEqual({});
+    expect(SETTING_SCOPE.agentCommands).toBe("shared");
+    expect(SHARED_SETTING_KEYS).toContain("agentCommands");
+    expect(sanitizeSettings({ agentCommands: { claude: command, "future-agent_2": "launch" } }).agentCommands)
+      .toEqual({ claude: command, "future-agent_2": "launch" });
+  });
+
+  it("omits invalid whole commands and unsafe kind keys, rather than trimming or truncating them", () => {
+    for (const value of [null, true, [], "claude"]) expect(sanitizeSettings({ agentCommands: value }).agentCommands).toEqual({});
+    for (const bad of [null, true, 12, "", "   ", "run\nnext", "run\rnext", "run\tnext", "run\u0000", "run\u007f", "run\u0085", "run next", "run next", "x".repeat(2001)]) {
+      expect(sanitizeSettings({ agentCommands: { claude: bad, codex: "codex" } }).agentCommands).toEqual({ codex: "codex" });
+    }
+    const commands = Object.fromEntries(["", "a/b", "x y", "UPPER", "-flag", "__proto__", "constructor", "prototype", "a".repeat(65)].map((kind) => [kind, "run"]));
+    expect(sanitizeSettings({ agentCommands: commands }).agentCommands).toEqual({});
+    expect(sanitizeSettings({ agentCommands: Object.create({ claude: "inherited" }) }).agentCommands).toEqual({});
+    expect(sanitizeSettings({ agentCommands: { codex: "x".repeat(2000) } }).agentCommands.codex).toHaveLength(2000);
+  });
+
+  it("explicitly excludes every command and kind from telemetry", () => {
+    const settings = sanitizeSettings({ agentCommands: { claude: "PRIVATE_PROFILE=private-wrapper run" } });
+    const snapshot = telemetrySettingsSnapshot(settings);
+    expect(snapshot).not.toHaveProperty("agentCommands");
+    expect(JSON.stringify(snapshot)).not.toContain("PRIVATE_PROFILE");
+    expect(telemetrySettings(snapshot)).toEqual(snapshot);
+    expect(snapshot).toEqual(telemetrySettingsSnapshot(sanitizeSettings({})));
+  });
 });
 
 describe("shared settings", () => {

@@ -545,12 +545,12 @@ export function createServer(
         // reconnaissance, not help. Nothing here changes who is let in (server/access.ts).
         const lan_exposure = access.level === "full" && lanExposed({ hostname, tokenConfigured: token !== "", gated: devices.gated })
           ? { host: hostname } : undefined;
-        if (url.searchParams.get("scope") === "bridge") return jsonResponse({ ok: true, auth, bridge_protocol: BRIDGE_PROTOCOL });
+        if (url.searchParams.get("scope") === "bridge") return jsonResponse({ ok: true, auth, bridge_protocol: BRIDGE_PROTOCOL, launch_command: process.platform !== "win32" });
         try {
           const info = await ping();
           // a forced answer (tests) and a runtime without the PTY sidecar are told the way a Windows herdr's own would be
           const herdr = attachableIdentity(info, sidecar);
-          return jsonResponse({ ok: true, herdr, auth, ...(lan_exposure ? { lan_exposure } : {}),
+          return jsonResponse({ ok: true, herdr, launch_command: process.platform !== "win32", auth, ...(lan_exposure ? { lan_exposure } : {}),
             web_ui: { boot_id: bootId, revision: process.env["OVIS_REVISION"] ?? null } });
         } catch (error) {
           return errorResponse(error);

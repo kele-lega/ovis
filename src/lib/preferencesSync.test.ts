@@ -17,6 +17,19 @@ describe("preferences sync", () => {
     expect(preferencesChange(known, local({ ...DEFAULT_SETTINGS, usageOrder: ["claude"] }, ["local:w1:p1"]))).toEqual({ settings: { usageOrder: ["claude"] } });
   });
 
+  it("shares exact new-agent commands and clearing them, without a corrective save on load", () => {
+    const agentCommands = { codex: "  wrapper --profile 'work profile'  " };
+    const saved = { ...DEFAULT_SETTINGS, agentCommands };
+    expect(preferencesChange(base(DEFAULT_SETTINGS, []), local(saved, []))).toEqual({ settings: { agentCommands } });
+    const taken = takePreferences(base(DEFAULT_SETTINGS, []), local(DEFAULT_SETTINGS, []), { revision: 1, settings: { agentCommands } }, null);
+    expect(taken.patch).toEqual({ agentCommands });
+    expect(preferencesChange(taken.base, local({ ...DEFAULT_SETTINGS, ...taken.patch }, []))).toBeNull();
+    expect(preferencesChange(base(saved, []), local(DEFAULT_SETTINGS, []))).toEqual({ settings: { agentCommands: {} } });
+    const invalid = takePreferences(base(saved, []), local(saved, []), { revision: 2, settings: { agentCommands: { codex: "bad\ncommand" } } }, null);
+    expect(invalid.patch).toEqual({});
+    expect(preferencesChange(invalid.base, local(saved, []))).toBeNull();
+  });
+
   it("while the server has held no pins, this browser's ride along with its first change, and alone they wait", () => {
     const unknown = base(DEFAULT_SETTINGS, null);
     expect(preferencesChange(unknown, local(DEFAULT_SETTINGS, ["local:w1:p1"]))).toBeNull();
