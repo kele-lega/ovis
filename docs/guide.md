@@ -269,6 +269,31 @@ or **Discard**. A message is never pasted over text typed in Claude Code's own i
 that box holds a draft the message stays in the list with the reason, and **Send now** delivers it
 once the draft is sent or cleared in the terminal.
 
+## Custom agent launch commands
+
+**Settings → Chat → New agents** saves an optional single-line launch command for each agent.
+Choose the agent, enter the complete command and press **Save**. **Clear** restores that agent's
+normal launch behavior. For example, a command may name an absolute executable path, a wrapper,
+or shell environment assignments. The selected kind still tells Ovis which agent to recognize
+and which transcript format to read; the command must actually start that agent.
+
+The command is typed unchanged into the new pane's shell on the selected PC and followed by
+Enter. Ovis does not append permission-mode, model, reasoning-effort flags or an initial prompt.
+Model and effort controls are hidden while a command is configured. A first message uses the
+normal pending-message queue after startup; it is not part of the shell command. The command is
+sent only once: if startup cannot be confirmed, check the retained pane before trying again.
+
+Commands are shared settings, so the same saved text runs on each selected PC, using that PC's
+shell, PATH and installed tools. A PC must explicitly support custom commands; an older bridge
+or Windows cannot launch one and never falls back to a different command. Update the target's
+Ovis or clear the command to use its normal launch path. Resuming a session is unchanged and
+never uses these commands.
+
+**Do not put API keys, tokens or other secrets in a launch command.** It is stored as plain text,
+shared with your browsers, and may appear in terminal scrollback and shell history. It is
+excluded from anonymous usage counts. Newlines, terminal control characters and commands over
+2,000 characters are refused; shell syntax is otherwise yours to choose.
+
 ## Subscription usage
 
 On a local desktop pane, the composer shows a compact read-only limit for the agent's provider:

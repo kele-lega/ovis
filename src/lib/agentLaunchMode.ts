@@ -8,7 +8,7 @@
  * reference documents the flag or argument (launchCapabilities); nothing is guessed for the rest.
  * The bridge checks them again by the same rules (shared/launch-rules.ts).
  */
-import { argumentText, CLAUDE_EFFORTS, CODEX_EFFORTS, MODEL_NAME } from "../../shared/launch-rules.ts";
+import { argumentText, CLAUDE_EFFORTS, CODEX_EFFORTS, launchCommandFault, MODEL_NAME } from "../../shared/launch-rules.ts";
 
 export { CLAUDE_EFFORTS, CODEX_EFFORTS };
 
@@ -129,9 +129,41 @@ export function launchArgs(kind: string, modes: { claudeLaunchMode: ClaudeLaunch
   return args.length === 0 ? undefined : args;
 }
 
-/** The `agent` of a create request: the kind and the arguments its mode and choices add; null for a plain shell. */
-export function launchAgent(kind: string, modes: { claudeLaunchMode: ClaudeLaunchMode; codexLaunchMode: CodexLaunchMode }, choices: LaunchChoices = {}): { kind: string; args?: string[] } | null {
+/** Settings shared by the workspace, tab and worktree launch paths. */
+export interface AgentLaunchSettings {
+  claudeLaunchMode: ClaudeLaunchMode;
+  codexLaunchMode: CodexLaunchMode;
+  /** A full command is opt-in, never synthesized from a kind's default executable. */
+  agentCommands?: Record<string, string>;
+}
+
+const AGENT_COMMAND_KIND = /^[a-z][a-z0-9_-]{0,63}$/;
+
+/** Stored commands are accepted whole or omitted, never trimmed or truncated into another command. */
+export function sanitizeAgentCommands(value: unknown): Record<string, string> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter(([kind, command]) =>
+    AGENT_COMMAND_KIND.test(kind) && kind !== "constructor" && kind !== "prototype" && launchCommandFault(command) === null));
+}
+
+/** Only an own, valid command overrides a kind's normal launch. */
+export function agentCommand(kind: string, modes: Pick<AgentLaunchSettings, "agentCommands">): string | null {
+  const commands = modes.agentCommands;
+  if (!kind || !commands || !Object.hasOwn(commands, kind)) return null;
+  const command = commands[kind];
+  return typeof command === "string" && launchCommandFault(command) === null ? command : null;
+}
+
+/** Both creation dialogs refuse before sending: an old bridge must never silently start its default. */
+export function launchCommandUnsupported(agent: { command?: string } | null, capable: boolean): boolean {
+  return agent?.command !== undefined && !capable;
+}
+
+/** The `agent` of a create request: an exclusive exact command, or the kind's usual arguments; null for a shell. */
+export function launchAgent(kind: string, modes: AgentLaunchSettings, choices: LaunchChoices = {}): { kind: string; command?: string; args?: string[] } | null {
   if (!kind) return null;
+  const command = agentCommand(kind, modes);
+  if (command !== null) return { kind, command };
   const args = launchArgs(kind, modes, choices);
   return args === undefined ? { kind } : { kind, args };
 }

@@ -625,11 +625,21 @@ The values are the ones in `src/styles.css`. Every token but `--fs-input` is `ca
   `diffStyle`: `unified` (default) or `split` for a repository diff (a phone draws one column
   whatever it says, and the viewer says so).
   These layout choices stay on this device, like chat width.
-- New agents (Settings → Integrations): `claudeLaunchMode` (`--permission-mode`: `acceptEdits`,
+- New agents (Settings → Chat): `claudeLaunchMode` (`--permission-mode`: `acceptEdits`,
   `auto`, `plan`, `dontAsk`, `bypassPermissions`) and `codexLaunchMode` (`readOnly`, `auto`,
   `fullAccess`, each a `--sandbox` and `--ask-for-approval` pair) become the `agent.args` the new
   workspace, tab and worktree dialogs send (src/lib/agentLaunchMode.ts). `default` (the default)
   adds nothing, so the agent's own configuration decides. Both are shared across devices.
+  `agentCommands` adds an explicit, per-kind full command, following Zed's external-agent
+  launch configuration (https://zed.dev/docs/ai/external-agents), adapted to Ovis's existing
+  Settings fields and tokens, not copied UI or code. Empty fields never enable an override;
+  Save accepts one nonblank line up to 2000 characters, unchanged, and Clear restores the
+  normal launch. Invalid drafts stay visible and unsaved. Commands are plaintext and shared,
+  with a no-secrets warning, excluded from telemetry and kept in `ovis:agent-commands` so old
+  tabs cannot erase them. A saved command exclusively replaces permission/model/effort flags,
+  disables that kind's mode control, and always queues its first prompt. Dialogs require this
+  PC's explicit `launch_command` capability and otherwise refuse without fallback. Resume
+  continues using its existing path and never reads commands.
   The viewer loads a Markdown file's first 256 KB through one bounded streaming reader, with abort
   on close or navigation and a 5 s deadline; any other text that fits 256 KB reads whole under the
   same budget, and a larger one reads up to 8 MB and 200 000 lines with a 30 s deadline

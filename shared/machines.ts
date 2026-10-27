@@ -98,8 +98,10 @@ export type MachineEvent = { type: "machines"; machines: Machine[] } | { type: "
   | { type: "herdr-sidebar"; agents: AgentRowTokens | null }
   /** finishes a browser of this server presented (shared/seen.ts): every record when the stream opens, then each change */
   | { type: "seen"; finishes: SeenFinish[] };
-export interface BridgeHealth { ok: true; auth: HealthAuth; bridge_protocol: number }
+export interface BridgeHealth { ok: true; auth: HealthAuth; bridge_protocol: number; launch_command?: boolean }
 export interface BridgeIdentity {
+  /** Whether this Ovis bridge accepts an exact shell command for a new agent. */
+  launch_command?: boolean;
   pid: number;
   managed_remote: boolean;
   bridge_protocol: number;

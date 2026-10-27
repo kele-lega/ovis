@@ -59,6 +59,10 @@ import { closeCodexDaemonSources } from "./codex-daemon.ts";
 import { MachineRelay } from "./machine-relay.ts";
 import { sameOrigin } from "./machine-security.ts";
 import { handlePluginRequest } from "./plugin-routes.ts";
+import { DIRECT_PROTOCOL, DIRECT_TICKET_PREFIX, directApiPath, type DirectClaims } from "../shared/direct.ts";
+import { DirectAuthority } from "./direct-auth.ts";
+import { DirectBroker, directConfig, directSubject, type DirectConfig } from "./direct-broker.ts";
+
 
 /** The gap between a composer message's text and its Enter (see submitText). */
 export const SUBMIT_DELAY_MS = 120;
@@ -99,6 +103,7 @@ const BUN_BODY_CEILING = 64 * 1024 * 1024;
 export interface ServerInstance {
   port: number;
   hostname: string;
+  directPort?: number;
   statusReady: Promise<void>;
   focusReady: Promise<void>;
   alertsSettled: () => Promise<void>;
@@ -115,6 +120,10 @@ export function createServer(
     port?: number;
     hostname?: string;
     token?: string;
+    /** Optional ticket-only ingress; expose behind TLS, never expose the normal bridge credential. */
+    directListener?: { hostname: string; port: number };
+    /** Administrator-configured browser endpoints and explicitly trusted Ovis page origins. */
+    direct?: DirectConfig;
     /** where VAPID keys and push subscriptions persist; tests pass a temp dir */
     stateDir?: string;
     /**
@@ -206,6 +215,13 @@ export function createServer(
   const bootId = process.env["OVIS_BOOT_ID"] || randomUUID();
   const orderSequence = new OrderSequence(bootId);
   const hostname = options.hostname ?? process.env["HOST"] ?? "127.0.0.1";
+  const configuredDirect = options.direct ?? directConfig();
+  const directListener = options.directListener ?? (process.env["OVIS_DIRECT_PORT"] ? {
+    hostname: process.env["OVIS_DIRECT_HOST"] || "127.0.0.1", port: Number(process.env["OVIS_DIRECT_PORT"]),
+  } : undefined);
+  if (directListener && (!Number.isInteger(directListener.port) || directListener.port < 0 || directListener.port > 65535)) throw new Error("Invalid OVIS_DIRECT_PORT");
+  const directAuthority = new DirectAuthority();
+
   /** Empty token = gate disabled; every route then behaves exactly as it did before auth existed. */
   const token = options.token ?? process.env["OVIS_TOKEN"] ?? "";
   /** paired devices (server/devices.ts) and the PC's Tailscale login: the two ways in besides the token and this PC itself */
@@ -248,6 +264,10 @@ export function createServer(
   // would count against the read's own 2.5 s limit, and a read cut short leaves the owner unknown for 5 minutes
   identityOf(false, null);
   const bridgeToken = randomBytes(32).toString("hex");
+  const directBroker = machines ? new DirectBroker(machines, configuredDirect) : null;
+  const directTimer = setInterval(() => directAuthority.prune(), 1000);
+  directTimer.unref();
+
 
   type PortalStartup = { ok: true } | { ok: false; error: unknown };
   let settlePortalStartup!: (result: PortalStartup) => void;
@@ -262,13 +282,13 @@ export function createServer(
 
   const envPort = process.env["PORT"];
   const clientConnectionLog = new ClientConnectionLog();
-  const server = Bun.serve<SocketData>({
-    port: options.port ?? (envPort ? Number(envPort) : DEFAULT_PORT),
-    hostname,
-    maxRequestBodySize: BUN_BODY_CEILING,
+  const requestLog = new RequestLog(stateDir);
+  type Ingress = { requestIP(request: Request): { address: string } | null; timeout(request: Request, seconds: number): void; port: number | undefined; upgrade(request: Request, options: { headers: Headers; data: SocketData }): boolean };
+  async function dispatch(request: Request, bunServer: Ingress, directOnly = false): Promise<Response | undefined> {
+      let directClaims: DirectClaims | null = null;
+      const cors = directOnly ? directAuthority.corsHeaders(request.headers.get("origin")) : null;
+      const response = await requestLog.handle(request, async (headers) => {
 
-    async fetch(request, bunServer) {
-      return requestLog.handle(request, async (headers) => {
       const startup = portalStartupResult ?? await portalStartup;
       if (!startup.ok) {
         setRequestRoute("startup");
@@ -278,7 +298,36 @@ export function createServer(
       return compressResponse(request, await (async (): Promise<Response | undefined> => {
       const url = new URL(request.url);
       let { pathname } = url;
-      const bridgeAuthorized = isAuthenticated(request, bridgeToken);
+      if (directOnly) {
+        if (pathname !== "/ws" && !directApiPath(pathname)) return jsonResponse({ error: { code: "not_found", message: "Direct ingress serves session data only" } }, 404);
+        if (request.method === "OPTIONS") {
+          if (!cors || !["GET", "HEAD", "POST", "PATCH", "DELETE", "PUT"].includes(request.headers.get("access-control-request-method") ?? "")) return new Response(null, { status: 403 });
+          const allowed = new Set((cors.get("access-control-allow-headers") ?? "").toLowerCase().split(",").map((header) => header.trim()));
+          if ((request.headers.get("access-control-request-headers") ?? "").split(",").some((header) => header.trim() && !allowed.has(header.trim().toLowerCase()))) return new Response(null, { status: 403 });
+          return new Response(null, { status: 204, headers: cors });
+        }
+        const protocols = (request.headers.get("sec-websocket-protocol") ?? "").split(",").map((part) => part.trim());
+        const tickets = protocols.filter((part) => part.startsWith(DIRECT_TICKET_PREFIX));
+        const credential = pathname === "/ws" ? (tickets.length === 1 && protocols.includes(DIRECT_PROTOCOL) ? tickets[0]!.slice(DIRECT_TICKET_PREFIX.length) : "")
+          : (request.headers.get("authorization") ?? "").replace(/^Bearer /, "");
+        directClaims = directAuthority.verify(credential, pathname === "/ws" ? "ws" : "http", request.headers.get("origin"));
+        if (!directClaims || (pathname === "/ws" && url.searchParams.has("machine_id"))) return unauthorizedJson();
+      }
+      const bridgeAuthorized = !directOnly && isAuthenticated(request, bridgeToken);
+      if (!directOnly && pathname === "/api/direct/trust") {
+        setRequestRoute("/api/direct/trust");
+        // Only the existing SSH bridge credential, never a browser cookie or an open LAN, may delegate.
+        if (!directListener || !(bridgeAuthorized || (token !== "" && bearerMatches(request, token)))) return unauthorizedJson();
+        try {
+          const body = await request.json() as Record<string, unknown>;
+          if (request.method === "POST") directAuthority.register(body);
+          else if (request.method === "PATCH" && typeof body.issuer === "string" && typeof body.subject === "string") directAuthority.revoke(body.issuer, body.subject);
+          else if (request.method === "DELETE" && typeof body.issuer === "string") directAuthority.remove(body.issuer);
+          else return badRequest("invalid_direct_request", "Use POST, PATCH or DELETE with a valid direct trust request");
+          return new Response(null, { status: 204 });
+        } catch { return badRequest("invalid_direct_request", "Invalid direct trust request"); }
+      }
+
       const bridgePath = pathname === "/api/bridge" || pathname === "/api/session" || pathname === SESSION_HISTORY_PATH || pathname === SESSION_RESUME_PATH || pathname === "/api/agents" || pathname === "/api/agent/rename" || pathname === "/api/agent/commands" || pathname === "/api/integrations" || pathname === "/api/plugins/actions" || pathname === "/api/plugin/action" || pathname.startsWith("/api/pane/") || pathname.startsWith("/api/workspace/") || pathname.startsWith("/api/worktree/") || pathname.startsWith("/api/tab/") || pathname === "/api/layout/ratio" || pathname.startsWith("/api/fs/") || pathname === "/ws";
       const ip = bunServer.requestIP(request);
       const loopback = ip !== null && isLoopbackAddress(ip.address);
@@ -289,7 +338,7 @@ export function createServer(
       const requestHost = request.headers.get("host");
       // the guessing budget of the address that asks (auth.ts): a token presented while it waits is not compared
       const client = authClient(ip?.address ?? null, request.headers);
-      const presented = presentedToken(request, token, client);
+      const presented = directClaims ? "none" : presentedToken(request, token, client);
       // counted at once, before any await below lets a concurrent guess pass the same check. Every
       // wrong token counts, a paired watch device's too (a right one would upgrade it to drive);
       // the connection server's own bridge token does not
@@ -313,7 +362,7 @@ export function createServer(
         tokenConfigured: token !== "",
         gated: devices.gated,
       });
-      const authenticated = access.level === "full" || (bridgePath && bridgeAuthorized);
+      const authenticated = directClaims !== null || access.level === "full" || (bridgePath && bridgeAuthorized);
 
       if (requiresAuth(pathname) && !authenticated) {
         setRequestRoute("auth-refusal");
@@ -323,9 +372,9 @@ export function createServer(
         return pathname === "/ws" ? new Response("unauthorized", { status: 401 }) : unauthorizedJson(access.level === "none" ? access.reason : "token_required");
       }
 
-      const readOnly = access.level === "full" && access.role === "watch";
+      const readOnly = directClaims ? directClaims.role === "observe" : access.level === "full" && access.role === "watch";
       const mutating = !["GET", "HEAD", "OPTIONS"].includes(request.method);
-      if (pathname.startsWith("/api/") && mutating && !sameOrigin(request)) {
+      if (pathname.startsWith("/api/") && mutating && !directClaims && !sameOrigin(request)) {
         setRequestRoute("origin-refusal");
         return jsonResponse({ error: { code: "invalid_origin", message: "Use controls from this app" } }, 403);
       }
@@ -344,7 +393,7 @@ export function createServer(
       // protection: a watch device's subscription is delivered every status change anyway.
       // /api/push/test stays with a session that can drive only because it is a mutation.
       // A watch device may report its own connection metadata, never terminal input or file data.
-      const ownPreferences = pathname === "/api/auth" || pathname === "/api/push/subscribe" || pathname === "/api/connection-diagnostics";
+      const ownPreferences = pathname === "/api/auth" || pathname === "/api/push/subscribe" || pathname === "/api/connection-diagnostics" || /^\/api\/machines\/[a-zA-Z0-9_-]+\/direct-access$/.test(pathname);
       // a repository's changes are file contents too: the patch of a credential file is that file
       const repositoryDiff = /^\/api\/(?:machines\/[^/]+\/)?workspace\/diff\//.test(pathname);
       // earlier sessions carry their first prompts
@@ -369,6 +418,20 @@ export function createServer(
         if (token === "" && !bridgeAuthorized) return unauthorizedJson();
         try { return jsonResponse(await bridgeIdentity(sidecar)); } catch (error) { return errorResponse(error); }
       }
+      const directAccess = /^\/api\/machines\/([a-zA-Z0-9_-]+)\/direct-access$/.exec(pathname);
+      if (directAccess) {
+        setRequestRoute("/api/machines/:machine_id/direct-access");
+        if (request.method !== "POST") return badRequest("method_not_allowed", "Use POST");
+        if (!sameOrigin(request) || request.headers.get("x-herdr-machine") !== "1") return new Response(null, { status: 403 });
+        const origin = request.headers.get("origin");
+        if (!origin || !directBroker) return jsonResponse({ error: { code: "direct_unavailable", message: "Direct access is not configured" } }, 404);
+        const deviceId = access.level === "full" ? access.device?.id : undefined;
+        const subject = directSubject(deviceId, request.headers.get("cookie") ?? request.headers.get("authorization") ?? client ?? "unknown");
+        try {
+          const credential = await directBroker.issue(directAccess[1]!, origin, subject, readOnly, deviceId ? (close) => devices.onRevoke(deviceId, close) : undefined);
+          return credential ? jsonResponse(credential, 200, { "cache-control": "no-store" }) : jsonResponse({ error: { code: "direct_unavailable", message: "Direct access is not configured for this PC and page origin" } }, 404);
+        } catch { return jsonResponse({ error: { code: "direct_unavailable", message: "Direct bridge could not be authorized" } }, 503); }
+      }
       if (pathname === "/api/machines" || pathname.startsWith("/api/machines/")) {
         if (!machines) return jsonResponse({ error: { code: "bridge_only", message: "Manage PCs on the connection server" } }, 404);
         // /local aliases preserve every existing endpoint without a self-proxy.
@@ -389,8 +452,8 @@ export function createServer(
       }
       if (pathname === "/ws") {
         setRequestRoute(pathname);
-        if (!sameOrigin(request)) return new Response("invalid origin", { status: 403 });
-        const deviceId = access.level === "full" ? access.device?.id : undefined;
+        if (!directClaims && !sameOrigin(request)) return new Response("invalid origin", { status: 403 });
+        const deviceId = !directClaims && access.level === "full" ? access.device?.id : undefined;
         const machineId = url.searchParams.get("machine_id");
         if (machineId && machineId !== "local") {
           if (access.level === "none") return unauthorizedJson(access.reason);
@@ -405,7 +468,11 @@ export function createServer(
           } catch { relay?.close(); return new Response("remote websocket unavailable", { status: 502 }); }
           return new Response("websocket upgrade required", { status: 426 });
         }
-        const upgraded = bunServer.upgrade(request, { headers, data: connectionData({ deviceId, readOnly }) });
+        const claims = directClaims;
+        if (claims) headers.set("sec-websocket-protocol", DIRECT_PROTOCOL);
+        const upgraded = bunServer.upgrade(request, { headers, data: connectionData({ deviceId, readOnly,
+          ...(claims ? { directRevoke: (close: () => void) => directAuthority.onRevoke(claims, close) } : {}),
+        }) });
         if (upgraded) return undefined;
         return new Response("websocket upgrade required", { status: 426 });
       }
@@ -416,6 +483,7 @@ export function createServer(
         // a browser can hold the token and a device cookie at once, and its renders are then the
         // client's: signing out ends both kinds
         if (request.method === "DELETE" && authenticated) {
+          directBroker?.revoke(directSubject(access.level === "full" ? access.device?.id : undefined, request.headers.get("cookie") ?? request.headers.get("authorization") ?? client ?? "unknown"));
           if (pairedDevice !== null) forgetPageMedia({ device: pairedDevice.id });
           forgetPageMedia({ client });
         }
@@ -477,12 +545,12 @@ export function createServer(
         // reconnaissance, not help. Nothing here changes who is let in (server/access.ts).
         const lan_exposure = access.level === "full" && lanExposed({ hostname, tokenConfigured: token !== "", gated: devices.gated })
           ? { host: hostname } : undefined;
-        if (url.searchParams.get("scope") === "bridge") return jsonResponse({ ok: true, auth, bridge_protocol: BRIDGE_PROTOCOL });
+        if (url.searchParams.get("scope") === "bridge") return jsonResponse({ ok: true, auth, bridge_protocol: BRIDGE_PROTOCOL, launch_command: process.platform !== "win32" });
         try {
           const info = await ping();
           // a forced answer (tests) and a runtime without the PTY sidecar are told the way a Windows herdr's own would be
           const herdr = attachableIdentity(info, sidecar);
-          return jsonResponse({ ok: true, herdr, auth, ...(lan_exposure ? { lan_exposure } : {}),
+          return jsonResponse({ ok: true, herdr, launch_command: process.platform !== "win32", auth, ...(lan_exposure ? { lan_exposure } : {}),
             web_ui: { boot_id: bootId, revision: process.env["OVIS_REVISION"] ?? null } });
         } catch (error) {
           return errorResponse(error);
@@ -515,7 +583,7 @@ export function createServer(
       const integrationsResponse = await handleIntegrationsRequest(request, pathname);
       if (integrationsResponse) return integrationsResponse;
 
-      const filesResponse = await handleFileRequest(request, url, pathname, { bridgeAuthorized, requestHost, forwarded, client, access });
+      const filesResponse = await handleFileRequest(request, url, pathname, { bridgeAuthorized: bridgeAuthorized || directClaims !== null, directAuthorized: directClaims !== null, requestHost, forwarded, client, access });
       if (filesResponse) return filesResponse;
 
       const workspaceResponse = await handleWorkspaceRequest(request, url, pathname, bunServer, broadcastAll, queueFirstMessage, () => {
@@ -570,15 +638,31 @@ export function createServer(
 
       // static client - public even when the API is gated, so the login UI can load
       setRequestRoute("static");
-      return serveStatic(pathname, request.headers.get("accept-encoding"), requestOrigin(request));
+      return serveStatic(pathname, request.headers.get("accept-encoding"), requestOrigin(request), Object.values(configuredDirect.endpoints));
       })());
       });
-    },
-
-    websocket: core.websocket,
+      if (response && cors) for (const [name, value] of cors) {
+        if (name.toLowerCase() === "vary") response.headers.append(name, value);
+        else response.headers.set(name, value);
+      }
+      return response;
+  }
+  const server = Bun.serve<SocketData>({
+    port: options.port ?? (envPort ? Number(envPort) : DEFAULT_PORT), hostname, maxRequestBodySize: BUN_BODY_CEILING,
+    fetch: (request, bunServer) => dispatch(request, bunServer), websocket: core.websocket,
   });
+  let directServer: ReturnType<typeof Bun.serve<SocketData>> | undefined;
+  try {
+    if (directListener) directServer = Bun.serve<SocketData>({
+      ...directListener, maxRequestBodySize: BUN_BODY_CEILING,
+      fetch: (request, bunServer) => dispatch(request, bunServer, true), websocket: core.websocket,
+    });
+  } catch (error) {
+    directBroker?.stop(); clearInterval(directTimer); directAuthority.stop();
+    core.stop(() => clearInterval(draftTimer)); server.stop(true); requestLog.close();
+    throw error;
+  }
 
-  const requestLog = new RequestLog(stateDir);
 
   if (options.portal) {
     // a Portal that ends on its own is started again only while this server's own token and serve-only allow it
@@ -604,6 +688,7 @@ export function createServer(
   return {
     port: server.port ?? 0,
     hostname,
+    ...(directServer ? { directPort: directServer.port ?? 0 } : {}),
     // both subscriptions live: a test may create a workspace and wait for its session-changed
     statusReady: Promise.all([collector.ready, collector.structureReady]).then(() => undefined),
     focusReady: collector.focusReady,
@@ -611,6 +696,10 @@ export function createServer(
     queueFirstMessage,
     alertsSettled: () => push.settled(),
     stop: () => {
+      directBroker?.stop();
+      clearInterval(directTimer);
+      directAuthority.stop();
+      directServer?.stop(true);
       settlePortalStartup({ ok: false, error: new Error("Server stopped before Portal startup cleanup completed") });
       core.stop(() => {
         clearInterval(draftTimer);

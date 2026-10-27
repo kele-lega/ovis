@@ -7,8 +7,8 @@
  * one send: nothing is typed by this page afterwards.
  */
 import type { CreateTabRequest, CreateWorkspaceRequest, WorkspaceCreated } from "../../shared/protocol.ts";
-import type { ClaudeLaunchMode, CodexLaunchMode } from "./agentLaunchMode.ts";
-import { firstPromptDelivery, launchAgent, launchChoiceFault } from "./agentLaunchMode.ts";
+import type { AgentLaunchSettings } from "./agentLaunchMode.ts";
+import { agentCommand, firstPromptDelivery, launchAgent, launchChoiceFault } from "./agentLaunchMode.ts";
 
 export interface NewSessionFields {
   /** the agent kind; "" is a plain shell */
@@ -21,15 +21,18 @@ export interface NewSessionFields {
 export type FirstPrompt = { text: string; via: "positional" | "pending" };
 
 export type NewSessionLaunch =
-  | { agent: { kind: string; args?: string[] } | null; prompt: FirstPrompt | null }
+  | { agent: ReturnType<typeof launchAgent>; prompt: FirstPrompt | null }
   | { fault: "model" | "effort" | "prompt" };
 
 /** The create request's agent for the fields, or the first choice the launch does not take. */
-export function newSessionLaunch(fields: NewSessionFields, modes: { claudeLaunchMode: ClaudeLaunchMode; codexLaunchMode: CodexLaunchMode }): NewSessionLaunch {
-  const fault = launchChoiceFault(fields.agent, fields);
+export function newSessionLaunch(fields: NewSessionFields, modes: AgentLaunchSettings): NewSessionLaunch {
+  const command = agentCommand(fields.agent, modes);
+  // A full command owns every launch option. Stale hidden model/effort choices cannot refuse it,
+  // and its parser is unknown: even Codex's first message always uses the bridge's pending path.
+  const fault = command === null ? launchChoiceFault(fields.agent, fields) : null;
   if (fault !== null) return { fault };
-  const via = firstPromptDelivery(fields.agent, fields.prompt);
   const text = fields.prompt.trim();
+  const via = command !== null ? (text ? "pending" : null) : firstPromptDelivery(fields.agent, fields.prompt);
   return {
     agent: launchAgent(fields.agent, modes, { model: fields.model, effort: fields.effort, prompt: via === "positional" ? text : "" }),
     prompt: via === null ? null : { text, via },

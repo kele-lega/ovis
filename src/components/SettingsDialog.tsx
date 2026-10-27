@@ -11,7 +11,7 @@ import { MENU_SHORTCUT_KEYS, recordShortcut, shortcutMatchesQuery } from "../lib
 import { exactChordRisk, isReservedShortcutKey, parseExactChord } from "../lib/shortcutBindings.ts";
 import { WEB_LINK_TARGETS } from "../lib/webPanel.ts";
 import { FILE_OPEN_TARGETS } from "../lib/filePresentation.ts";
-import { CLAUDE_LAUNCH_MODES, CODEX_LAUNCH_MODES, type ClaudeLaunchMode, type CodexLaunchMode } from "../lib/agentLaunchMode.ts";
+import { LaunchSettings } from "./LaunchSettings.tsx";
 import { CHAT_FONT_MAX, CHAT_FONT_MIN, CHAT_WIDTHS, chatFontSize, DEFAULT_SETTINGS, DIFF_STYLES, MARKDOWN_WIDTHS, QUICK_REPLIES_MAX, QUICK_REPLY_MAX_CHARS, TERMINAL_FONT_MAX, TERMINAL_FONT_MIN, TERMINAL_WHEEL_SPEED_MAX, TERMINAL_WHEEL_SPEED_MIN, DICTATION_LANGUAGES, VOICE_BUTTONS, useSettings, forgetPaneViews, uiFontSize, type DictationLanguage, type VoiceButton } from "../lib/settings.ts";
 import { pickTheme, rowFor, THEME_IDS, type Mode, type ThemeId } from "../lib/themes.ts";
 import { LANGUAGE_NAMES, LANGUAGE_SETTINGS, useLocale, useT } from "../lib/i18n.ts";
@@ -461,6 +461,8 @@ function ChatPage() {
         </div>
       </SettingsGroup>
 
+      <LaunchSettings />
+
       <SettingsGroup title={t("File viewer")}>
         <SettingsRow label={t("Wrap long lines")}>
           <Toggle label={t("Wrap long lines")} checked={settings.wrapCode} onChange={(wrapCode) => update({ wrapCode })} />
@@ -666,40 +668,7 @@ function VoicePage() {
  * hooks or settings, which this app leaves to the user, so a row shows the command to run instead.
  */
 function IntegrationsPage() {
-  return (
-    <>
-      <LaunchModesGroup />
-      <IntegrationsList />
-    </>
-  );
-}
-
-function claudeModeName(mode: ClaudeLaunchMode, t: ReturnType<typeof useT>): string {
-  return mode === "acceptEdits" ? t("Accept edits") : mode === "auto" ? t("Auto") : mode === "plan" ? t("Plan")
-    : mode === "dontAsk" ? t("Don't ask") : mode === "bypassPermissions" ? t("Bypass permissions") : t("Agent default");
-}
-function codexModeName(mode: CodexLaunchMode, t: ReturnType<typeof useT>): string {
-  return mode === "readOnly" ? t("Read only") : mode === "auto" ? t("Auto") : mode === "fullAccess" ? t("Full access") : t("Agent default");
-}
-
-/** The mode the new workspace, tab and worktree dialogs start Claude Code and Codex in (lib/agentLaunchMode.ts). */
-function LaunchModesGroup() {
-  const { settings, update } = useSettings();
-  const t = useT();
-  return (
-    <SettingsGroup title={t("New agents")} section="launch-modes" note={t("Applies to agents started from New workspace, New tab and New worktree. Agent default adds no flag, so the agent's own configuration decides.")}>
-      <SettingsRow label="Claude Code" description={t("Permission mode")} htmlFor="settings-claude-launch-mode">
-        <SettingsSelect id="settings-claude-launch-mode" value={settings.claudeLaunchMode} onChange={(event) => update({ claudeLaunchMode: event.target.value as ClaudeLaunchMode })}>
-          {CLAUDE_LAUNCH_MODES.map((mode) => <option key={mode} value={mode}>{claudeModeName(mode, t)}</option>)}
-        </SettingsSelect>
-      </SettingsRow>
-      <SettingsRow label="Codex" description={t("Sandbox and approvals")} htmlFor="settings-codex-launch-mode">
-        <SettingsSelect id="settings-codex-launch-mode" value={settings.codexLaunchMode} onChange={(event) => update({ codexLaunchMode: event.target.value as CodexLaunchMode })}>
-          {CODEX_LAUNCH_MODES.map((mode) => <option key={mode} value={mode}>{codexModeName(mode, t)}</option>)}
-        </SettingsSelect>
-      </SettingsRow>
-    </SettingsGroup>
-  );
+  return <IntegrationsList />;
 }
 
 function IntegrationsList() {

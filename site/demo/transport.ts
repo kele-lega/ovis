@@ -20,7 +20,7 @@ import { normalizeThemeChange, sharedPreferencesBody, type SharedPreferences } f
 import { VOICE_DEFAULTS, type VoiceStatus } from "../../shared/voice.ts";
 import { isAgentName } from "../../shared/agent-name.ts";
 import { skillSyntax } from "../../shared/skill-syntax.ts";
-import { firstMessageFault } from "../../shared/launch-rules.ts";
+import { firstMessageFault, launchArgsFault, launchCommandFault } from "../../shared/launch-rules.ts";
 import { insertTextProblem } from "../../shared/terminal-insert.ts";
 import { neighborPane } from "../../src/lib/layoutMap.ts";
 import { closeLayoutPane, resizeLayout, setLayoutSplitRatio, splitLayout, swapLayoutPanes } from "../../src/lib/layoutTree.ts";
@@ -1038,6 +1038,21 @@ function demoPortal(): PortalStatus {
   return NO_PORTAL;
 }
 
+/** The demo validates launches like the bridge, but never executes their shell commands. */
+function demoAgentFault(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) return "agent.kind is required";
+  const agent = value as { kind?: unknown; name?: unknown; args?: unknown; command?: unknown };
+  if (typeof agent.kind !== "string" || agent.kind.length === 0) return "agent.kind is required";
+  if (agent.name !== undefined && typeof agent.name !== "string") return "agent.name must be a string";
+  if (agent.command !== undefined) {
+    if (agent.args !== undefined) return "agent.command and agent.args cannot be used together";
+    return launchCommandFault(agent.command);
+  }
+  if (agent.args !== undefined && (!Array.isArray(agent.args) || !agent.args.every((arg) => typeof arg === "string"))) return "agent.args must be an array of strings";
+  return agent.args === undefined ? null : launchArgsFault(agent.kind, agent.args as string[]);
+}
+
 async function route(url: URL, method: string, init: RequestInit | undefined, input: RequestInfo | URL): Promise<Response> {
   const path = url.pathname;
   const query = url.searchParams;
@@ -1045,8 +1060,8 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
 
   if (path === "/api/health") {
     const auth = { required: false, authenticated: true };
-    if (query.get("scope") === "bridge") return json({ ok: true, auth, bridge_protocol: 1 });
-    return json({ ok: true, herdr: { version: "0.9.0", protocol: 22, terminal_attach: true }, auth, web_ui: { boot_id: orderOf(local.id).epoch, revision: null } });
+    if (query.get("scope") === "bridge") return json({ ok: true, auth, bridge_protocol: 1, launch_command: true });
+    return json({ ok: true, launch_command: true, herdr: { version: "0.9.0", protocol: 22, terminal_attach: true }, auth, web_ui: { boot_id: orderOf(local.id).epoch, revision: null } });
   }
   if (path === "/api/machines") {
     const asked = query.getAll("verify_source_boot");
@@ -1058,7 +1073,7 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     return json({ machines: roster });
   }
   if (path === "/api/session") return json({ snapshot: readSnapshot(local) });
-  if (path === "/api/agents") return json(agentsFixture);
+  if (path === "/api/agents") return json({ ...agentsFixture, launch_command: true });
   if (path === "/api/integrations") return json({ integrations: integrationsFixture } satisfies IntegrationsResponse);
   if (path === "/api/updates") return json({ managed: false, auto_update: false, phase: "idle", current_revision: null, latest_revision: null, current_version: __APP_VERSION__, latest_version: null, available: false, checked_at: null, blocked_reason: null, error: null }, 200, { "cache-control": "no-store" });
   if (path === "/api/updates/notes") return json({ revision: null, releases: [], omitted: 0 }, 200, { "cache-control": "no-store" });
@@ -1182,11 +1197,8 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     if (creating && !branch) return error("missing_branch", "branch is required", 400);
     if (!creating && !branch && !checkoutPath) return error("missing_target", "path or branch is required", 400);
     const agent = creating ? body["agent"] as { kind?: unknown; name?: unknown; args?: unknown } | null | undefined : null;
-    if (agent !== undefined && agent !== null && (typeof agent !== "object" || typeof agent.kind !== "string" || agent.kind.length === 0
-      || (agent.name !== undefined && typeof agent.name !== "string")
-      || (agent.args !== undefined && (!Array.isArray(agent.args) || !agent.args.every((arg) => typeof arg === "string"))))) {
-      return error("invalid_agent", "agent.kind is required; agent.name must be a string and agent.args must be an array of strings", 400);
-    }
+    const agentFault = demoAgentFault(body["agent"]);
+    if (agentFault !== null && creating) return error("invalid_agent", agentFault, 400);
     let checkout: Omit<WorktreeEntry, "open_workspace_id"> | undefined;
     if (creating) {
       const targetPath = checkoutPath ?? `/home/demo/.herdr/worktrees/${repo.repoName}/${branch}`;
@@ -1660,6 +1672,8 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
   }
   if (path === "/api/workspace/create") {
     const body = await bodyOf(init, input);
+    const agentFault = demoAgentFault(body["agent"]);
+    if (agentFault !== null) return error("invalid_agent", agentFault, 400);
     const agent = (body["agent"] as { kind?: string } | null | undefined)?.kind ?? null;
     const firstFault = firstMessageFault(body["first_message"], agent);
     if (firstFault !== null) return error("invalid_first_message", firstFault, 400);
@@ -1672,6 +1686,8 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
   }
   if (path === "/api/tab/create") {
     const body = await bodyOf(init, input);
+    const agentFault = demoAgentFault(body["agent"]);
+    if (agentFault !== null) return error("invalid_agent", agentFault, 400);
     const snap = snapshot();
     const workspace = snap.workspaces.find((w) => w.workspace_id === body["workspace_id"]);
     if (!workspace) return error("not_found", "no such workspace", 404);

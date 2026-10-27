@@ -67,6 +67,11 @@ const DEFAULT_SETTINGS: MachineSettings = { auto_update_bridges: true };
 export const SOURCE_CHECK_INTERVAL_MS = 1000;
 /** the shortest time between the starts of two tries to connect that a request cuts short (retryNow) */
 export const DEMANDED_RETRY_INTERVAL_MS = 5000;
+
+export function localMachineName(value = process.env["OVIS_LOCAL_NAME"]): string {
+  const name = value?.trim();
+  return name && name.length <= 128 && !/[\x00-\x1f\x7f]/.test(name) ? name : hostname();
+}
 interface SourceCheck { token: number; promise: Promise<string | null>; abort: AbortController }
 /** a verify_source_boot answer: the proved boot id, or why there is none */
 export type SourceProof = { boot_id: string } | { refused: "unknown" | "interval" | "unverified" };
@@ -189,7 +194,7 @@ export class MachineManager {
   private profileState: HerdrProfileState;
   private statePath: string;
   private sshDir: string;
-  private local: Machine = { id: LOCAL_MACHINE, name: hostname(), kind: "local", enabled: true, state: "connecting", error: null, snapshot: null };
+  private local: Machine = { id: LOCAL_MACHINE, name: localMachineName(), kind: "local", enabled: true, state: "connecting", error: null, snapshot: null };
   private localDiagnostics = new ConnectionDiagnostics("machine.local");
   private remoteDiagnostics = new ConnectionDiagnostics("machine.remote");
   private discoveryTimer?: ReturnType<typeof setTimeout>;

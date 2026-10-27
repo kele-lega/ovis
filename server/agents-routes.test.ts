@@ -44,6 +44,7 @@ describe("GET /api/agents", () => {
     const response = await fetch(url("/api/agents"));
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
+      launch_command: process.platform !== "win32",
       agents: [
         { kind: "claude", label: "Claude Code", installed: false },
         { kind: "codex", label: "Codex", installed: true },
