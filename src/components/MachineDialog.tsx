@@ -7,6 +7,8 @@ import { hostKeyFingerprints } from "../lib/hostKey.ts";
 import { sshOutputParts } from "../lib/sshOutput.ts";
 import { useAnnouncedText } from "../lib/useAnnouncedText.ts";
 import { machineErrorText } from "../lib/userError.ts";
+import { tailnetDestination } from "../lib/tailnetSetup.ts";
+import { TailnetSetupError, TailnetSetupHelp } from "./TailnetSetupHelp.tsx";
 import { BridgeUpdateProgress } from "./MachineSidebar.tsx";
 import "./Machines.css";
 import { useT } from "../lib/i18n.ts";
@@ -15,9 +17,11 @@ export function MachineDialog({ machine, initial, updateRemote = false, onClose,
   const t = useT();
   const dialog = useRef<HTMLDialogElement>(null);
   const destinationField = useRef<HTMLInputElement>(null);
+  const tailnet = !machine ? initial : undefined;
+  const [username, setUsername] = useState("");
   const [destination, setDestination] = useState(machine?.target?.destination ?? initial?.destination ?? "");
   const [name, setName] = useState(machine?.name ?? initial?.name ?? "");
-  const [port, setPort] = useState(String(machine?.target?.port ?? ""));
+  const [port, setPort] = useState(String(machine?.target?.port ?? (tailnet ? 22 : "")));
   const [key, setKey] = useState(machine?.target?.identity_file ?? "");
   const [session, setSession] = useState(machine?.target?.session ?? "");
   const [job, setJob] = useState<SetupJob | null>(null);
@@ -49,12 +53,18 @@ export function MachineDialog({ machine, initial, updateRemote = false, onClose,
     return () => { cancelled = true; window.clearTimeout(timer); };
   }, [job?.id, finished]);
   useEffect(() => setSecret(""), [job?.challenge?.id]);
+  // Expanded prerequisites can be longer than a phone screen; bring the failed setup's hint into view.
+  useEffect(() => {
+    if (tailnet && (job?.phase === "failed" || error)) dialog.current?.querySelector<HTMLElement>('[role="alert"]')?.scrollIntoView({ block: "nearest" });
+  }, [tailnet, job?.phase, error]);
 
   const begin = async () => {
     if (pending) return;
+    const target = tailnet ? tailnetDestination(username, tailnet.destination) : destination.trim();
+    if (target === null) { destinationField.current?.reportValidity(); return; }
     setError(null); setPending(true);
     // a PC saved in herdr keeps its catalog name, which the server does not read from here
-    try { const next = await startMachineSetup({ destination: destination.trim(), ...(name.trim() && !machine?.herdr_profile_id ? { name: name.trim() } : {}), ...(port ? { port: Number(port) } : {}), ...(key.trim() ? { identity_file: key.trim() } : {}), ...(session.trim() ? { session: session.trim() } : {}), ...(machine ? { machine_id: machine.id } : {}), ...(needsBridgeUpdate || updateRemote ? { update_remote: true } : {}) });
+    try { const next = await startMachineSetup({ destination: target, ...(name.trim() && !machine?.herdr_profile_id ? { name: name.trim() } : {}), ...(port ? { port: Number(port) } : {}), ...(key.trim() ? { identity_file: key.trim() } : {}), ...(session.trim() ? { session: session.trim() } : {}), ...(machine ? { machine_id: machine.id } : {}), ...(needsBridgeUpdate || updateRemote ? { update_remote: true } : {}) });
       if (mounted.current) setJob(next);
       else if (!["connected", "failed", "cancelled", "installing", "starting"].includes(next.phase)) await answerMachineSetup(next.id, { action: "cancel" });
     }
@@ -79,9 +89,14 @@ export function MachineDialog({ machine, initial, updateRemote = false, onClose,
     <div className="modal-body">
       {(!job || finished && job.phase !== "connected") && <form id="machine-connect-form" onSubmit={(e) => { e.preventDefault(); void begin(); }}>
         {machine?.herdr_profile_id ? <p className="field-hint">{machine.name} — {destination} / {session}</p> : <>
-        <label className="field"><span className="field-label">{t("SSH alias or user@address")}</span><input ref={destinationField} autoFocus className="input" required autoComplete="off" value={destination} onChange={(e) => setDestination(e.target.value)} placeholder="devbox or user@192.168.1.20" /></label>
-        {initial && <p className="field-hint">{t("To choose an account, enter user@hostname. Without a user, the web server account’s SSH configuration decides.")}</p>}
+        {tailnet ? <>
+          <p className="field-hint">{t("{name} · {os} · via Tailscale", { name: tailnet.name, os: tailnet.os })}<br />{[tailnet.hostname, tailnet.dns_name].filter(Boolean).join(" · ")}</p>
+          <label className="field"><span className="field-label">{t("Tailscale IP")}</span><input className="input" readOnly value={tailnet.destination} aria-describedby="machine-tailnet-address-hint" /></label>
+          <p className="field-hint" id="machine-tailnet-address-hint">{t("Connects from this Ovis server to the PC’s Tailscale IP. MagicDNS and public port forwarding are not needed.")}</p>
+          <label className="field"><span className="field-label">{t("Remote username")}</span><input ref={destinationField} autoFocus className="input" required autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={128} pattern={"[a-zA-Z0-9_][a-zA-Z0-9_.\\-]{0,127}"} title={t("Use letters, numbers, underscores, dots or hyphens; start with a letter, number or underscore.")} value={username} onChange={(e) => setUsername(e.target.value)} /></label>
+        </> : <label className="field"><span className="field-label">{t("SSH alias or user@address")}</span><input ref={destinationField} autoFocus className="input" required autoComplete="off" value={destination} onChange={(e) => setDestination(e.target.value)} placeholder="devbox or user@192.168.1.20" /></label>}
         <label className="field"><span className="field-label">{t("PC name")}</span><input className="input" maxLength={100} value={name} placeholder={destination || t("Filled from the SSH address")} onChange={(e) => setName(e.target.value)} /></label>
+        {tailnet && <TailnetSetupHelp peer={tailnet} />}
         <details><summary>{t("Advanced settings")}</summary><div className="machine-advanced">
           <label className="field"><span className="field-label">{t("SSH port")}</span><input className="input" type="number" min="1" max="65535" placeholder={t("From SSH config (default 22)")} value={port} onChange={(e) => setPort(e.target.value)} /></label>
           <label className="field"><span className="field-label">{t("Private key path on this web server")}</span><input className="input" value={key} placeholder="~/.ssh/id_ed25519" onChange={(e) => setKey(e.target.value)} /></label>
@@ -90,7 +105,7 @@ export function MachineDialog({ machine, initial, updateRemote = false, onClose,
         <p className="field-hint">{t("Uses the web server account’s SSH config and ssh-agent. Agent CLI tools and logins use the environment on the target PC.")}</p>
         </>}
       </form>}
-      {job && job.challenge?.kind !== "host_key" && <div className="machine-progress" role="status">{running && job.progress ? <BridgeUpdateProgress update={{ job_id: job.id, step: job.step, progress: job.progress }} /> : <strong>{job.step}</strong>}{job.error && <p>{machineErrorText(job.error, t)}</p>}{job.ssh_output && <SshOutput text={job.ssh_output} />}</div>}
+      {job && job.challenge?.kind !== "host_key" && <div className="machine-progress" role="status">{running && job.progress ? <BridgeUpdateProgress update={{ job_id: job.id, step: job.step, progress: job.progress }} /> : <strong>{tailnet && job.phase === "failed" ? t("Connection failed") : job.step}</strong>}{tailnet && job.error && <TailnetSetupError words={job.error} />}{job.error && <p>{machineErrorText(job.error, t)}</p>}{job.ssh_output && <SshOutput text={job.ssh_output} />}</div>}
       {needsBridgeUpdate && <p className="field-hint">{t("This PC runs a bridge from a different version of Ovis. Update it to reconnect; herdr sessions keep running.")}</p>}
       {running && <p className="field-hint">{t("You can close this; the install keeps going and the sidebar shows it.")}</p>}
       {job?.phase === "approval" && <><ul className="machine-install-list">{job.installations.map((item) => <li key={item}>{item}</li>)}</ul><p className="field-hint">{t("Installs into your home directory. Existing herdr sessions keep running.")}</p></>}
@@ -99,7 +114,7 @@ export function MachineDialog({ machine, initial, updateRemote = false, onClose,
         {!secretAllowed && <p className="field-hint">{t("Open this app over HTTPS or localhost to enter a password.")}</p>}
         <button type="submit" className="btn btn-primary" disabled={!secretAllowed || pending || !secret}>{t("Continue")}</button>
       </form></>}</div>}
-      {error && <p className="machine-error" role="alert">{error}</p>}
+      {error && <>{tailnet && <TailnetSetupError words={error} />}<p className="machine-error" role="alert">{error}</p></>}
     </div>
     <footer className="modal-footer">
       {job && !finished && <button className="btn" disabled={pending} onClick={() => void act({ action: "cancel" })}>{t(running ? "Cancel install" : "Cancel connection")}</button>}

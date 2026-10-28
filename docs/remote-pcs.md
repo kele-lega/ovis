@@ -10,20 +10,41 @@ and when you choose Refresh, not the browser device's network. Phones, other use
 shared nodes and tagged nodes are omitted. A tagged connection server cannot infer a personal
 owner; use Add PC manually there. Watch-only devices cannot read this list.
 
-Choose **Add PC** to prefill the existing SSH dialog with a MagicDNS name (when enabled), or a
-Tailscale IP. No SSH connection or install starts until you submit that dialog. Online is only
+Choose **Add PC** to open the SSH dialog with that PC's **literal Tailscale IP**: IPv4 first,
+IPv6 only when no IPv4 is available. Names and MagicDNS names are display/registration metadata,
+never the discovered connection destination. This works even when the connection server does not
+accept Tailscale DNS. PCs with no valid Tailscale IP are omitted; discovery never resolves DNS or
+probes a port. No SSH connection or install starts until you submit the dialog. Online is only
 Tailscale's reported state, not a check that SSH is available; offline PCs cannot be added from
-the list. Windows PCs still need OpenSSH Server enabled.
+the list.
 
-Use `user@hostname` to choose a system account. Without a username, the web server account's SSH
-configuration supplies it. Existing registrations are matched by IP, full MagicDNS name or (when enabled) short MagicDNS
-name. A bounded static read of `~/.ssh/config` also handles simple Host/HostName/User/Port aliases;
-it never invokes SSH or executes Match commands. Includes, Match rules, patterns and expansions
-are deliberately left unresolved. The list shows known users, ports and herdr sessions; unknown
-users are labeled as the SSH default account and unspecified ports are not guessed.
-**Add another account…** keeps other accounts available on the same PC. Unresolvable aliases are
-not marked as registered. The original Add PC flow remains
-available and manual registrations are not automatically merged or rejected as duplicates.
+For a discovered PC the address is read-only and **Remote username** is required: the dialog
+submits `user@<Tailscale-IP>`, never silently falling back to the Ovis server's own account.
+Use a simple local SSH account name (letters, numbers, underscores, dots or hyphens; not a PC
+name or email). The port starts at 22 and can be changed under Advanced settings. Folded help
+shows `whoami` and the appropriate SSH prerequisites on the **target PC**, not on the Ovis server:
+Windows administrator PowerShell installs/starts OpenSSH Server; macOS uses Remote Login in
+System Settings; Linux shows Debian/Ubuntu and Fedora/RHEL commands. Nothing executes the
+instructions automatically. Windows uses the account password, not a Windows Hello PIN; domain
+accounts and other account names unsupported by this compact form use manual Add PC. Windows
+terminal mirroring still has the limitations [below](#windows-pcs).
+
+The dialog adds localized hints for refused connections, timeouts, SSH sign-in failures and DNS
+failures, keeping the original error selectable. A timeout can mean sleep, routing, firewall or
+tailnet access rules; refusal alone does not prove SSH is uninstalled. An SSH `HostName` or proxy
+rule on the server can still override a literal IP: the existing SSH configuration is respected,
+not rewritten. No public port forwarding or server DNS change is needed.
+
+Existing registrations are matched by IP, full MagicDNS name or (when enabled) short MagicDNS
+name, even though new destinations are IPs. A bounded static read of `~/.ssh/config` also handles
+simple Host/HostName/User/Port aliases; it never invokes SSH or executes Match commands.
+Includes, Match rules, patterns and expansions are deliberately left unresolved. The list shows
+known users, ports and herdr sessions; unknown users in older registrations are labeled as the SSH
+default account and unspecified ports are not guessed. **Add another account…** opens a new blank
+username for the same PC. No registration is rewritten, merged or deleted automatically. An old
+DNS-based registration remains unchanged; edit it explicitly through Reconnect / setup or remove
+it and add it again with the IP. The original manual Add PC flow still accepts SSH aliases and
+`user@hostname`, with its existing account/port defaults and no discovery prefill left behind.
 
 No Ovis login token is needed or collected. SSH authentication, host-key confirmation and bridge
 installation approval use the existing setup flow. This feature does not enable Tailscale SSH,
