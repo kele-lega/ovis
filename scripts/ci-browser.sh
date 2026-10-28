@@ -75,6 +75,7 @@ run_script scripts/key-bar-customization-demo-regression.ts
 run_script scripts/key-bar-hold-repeat-regression.ts
 run_script scripts/settings-pages-demo-regression.ts
 run_script scripts/custom-launch-demo-regression.ts
+run_script scripts/tailnet-pcs-demo-regression.ts
 run_script scripts/interface-font-demo-regression.ts
 run_script scripts/theme-first-paint-demo-regression.ts
 run_script scripts/cliproxy-settings-regression.ts

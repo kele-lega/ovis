@@ -1121,6 +1121,10 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
   }
   if (path === "/api/cliproxy/login" || path === "/api/cliproxy/callback") return error("demo", "Sign in from an installed server, not the public demo.", 409);
   if (path === "/api/push" || path.startsWith("/api/push/")) return error("push_unavailable", "the demo sends no alerts", 404);
+  if (path === "/api/machines/tailnet") return json({ state: "running", peers: [
+    { id: "demo-tailnet-linux", name: "build-box", destination: "build-box.example.ts.net", addresses: ["100.64.0.2"], os: "linux", online: true, registrations: [{ machine_id: "demo-root", name: "Build box", user: "root", port: 22, session: "default" }] },
+    { id: "demo-tailnet-windows", name: "windows-pc", destination: "windows-pc.example.ts.net", addresses: ["100.64.0.3"], os: "windows", online: false, registrations: [] },
+  ] });
   if (path === "/api/machines/settings") return json({ auto_update_bridges: true });
   if (path.startsWith("/api/machines/")) return error("demo", "remote PCs need a real machine", 404);
 

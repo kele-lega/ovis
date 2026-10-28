@@ -4,6 +4,7 @@ import type { SharedPreferences } from "../shared/preferences.ts";
 import type { PanePromptResponse } from "../shared/protocol.ts";
 import type { SeenFinish } from "../shared/seen.ts";
 import { MachineManager } from "./machines.ts";
+import { readTailnetPeers } from "./tailnet-peers.ts";
 import { canSendSecret, sameOrigin } from "./machine-security.ts";
 import { isJsonObject, jsonResponse, setRequestRoute } from "./http.ts";
 import { crossSiteFileRead } from "./file-view.ts";
@@ -82,6 +83,13 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
         return response;
       }
       return jsonResponse({ machines: manager.list(), verified_source_boot: { machine_id: machineId, boot_id: proof.boot_id } } satisfies MachineRoster, 200, { "cache-control": "no-store" });
+    }
+    if (parts[0] === "tailnet" && parts.length === 1) {
+      setRequestRoute("/api/machines/tailnet");
+      if (readOnly) return fail("read_only", "this device can only watch", 403);
+      if (request.headers.get("x-herdr-machine") !== "1") return fail("invalid_machine_request", "Use PC controls from this app", 403);
+      if (request.method !== "GET") return fail("method_not_allowed", "Use GET", 405);
+      return jsonResponse(await readTailnetPeers(manager.list()), 200, { "cache-control": "no-store" });
     }
     if (parts[0] === "events" && parts.length === 1 && request.method === "GET") {
       setRequestRoute("/api/machines/events");

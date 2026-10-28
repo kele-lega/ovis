@@ -2,6 +2,35 @@
 
 Use **Add PC** in Settings → Remote PCs (the command palette has it too) to connect a Linux or macOS computer (x64 or arm64) or a Windows PC (x64) running OpenSSH Server. Enter an SSH alias or `user@hostname`; the name defaults to that address. Advanced settings accept a port, a key path on the **web server**, and a named herdr session. Each registration selects one herdr socket. The sidebar groups PC → workspace → pane, and the header and new-session dialog show the destination PC. **Settings → Remote PCs → Show in sidebar** keeps a PC out of this device's sidebar, Agents list and command palette; it stays connected, and links and alerts still open its panes.
 
+### Tailscale discovery
+
+Settings → Remote PCs → **Tailscale network** lists other Linux, macOS and Windows PCs owned by
+this connection server's Tailscale user. It reads `tailscale status --json` when the page opens
+and when you choose Refresh, not the browser device's network. Phones, other users' devices,
+shared nodes and tagged nodes are omitted. A tagged connection server cannot infer a personal
+owner; use Add PC manually there. Watch-only devices cannot read this list.
+
+Choose **Add PC** to prefill the existing SSH dialog with a MagicDNS name (when enabled), or a
+Tailscale IP. No SSH connection or install starts until you submit that dialog. Online is only
+Tailscale's reported state, not a check that SSH is available; offline PCs cannot be added from
+the list. Windows PCs still need OpenSSH Server enabled.
+
+Use `user@hostname` to choose a system account. Without a username, the web server account's SSH
+configuration supplies it. Existing registrations are matched by IP, full MagicDNS name or (when enabled) short MagicDNS
+name. A bounded static read of `~/.ssh/config` also handles simple Host/HostName/User/Port aliases;
+it never invokes SSH or executes Match commands. Includes, Match rules, patterns and expansions
+are deliberately left unresolved. The list shows known users, ports and herdr sessions; unknown
+users are labeled as the SSH default account and unspecified ports are not guessed.
+**Add another account…** keeps other accounts available on the same PC. Unresolvable aliases are
+not marked as registered. The original Add PC flow remains
+available and manual registrations are not automatically merged or rejected as duplicates.
+
+No Ovis login token is needed or collected. SSH authentication, host-key confirmation and bridge
+installation approval use the existing setup flow. This feature does not enable Tailscale SSH,
+Serve or browser-direct transport, scan a LAN, or change Tailscale configuration. Registrations
+are shared by the Ovis installation, not isolated per visiting user; do not share drive access
+with someone who must not access its registered accounts.
+
 **Machines already saved in herdr appear automatically.** The connection server reads its account's
 `herdr machine list --json` at startup and every five seconds after the previous read finishes. Failed reads back off up to five minutes and
 log only a changed failure; a successful read resets the delay. It
