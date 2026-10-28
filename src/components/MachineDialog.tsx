@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Monitor, X } from "lucide-react";
+import type { MachineSetupInitial } from "../../shared/tailnet.ts";
 import type { Machine, SetupAction, SetupJob } from "../../shared/machines.ts";
 import { answerMachineSetup, fetchMachineSetup, startMachineSetup } from "../lib/api.ts";
 import { hostKeyFingerprints } from "../lib/hostKey.ts";
@@ -10,12 +11,12 @@ import { BridgeUpdateProgress } from "./MachineSidebar.tsx";
 import "./Machines.css";
 import { useT } from "../lib/i18n.ts";
 
-export function MachineDialog({ machine, updateRemote = false, onClose, onConnected }: { machine?: Machine; updateRemote?: boolean; onClose(): void; onConnected(id: string): void }) {
+export function MachineDialog({ machine, initial, updateRemote = false, onClose, onConnected }: { machine?: Machine; initial?: MachineSetupInitial; updateRemote?: boolean; onClose(): void; onConnected(id: string): void }) {
   const t = useT();
   const dialog = useRef<HTMLDialogElement>(null);
   const destinationField = useRef<HTMLInputElement>(null);
-  const [destination, setDestination] = useState(machine?.target?.destination ?? "");
-  const [name, setName] = useState(machine?.name ?? "");
+  const [destination, setDestination] = useState(machine?.target?.destination ?? initial?.destination ?? "");
+  const [name, setName] = useState(machine?.name ?? initial?.name ?? "");
   const [port, setPort] = useState(String(machine?.target?.port ?? ""));
   const [key, setKey] = useState(machine?.target?.identity_file ?? "");
   const [session, setSession] = useState(machine?.target?.session ?? "");
@@ -79,6 +80,7 @@ export function MachineDialog({ machine, updateRemote = false, onClose, onConnec
       {(!job || finished && job.phase !== "connected") && <form id="machine-connect-form" onSubmit={(e) => { e.preventDefault(); void begin(); }}>
         {machine?.herdr_profile_id ? <p className="field-hint">{machine.name} — {destination} / {session}</p> : <>
         <label className="field"><span className="field-label">{t("SSH alias or user@address")}</span><input ref={destinationField} autoFocus className="input" required autoComplete="off" value={destination} onChange={(e) => setDestination(e.target.value)} placeholder="devbox or user@192.168.1.20" /></label>
+        {initial && <p className="field-hint">{t("To choose an account, enter user@hostname. Without a user, the web server account’s SSH configuration decides.")}</p>}
         <label className="field"><span className="field-label">{t("PC name")}</span><input className="input" maxLength={100} value={name} placeholder={destination || t("Filled from the SSH address")} onChange={(e) => setName(e.target.value)} /></label>
         <details><summary>{t("Advanced settings")}</summary><div className="machine-advanced">
           <label className="field"><span className="field-label">{t("SSH port")}</span><input className="input" type="number" min="1" max="65535" placeholder={t("From SSH config (default 22)")} value={port} onChange={(e) => setPort(e.target.value)} /></label>

@@ -2691,6 +2691,14 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
 - Remote PCs: an **Add PC** row (label, one-line description, button) opens the PC
   setup dialog and closes Settings behind it; when that dialog closes, focus lands on the header's
   workspace-list toggle. Under the row, once the server has answered, the bridge auto-update switch.
+- Tailscale network in Remote PCs uses those same Settings rows, not a separate wizard: Refresh
+  reads this Host's own-user PCs, Add PC prefills the existing SSH dialog without submitting it,
+  and registered users/ports/sessions remain visible beside Add another account. Phones and
+  other owners are omitted; watch devices do not mount the group. Missing/stopped/unreadable
+  Tailscale has one actionable hint and never blocks manual Add PC. This deliberately follows
+  Ovis's existing SSH dialog rather than importing another app's remote-host UX: the external
+  Paseo/Zed documentation could not be fetched in this development environment. No third-party
+  pixels or code are copied.
 - Install (a row of the Phone group) reflects installed, promptable or browser-instructions state;
   About links the repository.
 - Portal, a group of its own between Phone and Devices where the server offers it: while it runs,
