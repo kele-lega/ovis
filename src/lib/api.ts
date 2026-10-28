@@ -3,6 +3,7 @@ import { clearDirectTransports } from "./directTransport.ts";
 import type { PreferencesChange, SharedPreferences } from "../../shared/preferences.ts";
 import type { SeenFinish } from "../../shared/seen.ts";
 import { resumeConnectionTraces } from "./connectionTrace.ts";
+import type { BootstrapAttempt, BootstrapRequest } from "../../shared/bootstrap.ts";
 import { machinePath, type BridgeHealth, type HerdrIdentity, type Machine, type MachineRoster, type SetupAction, type SetupJob, type SetupRequest } from "../../shared/machines.ts";
 import type {
   WorkspaceMoved,
@@ -949,6 +950,10 @@ export async function machineRequest<T>(path: string, method = "GET", body?: unk
 export const startMachineSetup = (request: SetupRequest) => machineRequest<SetupJob>("/setup", "POST", request);
 export const fetchMachineSetup = (id: string) => machineRequest<SetupJob>(`/setup/${encodeURIComponent(id)}`);
 export const answerMachineSetup = (id: string, action: SetupAction) => machineRequest<SetupJob>(`/setup/${encodeURIComponent(id)}`, "POST", action);
+export const createMachineBootstrap = (request: BootstrapRequest) => machineRequest<BootstrapAttempt>("/bootstrap", "POST", request);
+export const cancelMachineBootstrap = (id: string) => machineRequest<{ ok: true }>(`/bootstrap/${encodeURIComponent(id)}`, "DELETE");
+export const connectMachineBootstrap = (id: string, updateRemote = false) => machineRequest<SetupJob>(`/bootstrap/${encodeURIComponent(id)}/connect`, "POST", { update_remote: updateRemote });
+export const revokeMachineBootstrap = (id: string, removeFirewall: boolean) => machineRequest<{ ok: true }>(`/${encodeURIComponent(id)}/revoke-bootstrap`, "POST", { remove_firewall: removeFirewall });
 
 /** GET /api/voice: whether the server holds a key; the key itself never comes back. */
 export async function fetchVoiceStatus(): Promise<VoiceStatus> {

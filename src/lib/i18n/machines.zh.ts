@@ -1,7 +1,7 @@
 /**
  * Simplified Chinese for the keys only the machines files use:
  * components/MachineSidebar.tsx (with STATE_WORD), components/MachineDialog.tsx,
- * components/TailnetPcs.tsx, components/TailnetSetupHelp.tsx,
+ * components/TailnetPcs.tsx, components/TailnetSetupHelp.tsx, components/MachineBootstrap.tsx,
  * lib/bridgeProgress.ts (with STAGES).
  * Register and fixed terms follow ../i18n.zh.ts; a key another feature also uses goes there.
  */
@@ -134,4 +134,32 @@ export const MACHINES_ZH: Record<string, string> = {
   "No workspaces or agents match": "没有匹配的工作区或代理",
   "No workspaces or agents match on the PCs that answered": "已响应的 PC 上没有匹配的工作区或代理",
   "Try other words, or clear the filter.": "换个词试试，或清除筛选。",
+  "First-time SSH setup": "首次 SSH 接入",
+  "Run this on {name}, not on the Ovis server. It authorizes this Ovis server’s dedicated public key.": "请在 {name} 上运行，而非 Ovis 服务器。它会授权此 Ovis 服务器的专属公钥。",
+  "Ovis source: {ip}": "Ovis 来源地址：{ip}",
+  "Downloads a fixed GitHub Release and verifies its SHA256 before execution. No Ovis token, password or private key is included.": "下载固定版本的 GitHub Release，执行前验证 SHA256。不包含 Ovis token、密码或私钥。",
+  "Open PowerShell as Administrator using the same local Windows account entered above. Other accounts and domain accounts require manual SSH setup.": "使用上方填写的同一本地 Windows 账户，以管理员身份打开 PowerShell。其他账户及域账户需要手动设置 SSH。",
+  "Windows administrator accounts share an SSH key file. The script warns and asks before granting access to that shared file; the key is not restricted to one administrator username.": "Windows 管理员账户共用 SSH 密钥文件。脚本会在写入此共享文件前警告并请求确认；此密钥并不只限于某一个管理员用户名。",
+  "First enable and review SSH manually: Linux needs a running OpenSSH service; macOS needs Remote Login in System Settings. This command does not start SSH on these systems. sudo may ask for the PC’s administrator password.": "请先手动启用并检查 SSH：Linux 需要已运行的 OpenSSH 服务；macOS 需要在系统设置中开启远程登录。此命令不会在这些系统上启动 SSH。sudo 可能要求输入该 PC 的管理员密码。",
+  "This setup attempt expired. Go back and generate a new command; do not run the old command.": "本次接入已过期。请返回并生成新命令，不要执行旧命令。",
+  "Connect before {time}. Closing or cancelling discards the pending server key; it does not undo changes already made on the PC.": "请在 {time} 前连接。关闭或取消会丢弃服务器上待接入的密钥，但不会撤销已在 PC 上进行的更改。",
+  "SSH setup command": "SSH 接入命令",
+  "I ran the command successfully on the selected PC and kept its SSH fingerprints for comparison.": "我已在所选 PC 上成功执行命令，并保留 SSH 指纹以便核对。",
+  "Next, compare the SSH fingerprint and review the installation list. Ovis will not trust a fingerprint or install the bridge automatically.": "接下来核对 SSH 指纹并查看安装清单。Ovis 不会自动信任指纹或安装 bridge。",
+  "Undo this SSH authorization": "撤销此次 SSH 授权",
+  "Expiry only discards the pending private key on Ovis. A public key already installed on the PC does not expire. Save this cleanup command and run it there to remove only this key and its app-owned firewall rule. SSH and existing sessions remain running.": "过期只会丢弃 Ovis 上待接入的私钥。已写入 PC 的公钥不会过期。请保存此清理命令，在该 PC 上运行以仅移除此密钥及其专属防火墙规则。SSH 和现有会话会继续运行。",
+  "SSH authorization cleanup command": "SSH 授权清理命令",
+  "Could not copy automatically. Select the command and copy it manually.": "无法自动复制。请选中命令并手动复制。",
+  "The verified SSH setup release is not available. Ask the administrator to publish the pinned bootstrap release, or use manual SSH setup.": "经过校验的 SSH 接入发布包不可用。请联系管理员发布固定版本的接入脚本，或手动设置 SSH。",
+  "First time: generate an SSH setup command": "首次接入：生成 SSH 初始化命令",
+  "Run one command on the selected PC to register a dedicated SSH key. Windows can install SSH; Linux and macOS require SSH enabled first. Then verify its fingerprint and approve installation here.": "在所选 PC 上执行一条命令以注册专属 SSH 密钥。Windows 可安装 SSH；Linux 和 macOS 需先启用 SSH。之后在此核对指纹并批准安装。",
+  "This guided setup uses port 22 and a local account. Existing custom SSH ports and keys use Connect instead.": "引导接入使用 22 端口和本地账户。已有自定义 SSH 端口或密钥时，请改用“连接”。",
+  "Preparing setup command…": "正在准备接入命令…",
+  "Generate setup command": "生成接入命令",
+  "Discard setup and go back": "丢弃本次接入并返回",
+  "I ran it — continue": "已执行，继续",
+  "Also revoke the SSH key installed by guided setup": "同时撤销引导接入安装的 SSH 密钥",
+  "Requires SSH access to the PC. If cleanup fails, this registration and its local key are kept so you can retry. SSH and herdr are not stopped.": "需要能够通过 SSH 访问该 PC。如果清理失败，会保留注册和本地密钥以便重试。不会停止 SSH 或 herdr。",
+  "Also remove this setup’s Windows firewall rule, if present": "同时移除此接入创建的 Windows 防火墙规则（若存在）",
+  "Forgetting this PC deletes only the local key. Its public key and any firewall rule remain on the PC until you remove them there.": "忘记此 PC 只会删除本地密钥。公钥和防火墙规则仍留在 PC 上，直到你在该 PC 上移除。",
 };

@@ -328,6 +328,8 @@ export function createServer(
         } catch { return badRequest("invalid_direct_request", "Invalid direct trust request"); }
       }
 
+      const bootstrapRoute = pathname === "/api/machines/bootstrap" || pathname.startsWith("/api/machines/bootstrap/") || /^\/api\/machines\/[^/]+\/revoke-bootstrap$/.test(pathname);
+      const bootstrapNoStore = (response: Response): Response => { if (bootstrapRoute) response.headers.set("cache-control", "no-store"); return response; };
       const bridgePath = pathname === "/api/bridge" || pathname === "/api/session" || pathname === SESSION_HISTORY_PATH || pathname === SESSION_RESUME_PATH || pathname === "/api/agents" || pathname === "/api/agent/rename" || pathname === "/api/agent/commands" || pathname === "/api/integrations" || pathname === "/api/plugins/actions" || pathname === "/api/plugin/action" || pathname.startsWith("/api/pane/") || pathname.startsWith("/api/workspace/") || pathname.startsWith("/api/worktree/") || pathname.startsWith("/api/tab/") || pathname === "/api/layout/ratio" || pathname.startsWith("/api/fs/") || pathname === "/ws";
       const ip = bunServer.requestIP(request);
       const loopback = ip !== null && isLoopbackAddress(ip.address);
@@ -367,16 +369,16 @@ export function createServer(
       if (requiresAuth(pathname) && !authenticated) {
         setRequestRoute("auth-refusal");
         // a script's Bearer guess is told to wait; a browser's cookie gets the usual 401 and its sign-in form
-        if (presented === "held" && pathname !== "/ws" && request.headers.has("authorization")) return presentedTokenHeld(client);
+        if (presented === "held" && pathname !== "/ws" && request.headers.has("authorization")) return bootstrapNoStore(presentedTokenHeld(client));
         // The WS client never parses a body, so the upgrade refusal stays plain text.
-        return pathname === "/ws" ? new Response("unauthorized", { status: 401 }) : unauthorizedJson(access.level === "none" ? access.reason : "token_required");
+        return pathname === "/ws" ? new Response("unauthorized", { status: 401 }) : bootstrapNoStore(unauthorizedJson(access.level === "none" ? access.reason : "token_required"));
       }
 
       const readOnly = directClaims ? directClaims.role === "observe" : access.level === "full" && access.role === "watch";
       const mutating = !["GET", "HEAD", "OPTIONS"].includes(request.method);
       if (pathname.startsWith("/api/") && mutating && !directClaims && !sameOrigin(request)) {
         setRequestRoute("origin-refusal");
-        return jsonResponse({ error: { code: "invalid_origin", message: "Use controls from this app" } }, 403);
+        return bootstrapNoStore(jsonResponse({ error: { code: "invalid_origin", message: "Use controls from this app" } }, 403));
       }
       // An empty segment ("//", or a trailing "/") or an encoded separator reads as another route to
       // the checks below, while the PC proxy drops empty segments before forwarding:
@@ -402,7 +404,7 @@ export function createServer(
       const agentCommands = /^\/api\/(?:machines\/[^/]+\/)?agent\/commands$/.test(pathname);
       if (readOnly && (fileRead || directoryListing || repositoryDiff || sessionHistory || agentCommands || mutating && !ownPreferences)) {
         setRequestRoute("watch-refusal");
-        return jsonResponse({ error: { code: "read_only", message: "this device can only watch" } }, 403);
+        return bootstrapNoStore(jsonResponse({ error: { code: "read_only", message: "this device can only watch" } }, 403));
       }
 
       // API reads can chain several bounded 10 s Herdr RPCs. Give the handler time to return

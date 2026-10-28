@@ -1,14 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Monitor, X } from "lucide-react";
+import type { BootstrapAttempt } from "../../shared/bootstrap.ts";
 import type { MachineSetupInitial } from "../../shared/tailnet.ts";
 import type { Machine, SetupAction, SetupJob } from "../../shared/machines.ts";
-import { answerMachineSetup, fetchMachineSetup, startMachineSetup } from "../lib/api.ts";
+import { ApiError, answerMachineSetup, cancelMachineBootstrap, connectMachineBootstrap, createMachineBootstrap, fetchMachineSetup, startMachineSetup } from "../lib/api.ts";
 import { hostKeyFingerprints } from "../lib/hostKey.ts";
 import { sshOutputParts } from "../lib/sshOutput.ts";
 import { useAnnouncedText } from "../lib/useAnnouncedText.ts";
 import { machineErrorText } from "../lib/userError.ts";
 import { tailnetDestination } from "../lib/tailnetSetup.ts";
 import { TailnetSetupError, TailnetSetupHelp } from "./TailnetSetupHelp.tsx";
+import { BootstrapCleanup, MachineBootstrap } from "./MachineBootstrap.tsx";
 import { BridgeUpdateProgress } from "./MachineSidebar.tsx";
 import "./Machines.css";
 import { useT } from "../lib/i18n.ts";
@@ -30,6 +32,12 @@ export function MachineDialog({ machine, initial, updateRemote = false, onClose,
   const [secret, setSecret] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const inFlight = useRef(false);
+  const [bootstrap, setBootstrap] = useState<BootstrapAttempt | null>(null);
+  const bootstrapRef = useRef(bootstrap); bootstrapRef.current = bootstrap;
+  const [bootstrapExpired, setBootstrapExpired] = useState(false);
+  const [bootstrapAcknowledged, setBootstrapAcknowledged] = useState(false);
+  const markBootstrapExpired = useCallback(() => setBootstrapExpired(true), []);
   const finished = !!job && ["failed", "cancelled", "connected"].includes(job.phase);
   const secretAllowed = window.isSecureContext;
   const needsBridgeUpdate = job?.phase === "failed" && job.action_required === "update_bridge";
@@ -38,14 +46,23 @@ export function MachineDialog({ machine, initial, updateRemote = false, onClose,
   // approved install keeps going on the server and shows in the sidebar
   // React's autoFocus runs at mount, while the dialog is still closed; showModal() then moves focus
   // to the first focusable element (Close), so the field is focused again once the dialog is open
-  useEffect(() => { mounted.current = true; dialog.current?.showModal(); destinationField.current?.focus(); return () => { mounted.current = false; const current = jobRef.current; if (current && !["connected", "failed", "cancelled", "installing", "starting"].includes(current.phase)) void answerMachineSetup(current.id, { action: "cancel" }).catch(() => {}); }; }, []);
+  useEffect(() => {
+    mounted.current = true; dialog.current?.showModal(); destinationField.current?.focus();
+    return () => {
+      mounted.current = false;
+      const current = jobRef.current;
+      const continues = current && ["connected", "installing", "starting"].includes(current.phase);
+      if (current && !["connected", "failed", "cancelled", "installing", "starting"].includes(current.phase)) void answerMachineSetup(current.id, { action: "cancel" }).catch(() => {});
+      if (bootstrapRef.current && !continues) void cancelMachineBootstrap(bootstrapRef.current.id).catch(() => {});
+    };
+  }, []);
   const running = !!job && ["installing", "starting"].includes(job.phase);
   useEffect(() => {
     if (!job || finished) return;
     let cancelled = false;
     let timer = 0;
     const poll = async () => {
-      try { const next = await fetchMachineSetup(job.id); if (!cancelled) { setJob(next); setError(null); } }
+      try { const next = await fetchMachineSetup(job.id); if (!cancelled) { jobRef.current = next; setJob(next); setError(null); } }
       catch (e) { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); }
       if (!cancelled) timer = window.setTimeout(poll, 750);
     };
@@ -58,18 +75,46 @@ export function MachineDialog({ machine, initial, updateRemote = false, onClose,
     if (tailnet && (job?.phase === "failed" || error)) dialog.current?.querySelector<HTMLElement>('[role="alert"]')?.scrollIntoView({ block: "nearest" });
   }, [tailnet, job?.phase, error]);
 
+  const setupError = (e: unknown) => e instanceof ApiError && e.code === "bootstrap_unavailable"
+    ? t("The verified SSH setup release is not available. Ask the administrator to publish the pinned bootstrap release, or use manual SSH setup.")
+    : e instanceof ApiError && e.code === "bootstrap_expired"
+      ? t("This setup attempt expired. Go back and generate a new command; do not run the old command.")
+      : e instanceof Error ? e.message : String(e);
+  const generateBootstrap = async () => {
+    if (!tailnet || inFlight.current) return;
+    const form = dialog.current?.querySelector<HTMLFormElement>("#machine-connect-form");
+    if (!form?.reportValidity()) return;
+    if (tailnetDestination(username, tailnet.destination) === null) return;
+    inFlight.current = true; setPending(true); setError(null);
+    try {
+      const attempt = await createMachineBootstrap({ peer_id: tailnet.id, username, ...(name.trim() ? { name: name.trim() } : {}), ...(session.trim() ? { session: session.trim() } : {}) });
+      if (!mounted.current) { await cancelMachineBootstrap(attempt.id); return; }
+      bootstrapRef.current = attempt; setBootstrap(attempt); setBootstrapExpired(false); setBootstrapAcknowledged(false); setJob(null);
+    } catch (e) { if (mounted.current) setError(setupError(e)); }
+    finally { inFlight.current = false; if (mounted.current) setPending(false); }
+  };
+  const discardBootstrap = async () => {
+    if (!bootstrap || inFlight.current) return;
+    inFlight.current = true; setPending(true); setError(null);
+    try {
+      await cancelMachineBootstrap(bootstrap.id);
+      if (mounted.current) { bootstrapRef.current = null; setBootstrap(null); setJob(null); setBootstrapAcknowledged(false); window.requestAnimationFrame(() => destinationField.current?.focus()); }
+    } catch (e) { if (mounted.current) setError(setupError(e)); }
+    finally { inFlight.current = false; if (mounted.current) setPending(false); }
+  };
   const begin = async () => {
-    if (pending) return;
+    if (inFlight.current) return;
+    if (bootstrap && (!bootstrapAcknowledged || bootstrapExpired || bootstrap.expires_at <= Date.now())) { setBootstrapExpired(bootstrap.expires_at <= Date.now()); return; }
     const target = tailnet ? tailnetDestination(username, tailnet.destination) : destination.trim();
     if (target === null) { destinationField.current?.reportValidity(); return; }
-    setError(null); setPending(true);
+    inFlight.current = true; setError(null); setPending(true);
     // a PC saved in herdr keeps its catalog name, which the server does not read from here
-    try { const next = await startMachineSetup({ destination: target, ...(name.trim() && !machine?.herdr_profile_id ? { name: name.trim() } : {}), ...(port ? { port: Number(port) } : {}), ...(key.trim() ? { identity_file: key.trim() } : {}), ...(session.trim() ? { session: session.trim() } : {}), ...(machine ? { machine_id: machine.id } : {}), ...(needsBridgeUpdate || updateRemote ? { update_remote: true } : {}) });
-      if (mounted.current) setJob(next);
+    try { const next = bootstrap ? await connectMachineBootstrap(bootstrap.id, needsBridgeUpdate || updateRemote) : await startMachineSetup({ destination: target, ...(name.trim() && !machine?.herdr_profile_id ? { name: name.trim() } : {}), ...(port ? { port: Number(port) } : {}), ...(key.trim() ? { identity_file: key.trim() } : {}), ...(session.trim() ? { session: session.trim() } : {}), ...(machine ? { machine_id: machine.id } : {}), ...(needsBridgeUpdate || updateRemote ? { update_remote: true } : {}) });
+      if (mounted.current) { jobRef.current = next; setJob(next); }
       else if (!["connected", "failed", "cancelled", "installing", "starting"].includes(next.phase)) await answerMachineSetup(next.id, { action: "cancel" });
     }
-    catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
-    finally { if (mounted.current) setPending(false); }
+    catch (e) { if (mounted.current) setError(setupError(e)); }
+    finally { inFlight.current = false; if (mounted.current) setPending(false); }
   };
   const inheritedStarted = useRef(false);
   useEffect(() => {
@@ -78,16 +123,16 @@ export function MachineDialog({ machine, initial, updateRemote = false, onClose,
     void begin();
   }, []);
   const act = async (action: SetupAction) => {
-    if (!job || pending) return;
-    setPending(true); setError(null); setSecret("");
-    try { setJob(await answerMachineSetup(job.id, action)); }
-    catch (e) { setError(e instanceof Error ? e.message : String(e)); }
-    finally { setPending(false); }
+    if (!job || inFlight.current) return;
+    inFlight.current = true; setPending(true); setError(null); setSecret("");
+    try { const next = await answerMachineSetup(job.id, action); if (mounted.current) { jobRef.current = next; setJob(next); } }
+    catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : String(e)); }
+    finally { inFlight.current = false; if (mounted.current) setPending(false); }
   };
   return <dialog ref={dialog} className="modal machine-dialog" aria-labelledby="machine-dialog-title" onCancel={(e) => { e.preventDefault(); onClose(); }}>
     <header className="modal-header"><h2 id="machine-dialog-title" className="modal-title"><Monitor size={18} /> {t(updateRemote ? "Update remote bridge" : machine?.action_required === "connect" ? "Connect" : machine?.action_required === "setup" ? "Set up web access" : machine ? "Reconnect PC" : "Add PC")}</h2><button className="icon-button" aria-label={t("Close PC setup")} onClick={onClose}><X /></button></header>
     <div className="modal-body">
-      {(!job || finished && job.phase !== "connected") && <form id="machine-connect-form" onSubmit={(e) => { e.preventDefault(); void begin(); }}>
+      {!bootstrap && (!job || finished && job.phase !== "connected") && <form id="machine-connect-form" onSubmit={(e) => { e.preventDefault(); void begin(); }}>
         {machine?.herdr_profile_id ? <p className="field-hint">{machine.name} — {destination} / {session}</p> : <>
         {tailnet ? <>
           <p className="field-hint">{t("{name} · {os} · via Tailscale", { name: tailnet.name, os: tailnet.os })}<br />{[tailnet.hostname, tailnet.dns_name].filter(Boolean).join(" · ")}</p>
@@ -96,7 +141,14 @@ export function MachineDialog({ machine, initial, updateRemote = false, onClose,
           <label className="field"><span className="field-label">{t("Remote username")}</span><input ref={destinationField} autoFocus className="input" required autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={128} pattern={"[a-zA-Z0-9_][a-zA-Z0-9_.\\-]{0,127}"} title={t("Use letters, numbers, underscores, dots or hyphens; start with a letter, number or underscore.")} value={username} onChange={(e) => setUsername(e.target.value)} /></label>
         </> : <label className="field"><span className="field-label">{t("SSH alias or user@address")}</span><input ref={destinationField} autoFocus className="input" required autoComplete="off" value={destination} onChange={(e) => setDestination(e.target.value)} placeholder="devbox or user@192.168.1.20" /></label>}
         <label className="field"><span className="field-label">{t("PC name")}</span><input className="input" maxLength={100} value={name} placeholder={destination || t("Filled from the SSH address")} onChange={(e) => setName(e.target.value)} /></label>
-        {tailnet && <TailnetSetupHelp peer={tailnet} />}
+        {tailnet && <>
+          <TailnetSetupHelp peer={tailnet} />
+          <details className="machine-tailnet-help"><summary>{t("First time: generate an SSH setup command")}</summary>
+            <p className="field-hint">{t("Run one command on the selected PC to register a dedicated SSH key. Windows can install SSH; Linux and macOS require SSH enabled first. Then verify its fingerprint and approve installation here.")}</p>
+            <p className="field-hint">{t("This guided setup uses port 22 and a local account. Existing custom SSH ports and keys use Connect instead.")}</p>
+            <button type="button" className="btn" disabled={pending || port !== "22" || key.trim() !== ""} onClick={() => void generateBootstrap()}>{t(pending ? "Preparing setup command…" : "Generate setup command")}</button>
+          </details>
+        </>}
         <details><summary>{t("Advanced settings")}</summary><div className="machine-advanced">
           <label className="field"><span className="field-label">{t("SSH port")}</span><input className="input" type="number" min="1" max="65535" placeholder={t("From SSH config (default 22)")} value={port} onChange={(e) => setPort(e.target.value)} /></label>
           <label className="field"><span className="field-label">{t("Private key path on this web server")}</span><input className="input" value={key} placeholder="~/.ssh/id_ed25519" onChange={(e) => setKey(e.target.value)} /></label>
@@ -105,6 +157,8 @@ export function MachineDialog({ machine, initial, updateRemote = false, onClose,
         <p className="field-hint">{t("Uses the web server account’s SSH config and ssh-agent. Agent CLI tools and logins use the environment on the target PC.")}</p>
         </>}
       </form>}
+      {bootstrap && (!job || finished && job.phase !== "connected") && <MachineBootstrap key={bootstrap.id} attempt={bootstrap} name={name || tailnet?.name || bootstrap.target.destination} acknowledged={bootstrapAcknowledged} pending={pending} onAcknowledge={setBootstrapAcknowledged} onExpired={markBootstrapExpired} />}
+      {bootstrap && job?.phase === "connected" && <BootstrapCleanup command={bootstrap.cleanup_command} />}
       {job && job.challenge?.kind !== "host_key" && <div className="machine-progress" role="status">{running && job.progress ? <BridgeUpdateProgress update={{ job_id: job.id, step: job.step, progress: job.progress }} /> : <strong>{tailnet && job.phase === "failed" ? t("Connection failed") : job.step}</strong>}{tailnet && job.error && <TailnetSetupError words={job.error} />}{job.error && <p>{machineErrorText(job.error, t)}</p>}{job.ssh_output && <SshOutput text={job.ssh_output} />}</div>}
       {needsBridgeUpdate && <p className="field-hint">{t("This PC runs a bridge from a different version of Ovis. Update it to reconnect; herdr sessions keep running.")}</p>}
       {running && <p className="field-hint">{t("You can close this; the install keeps going and the sidebar shows it.")}</p>}
@@ -121,7 +175,8 @@ export function MachineDialog({ machine, initial, updateRemote = false, onClose,
       {running && <button className="btn btn-primary" onClick={onClose}>{t("Continue in background")}</button>}
       {job?.challenge?.kind === "host_key" && <><button className="btn" disabled={pending} onClick={() => void act({ action: "answer", challenge_id: job.challenge!.id, answer: "no" })}>{t("Reject")}</button><button className="btn btn-primary" disabled={pending} onClick={() => void act({ action: "answer", challenge_id: job.challenge!.id, answer: "yes" })}>{t("Trust fingerprint")}</button></>}
       {job?.phase === "approval" && <button className="btn btn-primary" disabled={pending} onClick={() => void act({ action: "approve" })}>{t("Install and connect")}</button>}
-      {job?.phase === "connected" ? <button className="btn btn-primary" onClick={() => onConnected(job.machine_id)}>{t("Open PC")}</button> : (!job || finished) && <button className="btn btn-primary" form="machine-connect-form" type="submit" disabled={pending}>{t(pending ? "Connecting…" : needsBridgeUpdate ? "Update bridge and connect" : job ? "Retry connection" : "Connect")}</button>}
+      {bootstrap && (!job || finished && job.phase !== "connected") && <button type="button" className="btn" disabled={pending} onClick={() => void discardBootstrap()}>{t("Discard setup and go back")}</button>}
+      {job?.phase === "connected" ? <button className="btn btn-primary" onClick={() => onConnected(job.machine_id)}>{t("Open PC")}</button> : (!job || finished) && (bootstrap ? <button type="button" className="btn btn-primary" disabled={pending || bootstrapExpired || !bootstrapAcknowledged} onClick={() => void begin()}>{t(pending ? "Connecting…" : needsBridgeUpdate ? "Update bridge and connect" : job ? "Retry connection" : "I ran it — continue")}</button> : <button className="btn btn-primary" form="machine-connect-form" type="submit" disabled={pending}>{t(pending ? "Connecting…" : needsBridgeUpdate ? "Update bridge and connect" : job ? "Retry connection" : "Connect")}</button>)}
     </footer>
   </dialog>;
 }

@@ -343,6 +343,53 @@
   .machine-tailnet-help > summary { min-height: var(--touch-target); }
 }
 
+.machine-bootstrap {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-3);
+}
+
+.machine-bootstrap h3,
+.machine-bootstrap p { margin: 0; }
+
+.machine-bootstrap-command { min-width: 0; }
+
+.machine-bootstrap-command pre {
+  max-width: 100%;
+  max-height: 16em;
+  margin: 0 0 var(--space-2);
+  padding: var(--space-2);
+  overflow: auto;
+  background: var(--bg-input);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.machine-bootstrap-check {
+  display: flex;
+  align-items: flex-start;
+  min-width: 0;
+  gap: var(--space-2);
+  padding-block: var(--space-2);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.machine-bootstrap-check input { flex: none; }
+
+.machine-bootstrap-command > [role="status"] { display: block; }
+
+.machine-dialog .modal-footer { flex-wrap: wrap; }
+.machine-dialog .modal-footer .btn { max-width: 100%; white-space: normal; }
+
+@media (pointer: coarse) {
+  .machine-bootstrap-check { min-height: var(--touch-target); }
+}
+
 .machine-dialog summary {
   padding: var(--space-2) 0;
   cursor: pointer;

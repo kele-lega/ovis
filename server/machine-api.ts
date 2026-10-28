@@ -3,6 +3,7 @@ import type { AgentRowTokens } from "../shared/pane-tokens.ts";
 import type { SharedPreferences } from "../shared/preferences.ts";
 import type { PanePromptResponse } from "../shared/protocol.ts";
 import type { SeenFinish } from "../shared/seen.ts";
+import { BootstrapError } from "./ssh-bootstrap.ts";
 import { MachineManager } from "./machines.ts";
 import { readTailnetPeers } from "./tailnet-peers.ts";
 import { canSendSecret, sameOrigin } from "./machine-security.ts";
@@ -56,6 +57,58 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
   herdrSidebar?: { get(): AgentRowTokens | null; subscribe(listener: (agents: AgentRowTokens | null) => void): () => void },
   seen?: { list(): SeenFinish[]; subscribe(listener: (finish: SeenFinish) => void): () => void }): Promise<Response> {
   const url = new URL(request.url);
+  const bootstrapRoute = url.pathname === "/api/machines/bootstrap" || url.pathname.startsWith("/api/machines/bootstrap/") || /^\/api\/machines\/[^/]+\/revoke-bootstrap$/.test(url.pathname);
+  if (bootstrapRoute) {
+    const respond = (body: unknown, status = 200) => jsonResponse(body, status, { "cache-control": "no-store" });
+    const refuse = (code: string, message: string, status: number) => respond({ error: { code, message } }, status);
+    if (!sameOrigin(request)) return refuse("invalid_origin", "Use PC controls from this app", 403);
+    if (readOnly) return refuse("read_only", "this device can only watch", 403);
+    if (request.headers.get("x-herdr-machine") !== "1") return refuse("invalid_machine_request", "Use PC controls from this app", 403);
+    if (nonCanonicalPath(url.pathname)) return refuse("not_found", "not found", 404);
+    const parts = url.pathname.slice("/api/machines/".length).split("/");
+    try {
+      const body = async (): Promise<unknown> => {
+        // Bootstrap control bodies contain no uploads; bound them before JSON parsing.
+        if (Number(request.headers.get("content-length")) > 4096) throw new BootstrapError("invalid_body", "Expected bootstrap details");
+        if (!request.body) return {};
+        const reader = request.body.getReader(); let size = 0; const chunks: Uint8Array[] = [];
+        try { for (;;) { const { done, value } = await reader.read(); if (done) break; size += value.length; if (size > 4096) { await reader.cancel(); throw new BootstrapError("invalid_body", "Expected bootstrap details"); } chunks.push(value); } }
+        finally { reader.releaseLock(); }
+        if (!size) return {};
+        try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new BootstrapError("invalid_body", "Expected bootstrap details"); }
+      };
+      if (parts[0] === "bootstrap") {
+        if (parts.length === 1) {
+          setRequestRoute("/api/machines/bootstrap");
+          if (request.method !== "POST") return refuse("method_not_allowed", "Use POST", 405);
+          return respond(await manager.createBootstrap(await body(), request.signal), 201);
+        }
+        if (parts.length === 2) {
+          setRequestRoute("/api/machines/bootstrap/:attempt_id");
+          if (request.method === "GET") return respond(manager.bootstrapAttempt(parts[1]!));
+          if (request.method === "DELETE") { await manager.cancelBootstrap(parts[1]!); return respond({ ok: true }); }
+          return refuse("method_not_allowed", "Use GET or DELETE", 405);
+        }
+        if (parts.length === 3 && parts[2] === "connect") {
+          setRequestRoute("/api/machines/bootstrap/:attempt_id/connect");
+          if (request.method !== "POST") return refuse("method_not_allowed", "Use POST", 405);
+          const value = await body();
+          if (!isJsonObject(value) || Object.keys(value).some((key) => key !== "update_remote") || value.update_remote !== undefined && typeof value.update_remote !== "boolean") return refuse("invalid_body", "Expected bootstrap connection details", 400);
+          return respond(manager.connectBootstrap(parts[1]!, value.update_remote === true), 202);
+        }
+      } else if (parts.length === 2 && parts[1] === "revoke-bootstrap") {
+        setRequestRoute("/api/machines/:machine_id/revoke-bootstrap");
+        if (request.method !== "POST") return refuse("method_not_allowed", "Use POST", 405);
+        const value = await body();
+        if (!isJsonObject(value) || Object.keys(value).some((key) => key !== "remove_firewall") || value.remove_firewall !== undefined && typeof value.remove_firewall !== "boolean") return refuse("invalid_body", "Expected bootstrap revocation details", 400);
+        await manager.revokeBootstrap(parts[0]!, value.remove_firewall === true); return respond({ ok: true });
+      }
+      return refuse("not_found", "Unknown PC endpoint", 404);
+    } catch (error) {
+      if (error instanceof BootstrapError) return refuse(error.code, error.message, error.status);
+      return refuse("machine_request_failed", "The SSH bootstrap request could not be completed", 400);
+    }
+  }
   // A PC's file opens as this PC's /api/fs/file does, from any navigation: reading it changes
   // nothing, and Chrome on Android shows a PDF in the viewer's frame as an "Open" button whose
   // navigation is cross-site. Every other PC route still answers only this app.
