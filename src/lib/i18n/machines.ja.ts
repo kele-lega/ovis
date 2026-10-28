@@ -1,7 +1,7 @@
 /**
  * Japanese for the keys only the machines files use:
  * components/MachineSidebar.tsx (with STATE_WORD), components/MachineDialog.tsx,
- * components/TailnetPcs.tsx, components/TailnetSetupHelp.tsx,
+ * components/TailnetPcs.tsx, components/TailnetSetupHelp.tsx, components/MachineBootstrap.tsx,
  * lib/bridgeProgress.ts (with STAGES).
  * Register and fixed terms follow ../i18n.ja.ts; a key another feature also uses goes there.
  */
@@ -134,4 +134,32 @@ export const MACHINES_JA: Record<string, string> = {
   "No workspaces or agents match": "一致するワークスペースやエージェントはありません",
   "No workspaces or agents match on the PCs that answered": "応答した PC には一致するワークスペースやエージェントはありません",
   "Try other words, or clear the filter.": "別の言葉で探すか、絞り込みを消去してください。",
+  "First-time SSH setup": "初回 SSH セットアップ",
+  "Run this on {name}, not on the Ovis server. It authorizes this Ovis server’s dedicated public key.": "Ovis サーバーではなく {name} で実行してください。この Ovis サーバー専用の公開鍵を登録します。",
+  "Ovis source: {ip}": "Ovis の接続元：{ip}",
+  "Downloads a fixed GitHub Release and verifies its SHA256 before execution. No Ovis token, password or private key is included.": "固定バージョンの GitHub Release をダウンロードし、実行前に SHA256 を検証します。Ovis トークン、パスワード、秘密鍵は含まれません。",
+  "Open PowerShell as Administrator using the same local Windows account entered above. Other accounts and domain accounts require manual SSH setup.": "上で入力したものと同じ Windows のローカルアカウントで PowerShell を管理者として開いてください。別のアカウントやドメインアカウントには手動の SSH 設定が必要です。",
+  "Windows administrator accounts share an SSH key file. The script warns and asks before granting access to that shared file; the key is not restricted to one administrator username.": "Windows の管理者アカウントは SSH 鍵ファイルを共有します。スクリプトは共有ファイルへの登録前に警告して確認を求めます。この鍵は一つの管理者ユーザー名だけに制限されません。",
+  "First enable and review SSH manually: Linux needs a running OpenSSH service; macOS needs Remote Login in System Settings. This command does not start SSH on these systems. sudo may ask for the PC’s administrator password.": "先に SSH を手動で有効化して確認してください。Linux は実行中の OpenSSH サービス、macOS はシステム設定のリモートログインが必要です。このコマンドはこれらの OS で SSH を起動しません。sudo は PC の管理者パスワードを求める場合があります。",
+  "This setup attempt expired. Go back and generate a new command; do not run the old command.": "このセットアップは期限切れです。戻って新しいコマンドを生成してください。古いコマンドは実行しないでください。",
+  "Connect before {time}. Closing or cancelling discards the pending server key; it does not undo changes already made on the PC.": "{time} までに接続してください。閉じるかキャンセルすると、サーバー上の待機中の鍵を破棄します。PC ですでに行われた変更は元に戻りません。",
+  "SSH setup command": "SSH セットアップコマンド",
+  "I ran the command successfully on the selected PC and kept its SSH fingerprints for comparison.": "選択した PC でコマンドを正常に実行し、照合用の SSH フィンガープリントを保存しました。",
+  "Next, compare the SSH fingerprint and review the installation list. Ovis will not trust a fingerprint or install the bridge automatically.": "次に SSH フィンガープリントを照合し、インストール一覧を確認します。Ovis は自動でフィンガープリントを信頼したり、ブリッジをインストールしたりしません。",
+  "Undo this SSH authorization": "この SSH 認可を取り消す",
+  "Expiry only discards the pending private key on Ovis. A public key already installed on the PC does not expire. Save this cleanup command and run it there to remove only this key and its app-owned firewall rule. SSH and existing sessions remain running.": "期限切れで破棄されるのは Ovis 上の待機中の秘密鍵だけです。PC に登録済みの公開鍵は期限切れになりません。この削除コマンドを保存し、その PC で実行すると、この鍵と専用のファイアウォール規則だけを削除します。SSH と既存のセッションは継続します。",
+  "SSH authorization cleanup command": "SSH 認可の削除コマンド",
+  "Could not copy automatically. Select the command and copy it manually.": "自動でコピーできませんでした。コマンドを選択して手動でコピーしてください。",
+  "The verified SSH setup release is not available. Ask the administrator to publish the pinned bootstrap release, or use manual SSH setup.": "検証済みの SSH セットアップリリースを利用できません。管理者に固定バージョンのスクリプトの公開を依頼するか、SSH を手動で設定してください。",
+  "First time: generate an SSH setup command": "初回設定：SSH セットアップコマンドを生成",
+  "Run one command on the selected PC to register a dedicated SSH key. Windows can install SSH; Linux and macOS require SSH enabled first. Then verify its fingerprint and approve installation here.": "選択した PC でコマンドを実行し、専用 SSH 鍵を登録します。Windows は SSH をインストールできます。Linux と macOS は先に SSH を有効にしてください。その後ここでフィンガープリントを確認し、インストールを承認します。",
+  "This guided setup uses port 22 and a local account. Existing custom SSH ports and keys use Connect instead.": "この設定はポート 22 とローカルアカウントを使用します。独自の SSH ポートや鍵を使う場合は「接続」を選んでください。",
+  "Preparing setup command…": "セットアップコマンドを準備中…",
+  "Generate setup command": "セットアップコマンドを生成",
+  "Discard setup and go back": "この設定を破棄して戻る",
+  "I ran it — continue": "実行済み — 続ける",
+  "Also revoke the SSH key installed by guided setup": "この設定で登録した SSH 鍵の認可も取り消す",
+  "Requires SSH access to the PC. If cleanup fails, this registration and its local key are kept so you can retry. SSH and herdr are not stopped.": "PC への SSH 接続が必要です。削除に失敗した場合は登録とローカルの鍵を保持するので、再試行できます。SSH と herdr は停止しません。",
+  "Also remove this setup’s Windows firewall rule, if present": "この設定で作成した Windows ファイアウォール規則も削除する（存在する場合）",
+  "Forgetting this PC deletes only the local key. Its public key and any firewall rule remain on the PC until you remove them there.": "PC の登録を削除しても、削除されるのはローカルの鍵だけです。公開鍵とファイアウォール規則は、その PC で削除するまで残ります。",
 };

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type Keyboard
 import { ChevronDown, ChevronRight, Download, Monitor, Plus, Settings, SlidersHorizontal, X } from "lucide-react";
 import type { Machine, MachineState, MachineUpdate } from "../../shared/machines.ts";
 import { MachineContext } from "../lib/machineContext.tsx";
-import { answerMachineSetup, machineRequest } from "../lib/api.ts";
+import { answerMachineSetup, machineRequest, revokeMachineBootstrap } from "../lib/api.ts";
 import { describeProgress } from "../lib/bridgeProgress.ts";
 import { keepDismissed, noticeKey, readDismissed, waitingMachines, writeDismissed } from "../lib/machineNotice.ts";
 import type { AppActions } from "../lib/actions.ts";
@@ -107,6 +107,8 @@ function MachineGroup({ machine, ...props }: Props & { machine: Machine }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(machine.name);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [revokeOnRemove, setRevokeOnRemove] = useState(false);
+  const [removeFirewall, setRemoveFirewall] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const online = machine.state === "connected";
   // a PC that waits on the user, or is updating, shows its notice in the state line's place
@@ -133,7 +135,10 @@ function MachineGroup({ machine, ...props }: Props & { machine: Machine }) {
     // as one removed elsewhere ("That link's PC is not set up here"). A failure puts it back.
     const leaving = method === "DELETE" && props.selectedMachineId === machine.id ? { pane: props.selectedPaneId } : null;
     if (leaving) props.onSelect("local", null);
-    try { await machineRequest(`/${machine.id}`, method, body); setError(null); }
+    try {
+      if (method === "DELETE" && revokeOnRemove && machine.can_revoke_bootstrap) await revokeMachineBootstrap(machine.id, removeFirewall);
+      await machineRequest(`/${machine.id}`, method, body); setError(null);
+    }
     catch (e) { setError(e instanceof Error ? e.message : String(e)); if (leaving) props.onSelect(machine.id, leaving.pane); }
     finally { inFlight.current = false; setBusy(null); }
   };
@@ -188,7 +193,17 @@ function MachineGroup({ machine, ...props }: Props & { machine: Machine }) {
         {machine.action_required !== "connect" && <button className="btn" disabled={!machine.enabled || !machine.target} onClick={() => props.onSetup(machine, true)}>{t("Update bridge…")}</button>}
         {!machine.herdr_profile_id && <button className="btn btn-danger" disabled={busy !== null} aria-busy={busy === "DELETE" || undefined} onClick={() => { if (confirmDelete) void mutate("DELETE"); else setConfirmDelete(true); }}>{t(confirmDelete ? "Confirm remove PC" : "Remove PC")}</button>}
       </div>
-      {confirmDelete && <p className="field-hint">{t("Removes this registration. Remote sessions keep running.")}</p>}
+      {confirmDelete && <>
+        <p className="field-hint">{t("Removes this registration. Remote sessions keep running.")}</p>
+        {machine.can_revoke_bootstrap && <>
+          <label className="machine-bootstrap-check"><input type="checkbox" checked={revokeOnRemove} disabled={busy !== null} onChange={(event) => setRevokeOnRemove(event.target.checked)} /><span>{t("Also revoke the SSH key installed by guided setup")}</span></label>
+          {revokeOnRemove && <>
+            <p className="field-hint">{t("Requires SSH access to the PC. If cleanup fails, this registration and its local key are kept so you can retry. SSH and herdr are not stopped.")}</p>
+            <label className="machine-bootstrap-check"><input type="checkbox" checked={removeFirewall} disabled={busy !== null} onChange={(event) => setRemoveFirewall(event.target.checked)} /><span>{t("Also remove this setup’s Windows firewall rule, if present")}</span></label>
+          </>}
+          {!revokeOnRemove && <p className="field-hint">{t("Forgetting this PC deletes only the local key. Its public key and any firewall rule remain on the PC until you remove them there.")}</p>}
+        </>}
+      </>}
     </div>}
     {error && <p className="machine-error" role="alert">{error}</p>}
     {/* under a filter a folded PC's roster is mounted, hidden, so the branches it reads can be found */}

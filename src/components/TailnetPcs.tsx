@@ -35,7 +35,7 @@ export function TailnetPcs({ onAdd }: { onAdd: (initial: MachineSetupInitial) =>
       {peer.registrations.length > 0 && <><br />{t("Already added: {accounts}", { accounts: peer.registrations.map((item) => `${item.user ?? t("SSH default account")}${item.port === null ? "" : `:${item.port}`} / ${item.session} (${item.name})`).join(", ") })}</>}
       {peer.os === "windows" && <><br />{t("Requires OpenSSH Server on this PC.")}</>}
     </>}>
-      <button type="button" className="btn" disabled={!peer.online} aria-label={peer.registrations.length ? t("Add another account on {name}", { name: peer.name }) : t("Add {name}", { name: peer.name })} onClick={() => onAdd({ destination: peer.destination, name: peer.name, hostname: peer.hostname, dns_name: peer.dns_name, os: peer.os })}>{peer.registrations.length ? t("Add another account…") : t("Add PC")}</button>
+      <button type="button" className="btn" disabled={!peer.online} aria-label={peer.registrations.length ? t("Add another account on {name}", { name: peer.name }) : t("Add {name}", { name: peer.name })} onClick={() => onAdd({ id: peer.id, destination: peer.destination, name: peer.name, hostname: peer.hostname, dns_name: peer.dns_name, os: peer.os })}>{peer.registrations.length ? t("Add another account…") : t("Add PC")}</button>
     </SettingsRow>)}
   </SettingsGroup>;
 }

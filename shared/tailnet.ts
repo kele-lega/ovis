@@ -23,4 +23,4 @@ export interface TailnetPeers {
   peers: TailnetPeer[];
 }
 /** Transient discovery context; never a saved setting or a new setup API parameter. */
-export type MachineSetupInitial = Pick<TailnetPeer, "destination" | "name" | "hostname" | "dns_name" | "os">;
+export type MachineSetupInitial = Pick<TailnetPeer, "id" | "destination" | "name" | "hostname" | "dns_name" | "os">;

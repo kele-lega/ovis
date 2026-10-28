@@ -1,7 +1,7 @@
 /**
  * Korean for the keys only the machines files use:
  * components/MachineSidebar.tsx (with STATE_WORD), components/MachineDialog.tsx,
- * components/TailnetPcs.tsx, components/TailnetSetupHelp.tsx,
+ * components/TailnetPcs.tsx, components/TailnetSetupHelp.tsx, components/MachineBootstrap.tsx,
  * lib/bridgeProgress.ts (with STAGES).
  * Register and fixed terms follow ../i18n.ko.ts; a key another feature also uses goes there.
  */
@@ -134,4 +134,32 @@ export const MACHINES_KO: Record<string, string> = {
   "No workspaces or agents match": "일치하는 워크스페이스나 에이전트가 없습니다",
   "No workspaces or agents match on the PCs that answered": "응답한 PC에는 일치하는 워크스페이스나 에이전트가 없습니다",
   "Try other words, or clear the filter.": "다른 단어로 찾거나 필터를 지우세요.",
+  "First-time SSH setup": "최초 SSH 설정",
+  "Run this on {name}, not on the Ovis server. It authorizes this Ovis server’s dedicated public key.": "Ovis 서버가 아닌 {name}에서 실행하세요. 이 Ovis 서버의 전용 공개 키를 등록합니다.",
+  "Ovis source: {ip}": "Ovis 접속 원본: {ip}",
+  "Downloads a fixed GitHub Release and verifies its SHA256 before execution. No Ovis token, password or private key is included.": "고정 버전의 GitHub Release를 내려받고 실행 전에 SHA256을 검증합니다. Ovis 토큰, 비밀번호 또는 개인 키는 포함되지 않습니다.",
+  "Open PowerShell as Administrator using the same local Windows account entered above. Other accounts and domain accounts require manual SSH setup.": "위에 입력한 것과 같은 Windows 로컬 계정으로 PowerShell을 관리자 권한으로 여세요. 다른 계정과 도메인 계정에는 수동 SSH 설정이 필요합니다.",
+  "Windows administrator accounts share an SSH key file. The script warns and asks before granting access to that shared file; the key is not restricted to one administrator username.": "Windows 관리자 계정은 SSH 키 파일을 공유합니다. 스크립트는 공유 파일에 등록하기 전에 경고하고 확인을 요청합니다. 이 키는 한 관리자 사용자 이름으로만 제한되지 않습니다.",
+  "First enable and review SSH manually: Linux needs a running OpenSSH service; macOS needs Remote Login in System Settings. This command does not start SSH on these systems. sudo may ask for the PC’s administrator password.": "먼저 SSH를 수동으로 활성화하고 확인하세요. Linux는 실행 중인 OpenSSH 서비스가, macOS는 시스템 설정의 원격 로그인이 필요합니다. 이 명령은 해당 시스템에서 SSH를 시작하지 않습니다. sudo가 PC의 관리자 비밀번호를 요청할 수 있습니다.",
+  "This setup attempt expired. Go back and generate a new command; do not run the old command.": "이 설정 시도가 만료되었습니다. 돌아가서 새 명령을 생성하세요. 이전 명령은 실행하지 마세요.",
+  "Connect before {time}. Closing or cancelling discards the pending server key; it does not undo changes already made on the PC.": "{time} 전에 연결하세요. 닫거나 취소하면 서버의 대기 중인 키를 폐기합니다. PC에서 이미 변경한 내용은 되돌리지 않습니다.",
+  "SSH setup command": "SSH 설정 명령",
+  "I ran the command successfully on the selected PC and kept its SSH fingerprints for comparison.": "선택한 PC에서 명령을 성공적으로 실행했으며 비교할 SSH 지문을 보관했습니다.",
+  "Next, compare the SSH fingerprint and review the installation list. Ovis will not trust a fingerprint or install the bridge automatically.": "이어서 SSH 지문을 비교하고 설치 목록을 확인하세요. Ovis는 지문을 자동으로 신뢰하거나 브리지를 자동 설치하지 않습니다.",
+  "Undo this SSH authorization": "이 SSH 권한 취소",
+  "Expiry only discards the pending private key on Ovis. A public key already installed on the PC does not expire. Save this cleanup command and run it there to remove only this key and its app-owned firewall rule. SSH and existing sessions remain running.": "만료되면 Ovis의 대기 중인 개인 키만 폐기합니다. PC에 등록한 공개 키는 만료되지 않습니다. 이 정리 명령을 저장하고 해당 PC에서 실행하면 이 키와 전용 방화벽 규칙만 제거합니다. SSH와 기존 세션은 계속 실행됩니다.",
+  "SSH authorization cleanup command": "SSH 권한 정리 명령",
+  "Could not copy automatically. Select the command and copy it manually.": "자동으로 복사하지 못했습니다. 명령을 선택하여 직접 복사하세요.",
+  "The verified SSH setup release is not available. Ask the administrator to publish the pinned bootstrap release, or use manual SSH setup.": "검증된 SSH 설정 릴리스를 사용할 수 없습니다. 관리자에게 고정 버전의 설정 스크립트 게시를 요청하거나 SSH를 수동으로 설정하세요.",
+  "First time: generate an SSH setup command": "최초 설정: SSH 설정 명령 생성",
+  "Run one command on the selected PC to register a dedicated SSH key. Windows can install SSH; Linux and macOS require SSH enabled first. Then verify its fingerprint and approve installation here.": "선택한 PC에서 명령 하나로 전용 SSH 키를 등록하세요. Windows는 SSH를 설치할 수 있고 Linux와 macOS는 먼저 SSH를 켜야 합니다. 그런 다음 여기서 지문을 확인하고 설치를 승인하세요.",
+  "This guided setup uses port 22 and a local account. Existing custom SSH ports and keys use Connect instead.": "이 설정은 포트 22와 로컬 계정을 사용합니다. 사용자 지정 SSH 포트나 기존 키를 사용하려면 연결을 선택하세요.",
+  "Preparing setup command…": "설정 명령 준비 중…",
+  "Generate setup command": "설정 명령 생성",
+  "Discard setup and go back": "설정 폐기 후 돌아가기",
+  "I ran it — continue": "실행 완료 — 계속",
+  "Also revoke the SSH key installed by guided setup": "이 설정으로 등록한 SSH 키 권한도 취소",
+  "Requires SSH access to the PC. If cleanup fails, this registration and its local key are kept so you can retry. SSH and herdr are not stopped.": "PC에 SSH로 접속할 수 있어야 합니다. 정리에 실패하면 재시도할 수 있도록 등록과 로컬 키를 유지합니다. SSH와 herdr는 중지하지 않습니다.",
+  "Also remove this setup’s Windows firewall rule, if present": "이 설정에서 만든 Windows 방화벽 규칙도 제거(있는 경우)",
+  "Forgetting this PC deletes only the local key. Its public key and any firewall rule remain on the PC until you remove them there.": "PC 등록을 지워도 로컬 키만 삭제됩니다. 공개 키와 방화벽 규칙은 해당 PC에서 제거할 때까지 남아 있습니다.",
 };
