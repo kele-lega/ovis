@@ -18,17 +18,17 @@ const dnsName = (value: unknown): string => {
   return name.length <= 253 && name.split(".").every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)) ? name : "";
 };
 
-/** No probes: Online is what Tailscale last reported, not evidence that SSH works. */
-export function parseTailnetPeers(status: string): TailnetPeers {
-  let parsed: Record<string, unknown> | null;
-  try { parsed = object(JSON.parse(status.replace(/("UserID"\s*:\s*)(\d+)/g, '$1"$2"'))); }
-  catch { return { state: "unavailable", peers: [] }; }
+function parseStatus(status: string): Record<string, unknown> | null {
+  try { return object(JSON.parse(status.replace(/("UserID"\s*:\s*)(\d+)/g, '$1"$2"'))); }
+  catch { return null; }
+}
+
+function peersFromStatus(parsed: Record<string, unknown> | null): TailnetPeers {
   if (!parsed) return { state: "unavailable", peers: [] };
   if (parsed.BackendState !== "Running") return { state: "stopped", peers: [] };
   const self = object(parsed.Self);
   const owner = self?.UserID;
   if (!self || typeof owner !== "string" || !/^\d+$/.test(owner) || owner === "0" || (Array.isArray(self.Tags) && self.Tags.length > 0)) return { state: "identity_unavailable", peers: [] };
-  const magicDns = object(parsed.CurrentTailnet)?.MagicDNSEnabled === true;
   const peers: TailnetPeer[] = [];
   for (const value of Object.values(object(parsed.Peer) ?? {})) {
     const peer = object(value);
@@ -38,12 +38,19 @@ export function parseTailnetPeers(status: string): TailnetPeers {
     const id = text(peer.ID);
     const addresses = Array.isArray(peer.TailscaleIPs) ? peer.TailscaleIPs.filter((ip): ip is string => typeof ip === "string" && isIP(ip) !== 0) : [];
     const dns = dnsName(peer.DNSName);
-    const destination = magicDns && dns ? dns : addresses.find((ip) => isIP(ip) === 4) ?? addresses[0];
+    // DNS is display/matching identity only, even when the tailnet has MagicDNS enabled.
+    const destination = addresses.find((ip) => isIP(ip) === 4) ?? addresses[0];
     if (!id || !destination) continue;
-    peers.push({ id, name: dns.split(".")[0] || text(peer.HostName) || destination, destination, addresses: [...addresses, ...(dns ? [dns] : [])], os, online: peer.Online === true, registrations: [] });
+    const hostname = text(peer.HostName);
+    peers.push({ id, name: dns.split(".")[0] || hostname || destination, hostname, dns_name: dns || null, destination, addresses: [...addresses, ...(dns ? [dns] : [])], os, online: peer.Online === true, registrations: [] });
   }
   peers.sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
   return { state: "running", peers };
+}
+
+/** No probes: Online is what Tailscale last reported, not evidence that SSH works. */
+export function parseTailnetPeers(status: string): TailnetPeers {
+  return peersFromStatus(parseStatus(status));
 }
 
 export interface ResolvedSshTarget { hostname: string; user: string | null; port: number | null }
@@ -103,8 +110,10 @@ export async function readTailnetPeers(machines: readonly Machine[], options: {
   } catch { return { state: "unavailable", peers: [] }; }
   if (status === undefined) return { state: "missing", peers: [] };
   if (status === null) return { state: "unavailable", peers: [] };
-  const result = parseTailnetPeers(status);
+  const parsed = parseStatus(status);
+  const result = peersFromStatus(parsed);
   if (result.peers.length === 0) return result;
+  const magicDns = object(parsed?.CurrentTailnet)?.MagicDNSEnabled === true;
   const config = await (options.readConfig ?? savedSshConfig)().catch(() => null);
   if (config === null) return result;
   for (const machine of machines) {
@@ -112,7 +121,7 @@ export async function readTailnetPeers(machines: readonly Machine[], options: {
     const resolved = resolveSavedSshTarget(machine.target, config);
     if (!resolved) continue;
     for (const peer of result.peers) {
-      const shortName = !isIP(peer.destination) ? peer.destination.split(".")[0] : null;
+      const shortName = magicDns && peer.dns_name ? peer.dns_name.split(".")[0] : null;
       if (resolved.hostname !== shortName && !peer.addresses.some((address) => host(address) === resolved.hostname)) continue;
       peer.registrations.push({ machine_id: machine.id, name: machine.name, user: resolved.user, port: resolved.port, session: machine.target.session || "default" });
     }

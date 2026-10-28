@@ -1,5 +1,3 @@
-import type { SetupRequest } from "./machines.ts";
-
 export interface TailnetRegistration {
   machine_id: string;
   name: string;
@@ -10,6 +8,9 @@ export interface TailnetRegistration {
 export interface TailnetPeer {
   id: string;
   name: string;
+  hostname: string;
+  dns_name: string | null;
+  /** Literal Tailscale IP: IPv4 preferred, IPv6 only when no IPv4 is available. */
   destination: string;
   addresses: string[];
   os: string;
@@ -21,4 +22,5 @@ export interface TailnetPeers {
   state: "missing" | "unavailable" | "stopped" | "running" | "identity_unavailable";
   peers: TailnetPeer[];
 }
-export type MachineSetupInitial = Pick<SetupRequest, "destination" | "name">;
+/** Transient discovery context; never a saved setting or a new setup API parameter. */
+export type MachineSetupInitial = Pick<TailnetPeer, "destination" | "name" | "hostname" | "dns_name" | "os">;

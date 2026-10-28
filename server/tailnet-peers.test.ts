@@ -17,14 +17,21 @@ describe("tailnet PC discovery", () => {
     ]));
     expect(result.state).toBe("running");
     expect(result.peers.map((peer) => peer.id)).toEqual(["n1", "offline"]);
-    expect(result.peers[0]).toMatchObject({ name: "box", destination: "box.example.ts.net", online: true });
+    expect(result.peers[0]).toMatchObject({ name: "box", hostname: "box", dns_name: "box.example.ts.net", destination: "100.64.0.2", online: true });
   });
   it("never rounds numeric Tailscale user ids above the JS safe integer limit", () => {
     const raw = '{"BackendState":"Running","Self":{"ID":"self","UserID":9007199254740992},"Peer":{"a":{"ID":"a","UserID":9007199254740992,"OS":"linux","TailscaleIPs":["100.64.0.2"]},"b":{"ID":"b","UserID":9007199254740993,"OS":"linux","TailscaleIPs":["100.64.0.3"]}}}';
     expect(parseTailnetPeers(raw).peers.map((peer) => peer.id)).toEqual(["a"]);
   });
+  it("matches numeric and string owners exactly without accepting unknown or malformed owners", () => {
+    const raw = '{"BackendState":"Running","Self":{"ID":"self","UserID":42},"CurrentTailnet":{"MagicDNSEnabled":true},"Peer":{"a":{"ID":"a","UserID":"42","DNSName":"a.example.ts.net.","OS":"linux","TailscaleIPs":["100.64.0.2"]},"b":{"ID":"b","UserID":42,"OS":"linux","TailscaleIPs":["100.64.0.3"]}}}';
+    expect(parseTailnetPeers(raw).peers.map((peer) => peer.id).sort()).toEqual(["a", "b"]);
+    for (const UserID of [undefined, null, false, 0, -1, "9007199254740994", "9007199254740993x"]) {
+      expect(parseTailnetPeers(status([node({ UserID })])).peers).toEqual([]);
+    }
+  });
   it("fails closed when the node has no personal owner", () => {
-    for (const Self of [{ Tags: ["tag:server"], UserID: "1" }, {}, { UserID: 0 }, null]) {
+    for (const Self of [{ Tags: ["tag:server"], UserID: "1" }, {}, { UserID: 0 }, { UserID: null }, { UserID: -1 }, { UserID: false }, { UserID: "invalid" }, null]) {
       expect(parseTailnetPeers(status([node()], { Self }))).toEqual({ state: "identity_unavailable", peers: [] });
     }
   });
@@ -32,13 +39,30 @@ describe("tailnet PC discovery", () => {
     for (const raw of ["broken", "null", "[]"]) expect(parseTailnetPeers(raw).state).toBe("unavailable");
     expect(parseTailnetPeers(status([], { BackendState: "NeedsLogin" }))).toEqual({ state: "stopped", peers: [] });
   });
-  it("uses an IP when MagicDNS is off or malformed, and never emits option or shell syntax", () => {
-    expect(parseTailnetPeers(status([node()], { CurrentTailnet: { MagicDNSEnabled: false } })).peers[0]!.destination).toBe("100.64.0.2");
-    for (const DNSName of ["-oProxyCommand=evil", "a;evil.ts.net", "a b.ts.net", "a..ts.net"]) {
-      expect(parseTailnetPeers(status([node({ DNSName })])).peers[0]!.destination).toBe("100.64.0.2");
+  it("keeps the reported hostname and normalized DNS as identity, but always prefers IPv4 over DNS or IPv6", () => {
+    for (const CurrentTailnet of [{ MagicDNSEnabled: true }, { MagicDNSEnabled: false }, {}, null]) {
+      const peer = parseTailnetPeers(status([node({ HostName: "Reported-Host", DNSName: "BOX.Example.TS.NET.", TailscaleIPs: ["bad", "fd7a:115c:a1e0::2", "100.64.0.2"] })], { CurrentTailnet })).peers[0]!;
+      expect(peer).toMatchObject({
+        name: "box", hostname: "Reported-Host", dns_name: "box.example.ts.net", destination: "100.64.0.2",
+        addresses: ["fd7a:115c:a1e0::2", "100.64.0.2", "box.example.ts.net"],
+      });
     }
-    expect(parseTailnetPeers(status([node({ DNSName: "", TailscaleIPs: ["bad"] })])).peers).toEqual([]);
-    expect(parseTailnetPeers(status([node({ DNSName: "", TailscaleIPs: ["fd7a:115c:a1e0::2"] })])).peers[0]!.destination).toBe("fd7a:115c:a1e0::2");
+  });
+  it("falls back to validated IPv6 even when MagicDNS is enabled", () => {
+    const peer = parseTailnetPeers(status([node({ TailscaleIPs: ["bad", "100.64.0.999", "fd7a:115c:a1e0::2"] })])).peers[0]!;
+    expect(peer).toMatchObject({ destination: "fd7a:115c:a1e0::2", dns_name: "box.example.ts.net", addresses: ["fd7a:115c:a1e0::2", "box.example.ts.net"] });
+  });
+  it("skips peers without a validated IP even when they have a valid MagicDNS name", () => {
+    for (const TailscaleIPs of [undefined, null, "100.64.0.2", [], [null, 100, "bad", "100.64.0.999", "fd7a:::2", "box.example.ts.net", "-oProxyCommand=evil", "100.64.0.2;evil"]]) {
+      expect(parseTailnetPeers(status([node({ TailscaleIPs })])).peers).toEqual([]);
+    }
+  });
+  it("never promotes malformed DNS to a destination or registration identity", () => {
+    for (const DNSName of [undefined, null, "", "-oProxyCommand=evil", "a;evil.ts.net", "a b.ts.net", "a..ts.net"]) {
+      expect(parseTailnetPeers(status([node({ HostName: "Host-Only", DNSName })])).peers[0]).toMatchObject({
+        name: "Host-Only", hostname: "Host-Only", dns_name: null, destination: "100.64.0.2", addresses: ["100.64.0.2", "fd7a:115c:a1e0::2"],
+      });
+    }
   });
   it("reads simple static aliases, explicit users and ports without invoking SSH", () => {
     const config = "Host alias\n HostName BOX.example.ts.net\n User root\n Port 22\n IdentityFile /private/key\nHost *\n User fallback\n";
@@ -64,9 +88,41 @@ describe("tailnet PC discovery", () => {
       { machine_id: "other-session", name: "other-session", user: "root", port: 22, session: "other" },
     ]);
   });
-  it("does not match short names when MagicDNS is off", async () => {
-    const result = await readTailnetPeers([machine("short", "alice@box")], { readStatus: async () => status([node()], { CurrentTailnet: { MagicDNSEnabled: false } }), readConfig: async () => "" });
-    expect(result.peers[0]!.registrations).toEqual([]);
+  it("matches existing full DNS, IPv4, IPv6 and enabled short DNS registrations without modifying them", async () => {
+    const machines = [
+      machine("dns", "alice@BOX.EXAMPLE.TS.NET."), machine("ipv4", "100.64.0.2"),
+      machine("ipv6", "fd7a:115c:a1e0::2"), machine("short", "box"), machine("host-only", "reported-host"),
+    ];
+    const before = structuredClone(machines);
+    const result = await readTailnetPeers(machines, { readStatus: async () => status([node({ HostName: "reported-host" })]), readConfig: async () => "" });
+    expect(result.peers[0]!.destination).toBe("100.64.0.2");
+    expect(result.peers[0]!.registrations.map((entry) => entry.machine_id).sort()).toEqual(["dns", "ipv4", "ipv6", "short"]);
+    expect(machines).toEqual(before);
+  });
+  it("requires an explicitly enabled MagicDNS for short-name matching, independent of the IP destination", async () => {
+    for (const CurrentTailnet of [{ MagicDNSEnabled: true }, { MagicDNSEnabled: false }, { MagicDNSEnabled: "true" }, {}, null, undefined]) {
+      const result = await readTailnetPeers([machine("dns", "box.example.ts.net"), machine("ipv4", "100.64.0.2"), machine("short", "alice@box")], {
+        readStatus: async () => status([node()], { CurrentTailnet }), readConfig: async () => "",
+      });
+      expect(result.peers[0]!.destination).toBe("100.64.0.2");
+      const ids = CurrentTailnet?.MagicDNSEnabled === true ? ["dns", "ipv4", "short"] : ["dns", "ipv4"];
+      expect(result.peers[0]!.registrations.map((entry) => entry.machine_id).sort()).toEqual(ids);
+    }
+  });
+  it("keeps DNS and short-name matches when IPv6 is the only usable destination", async () => {
+    const result = await readTailnetPeers([machine("dns", "box.example.ts.net"), machine("ipv6", "fd7a:115c:a1e0::2"), machine("short", "box")], {
+      readStatus: async () => status([node({ TailscaleIPs: ["bad", "fd7a:115c:a1e0::2"] })]), readConfig: async () => "",
+    });
+    expect(result.peers[0]!.destination).toBe("fd7a:115c:a1e0::2");
+    expect(result.peers[0]!.registrations.map((entry) => entry.machine_id).sort()).toEqual(["dns", "ipv6", "short"]);
+  });
+  it("never matches a display hostname or malformed DNS as a short-name registration", async () => {
+    for (const DNSName of ["", "box..example.ts.net", "box;evil.ts.net"]) {
+      const result = await readTailnetPeers([machine("display-only", "box"), machine("ip", "100.64.0.2")], {
+        readStatus: async () => status([node({ DNSName })]), readConfig: async () => "",
+      });
+      expect(result.peers[0]!.registrations.map((entry) => entry.machine_id)).toEqual(["ip"]);
+    }
   });
   it("keeps default account and port unknown rather than guessing the SSH configuration", async () => {
     const result = await readTailnetPeers([machine("default", "box.example.ts.net")], { readStatus: async () => status(), readConfig: async () => "" });
@@ -74,7 +130,7 @@ describe("tailnet PC discovery", () => {
   });
   it("does not read configuration for an empty network or stopped daemon", async () => {
     let calls = 0;
-    for (const raw of [status([]), status([], { BackendState: "Stopped" })]) {
+    for (const raw of [status([]), status([node({ TailscaleIPs: [] })]), status([], { BackendState: "Stopped" })]) {
       await readTailnetPeers([machine("x", "alias")], { readStatus: async () => raw, readConfig: async () => { calls++; return ""; } });
     }
     expect(calls).toBe(0);
