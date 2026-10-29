@@ -9,9 +9,10 @@ import { compressResponse } from "./compress.ts";
 // source into an owned fixture rather than replacing the checkout's built client.
 async function fixture(check: (serve: (path: string, encoding?: string | null) => Promise<Response>) => Promise<void>) {
   const root = mkdtempSync(join(tmpdir(), "herdr-static-encoding-"));
-  mkdirSync(join(root, "server")); mkdirSync(join(root, "dist", "assets"), { recursive: true });
+  mkdirSync(join(root, "server")); mkdirSync(join(root, "shared")); mkdirSync(join(root, "dist", "assets"), { recursive: true });
   const body = 'console.log("synthetic static file");\n';
   writeFileSync(join(root, "server", "static.ts"), readFileSync(join(import.meta.dir, "static.ts")));
+  writeFileSync(join(root, "shared", "direct.ts"), readFileSync(join(import.meta.dir, "..", "shared", "direct.ts")));
   writeFileSync(join(root, "dist", "index.html"), "<html>fixture shell</html>");
   writeFileSync(join(root, "dist", "sw.js"), body);
   writeFileSync(join(root, "dist", "assets", "legacy.js"), body);

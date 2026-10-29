@@ -150,6 +150,7 @@ function refreshClock(): { advance(ms: number): void; pending(): number } {
   const clock = spyOn(performance, "now").mockImplementation(() => now);
   restoreClock = () => { clock.mockRestore(); };
   globals.window = {
+    location: new URL("http://localhost"),
     setTimeout(callback: () => void, delay: number): number {
       const id = next++;
       timers.set(id, { at: now + delay, callback });
