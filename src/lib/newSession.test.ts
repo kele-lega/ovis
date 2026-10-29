@@ -23,6 +23,25 @@ describe("newSessionLaunch", () => {
     expect(newSessionLaunch({ agent: "", model: "", effort: "", prompt: "" }, plain)).toEqual({ agent: null, prompt: null });
   });
 
+  it("ignores stale model/effort for a command and always queues its first message, even for Codex", () => {
+    const command = " wrapper --my-options  ";
+    for (const kind of ["claude", "codex", "omp"]) {
+      const settings = { ...plain, agentCommands: { [kind]: command } };
+      const launch = newSessionLaunch({ agent: kind, model: "stale invalid model", effort: "stale effort", prompt: "  update\nthen review  " }, settings);
+      expect(launch).toEqual({ agent: { kind, command }, prompt: { text: "update\nthen review", via: "pending" } });
+      if ("fault" in launch) throw new Error("unexpected fault");
+      for (const tab of [null, { workspaceId: "w1", cwd: "/work" }]) {
+        expect(createRequest({ tab, directory: "/work", name: "" }, launch, "page1"))
+          .toMatchObject({ agent: { kind, command }, first_message: "update\nthen review", first_message_connection: "page1" });
+      }
+      expect(newSessionLaunch({ agent: kind, model: "stale", effort: "stale", prompt: " " }, settings))
+        .toEqual({ agent: { kind, command }, prompt: null });
+    }
+    const oneLine = newSessionLaunch({ agent: "codex", model: "", effort: "", prompt: "logout" }, { ...plain, agentCommands: { codex: command } });
+    expect(firstMessageOf(oneLine)).toBe("logout");
+    expect(oneLine).toEqual({ agent: { kind: "codex", command }, prompt: { text: "logout", via: "pending" } });
+  });
+
   it("names the first choice an agent's launch does not take, and queues nothing for it", () => {
     expect(newSessionLaunch({ agent: "omp", model: "gpt-5", effort: "", prompt: "" }, plain)).toEqual({ fault: "model" });
     expect(newSessionLaunch({ agent: "omp", model: "", effort: "high", prompt: "" }, plain)).toEqual({ fault: "effort" });

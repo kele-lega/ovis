@@ -415,6 +415,18 @@ try {
                 "dictation selection does not change the display language");
               await dictation.selectOption("auto");
             }
+            if (name === "Chat") {
+              const launches = page.locator('.settings-body:not([hidden]) [data-section="launch-modes"]');
+              assert.deepEqual(await launches.locator("h3").allTextContents(), [label("New agents")]);
+              assert.deepEqual(await launches.locator(".settings-row").evaluateAll((nodes) => nodes.map((node) => ({
+                label: node.querySelector(".settings-label")?.textContent ?? "",
+                description: node.querySelector(".settings-description")?.textContent ?? "",
+                control: node.querySelector("select")?.id ?? null,
+              }))), [
+                { label: "Claude Code", description: label("Permission mode"), control: "settings-claude-launch-mode" },
+                { label: "Codex", description: label("Sandbox and approvals"), control: "settings-codex-launch-mode" },
+              ], "new-agent launch modes are on the Chat page");
+            }
             if (name === "Agent integrations") {
               // the demo's fixture, in herdr's order with the agents found on the PC first: a failed request
               // would leave one error paragraph that still fits, so the rows and their states are asserted
@@ -430,9 +442,6 @@ try {
               const copyLabel = (target: string): string => label("Copy the command for {name}").replace("{name}", target);
               const missing = label("Not installed");
               assert.deepEqual(shown, [
-                // the launch modes for new Claude Code and Codex agents lead the page
-                { label: "Claude Code", description: label("Permission mode"), command: null, copy: null },
-                { label: "Codex", description: label("Sandbox and approvals"), command: null, copy: null },
                 { label: "pi", description: missing + install("pi"), command: install("pi"), copy: copyLabel("pi") },
                 { label: "claude", description: label("Installed"), command: null, copy: null },
                 { label: "codex", description: label("Installed, but older than this herdr: run this to update it") + install("codex"), command: install("codex"), copy: copyLabel("codex") },
@@ -442,7 +451,9 @@ try {
                 { label: "cursor", description: missing + install("cursor"), command: install("cursor"), copy: copyLabel("cursor") },
                 { label: "antigravity-cli", description: missing + install("antigravity-cli"), command: install("antigravity-cli"), copy: copyLabel("antigravity-cli") },
               ], "every fixture integration, with its state and install command");
-              assert.deepEqual(await body.locator("h3").allTextContents(), [label("New agents"), label("Not found on this PC")]);
+              assert.deepEqual(await body.locator("h3").allTextContents(), [label("Not found on this PC")]);
+              assert.equal(await body.locator("#settings-claude-launch-mode, #settings-codex-launch-mode").count(), 0,
+                "launch modes are not duplicated in Agent integrations");
               const copy = body.getByRole("button", { name: copyLabel("codex"), exact: true });
               await copy.tap();
               await body.getByRole("button", { name: copyLabel("codex"), exact: true }).filter({ hasText: label("Copied") }).waitFor();

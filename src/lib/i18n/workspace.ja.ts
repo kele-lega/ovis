@@ -89,4 +89,7 @@ export const WORKSPACE_JA: Record<string, string> = {
   "The folder could not be made.": "フォルダーを作成できませんでした。",
   "Tab name (optional)": "タブ名 (任意)",
   "Uses the workspace's folder": "ワークスペースのフォルダーをそのまま使います",
+  "Custom command": "カスタムコマンド",
+  "Uses the saved custom command for {agent}. Permission, model and effort settings are not added. Resume is unchanged.": "保存済みの {agent} のカスタムコマンドを使います。権限、モデル、推論レベルの設定は追加されません。再開には影響しません。",
+  "This PC's bridge does not support custom launch commands. Update it or clear this agent's command in Settings > Chat. Nothing will start.": "この PC のブリッジはカスタム起動コマンドに対応していません。更新するか、設定 > チャットでこのエージェントのコマンドを消去してください。何も起動しません。",
 };

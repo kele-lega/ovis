@@ -1,8 +1,30 @@
 import { expect, it } from "bun:test";
 
-import { CLAUDE_EFFORTS, CODEX_EFFORTS, firstPromptDelivery, launchAgent, launchArgs, launchCapabilities, launchChoiceFault, modelSuggestions } from "./agentLaunchMode.ts";
+import { CLAUDE_EFFORTS, CODEX_EFFORTS, firstPromptDelivery, launchAgent, launchArgs, launchCapabilities, launchCommandUnsupported, launchChoiceFault, modelSuggestions } from "./agentLaunchMode.ts";
 
 const plain = { claudeLaunchMode: "default", codexLaunchMode: "default" } as const;
+
+it("uses an exact command exclusively in every new-agent path, including worktree launches", () => {
+  const command = "  wrapper --model 'my model' --effort custom  ";
+  const settings = { claudeLaunchMode: "plan", codexLaunchMode: "fullAccess", agentCommands: { claude: command, codex: command, omp: "my-omp" } } as const;
+  for (const kind of ["claude", "codex", "omp"]) {
+    expect(launchAgent(kind, settings, { model: "invalid model", effort: "stale", prompt: "Never append me" }))
+      .toEqual({ kind, command: kind === "omp" ? "my-omp" : command });
+  }
+  // WorktreeDialog supplies only its kind and settings; clearing restores its saved launch mode.
+  expect(launchAgent("codex", settings)).toEqual({ kind: "codex", command });
+  expect(launchAgent("claude", { ...settings, agentCommands: {} })).toEqual({ kind: "claude", args: ["--permission-mode", "plan"] });
+  expect(launchAgent("", settings)).toBeNull();
+  expect(launchAgent("copilot", settings)).toEqual({ kind: "copilot" });
+  expect(launchAgent("codex", { ...plain, agentCommands: Object.create({ codex: "inherited" }) })).toEqual({ kind: "codex" });
+});
+
+it("blocks custom commands unless this PC explicitly advertises support, and leaves normal starts alone", () => {
+  expect(launchCommandUnsupported({ command: "run" }, false)).toBeTrue();
+  expect(launchCommandUnsupported({ command: "run" }, true)).toBeFalse();
+  expect(launchCommandUnsupported({}, false)).toBeFalse();
+  expect(launchCommandUnsupported(null, false)).toBeFalse();
+});
 
 it("adds nothing while both modes follow the agent's own configuration", () => {
   expect(launchArgs("claude", plain)).toBeUndefined();

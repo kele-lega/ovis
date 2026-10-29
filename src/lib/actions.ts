@@ -5,6 +5,7 @@
  */
 
 import type { SplitPaneDirection } from "../../shared/protocol.ts";
+import type { MachineSetupInitial } from "../../shared/tailnet.ts";
 import type { ZoomMode } from "./layoutMap.ts";
 
 export type PaneView = "chat" | "terminal";
@@ -57,7 +58,7 @@ export interface AppActions {
   openFind: () => void;
   openSettings: () => void;
   /** the Add PC dialog, from Settings → Remote PCs and the palette; Settings closes first */
-  openAddPc: () => void;
+  openAddPc: (initial?: MachineSetupInitial) => void;
   toggleSidebar: () => void;
   /** flips dark/light (a `system` setting becomes the opposite of the resolved theme) */
   toggleTheme: () => void;

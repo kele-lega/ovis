@@ -1,11 +1,14 @@
 import { apiFetch as fetch } from "./api-request-id.ts";
+import { clearDirectTransports } from "./directTransport.ts";
 import type { PreferencesChange, SharedPreferences } from "../../shared/preferences.ts";
 import type { SeenFinish } from "../../shared/seen.ts";
 import { resumeConnectionTraces } from "./connectionTrace.ts";
+import type { BootstrapAttempt, BootstrapRequest } from "../../shared/bootstrap.ts";
 import { machinePath, type BridgeHealth, type HerdrIdentity, type Machine, type MachineRoster, type SetupAction, type SetupJob, type SetupRequest } from "../../shared/machines.ts";
 import type {
   WorkspaceMoved,
   AgentKind,
+  AgentsResponse,
   AgentRenameRequest,
   CommandOutcome,
   ConversationResponse,
@@ -380,6 +383,7 @@ export async function fetchPaneConversation(paneId: string, machineId = "local",
 
 export interface HealthInfo {
   ok: boolean;
+  launch_command?: boolean;
   herdr: HerdrIdentity;
   web_ui?: { boot_id: string | null; revision: string | null };
   /** Absent only on a server that predates the token gate. */
@@ -432,6 +436,7 @@ export async function revokeDevice(id: string): Promise<void> {
 
 /** DELETE /api/auth: clears the session and device cookies, so the next health check reports the gate again. */
 export async function signOut(): Promise<void> {
+  clearDirectTransports();
   const response = await fetch("/api/auth", { method: "DELETE" });
   if (!response.ok) throw await errorFrom("/api/auth", response);
 }
@@ -610,11 +615,12 @@ export async function clearPane(paneId: string, machineId = "local"): Promise<vo
   await sendJson(machinePath(machineId, "pane/clear"), "POST", { pane_id: paneId });
 }
 
-/** GET /api/agents: of the agent kinds herdr can start, the ones this app supports and that PC has installed, for the new-session dialog. */
-export async function fetchAgentKinds(machineId = "local"): Promise<AgentKind[]> {
-  // filtered here, not on the server: a remote PC's older bridge still answers every manifest,
-  // and says nothing of what is installed, so its supported kinds are all offered
-  return (await getJson<{ agents: AgentKind[] }>(machinePath(machineId, "agents"))).agents.filter((agent) => SUPPORTED_AGENT_KINDS.has(agent.kind) && agent.installed !== false);
+/** GET /api/agents: supported kinds this PC can start, including kinds whose configured command supplies its own executable. */
+export async function fetchAgentKinds(machineId = "local", onCapabilities?: (capabilities: Pick<AgentsResponse, "launch_command">) => void, configuredKinds: readonly string[] = []): Promise<AgentKind[]> {
+  // Capability is read from the same PC and answer as its catalog, never inferred from the web UI's version.
+  const response = await getJson<AgentsResponse>(machinePath(machineId, "agents"));
+  onCapabilities?.({ launch_command: response.launch_command === true });
+  return response.agents.filter((agent) => SUPPORTED_AGENT_KINDS.has(agent.kind) && (agent.installed !== false || configuredKinds.includes(agent.kind)));
 }
 
 /** GET /api/integrations: herdr's agent integrations on that PC and whether each is installed. */
@@ -944,6 +950,10 @@ export async function machineRequest<T>(path: string, method = "GET", body?: unk
 export const startMachineSetup = (request: SetupRequest) => machineRequest<SetupJob>("/setup", "POST", request);
 export const fetchMachineSetup = (id: string) => machineRequest<SetupJob>(`/setup/${encodeURIComponent(id)}`);
 export const answerMachineSetup = (id: string, action: SetupAction) => machineRequest<SetupJob>(`/setup/${encodeURIComponent(id)}`, "POST", action);
+export const createMachineBootstrap = (request: BootstrapRequest) => machineRequest<BootstrapAttempt>("/bootstrap", "POST", request);
+export const cancelMachineBootstrap = (id: string) => machineRequest<{ ok: true }>(`/bootstrap/${encodeURIComponent(id)}`, "DELETE");
+export const connectMachineBootstrap = (id: string, updateRemote = false) => machineRequest<SetupJob>(`/bootstrap/${encodeURIComponent(id)}/connect`, "POST", { update_remote: updateRemote });
+export const revokeMachineBootstrap = (id: string, removeFirewall: boolean) => machineRequest<{ ok: true }>(`/${encodeURIComponent(id)}/revoke-bootstrap`, "POST", { remove_firewall: removeFirewall });
 
 /** GET /api/voice: whether the server holds a key; the key itself never comes back. */
 export async function fetchVoiceStatus(): Promise<VoiceStatus> {

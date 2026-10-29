@@ -27,7 +27,7 @@ export async function bridgeIdentity(sidecar = sidecarAvailable()): Promise<Brid
     throw error;
   }
   const info = attachableIdentity(await ping(), sidecar);
-  return { pid: process.pid, managed_remote: process.env["OVIS_REMOTE"] === "1", bridge_protocol: BRIDGE_PROTOCOL, bundle_version: REMOTE_BUNDLE_VERSION, socket_path: socket, socket_id: `${stat.dev}:${stat.ino}`, herdr: info };
+  return { launch_command: process.platform !== "win32", pid: process.pid, managed_remote: process.env["OVIS_REMOTE"] === "1", bridge_protocol: BRIDGE_PROTOCOL, bundle_version: REMOTE_BUNDLE_VERSION, socket_path: socket, socket_id: `${stat.dev}:${stat.ino}`, herdr: info };
 }
 /**
  * Whether the bridge a descriptor names still runs: a PID now held by a process of another birth

@@ -70,6 +70,7 @@ describe("preferences sync real send path", () => {
     Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
     Object.defineProperty(globalThis, "navigator", { configurable: true, value: { languages: ["en-US"] } });
     Object.defineProperty(globalThis, "window", { configurable: true, value: {
+      location: new URL("http://localhost"),
       localStorage: { getItem: (key: string) => records.get(key) ?? null, setItem: (key: string, value: string) => records.set(key, value) },
       setTimeout: (fn: () => void, ms: number) => {
         const id = globalThis.setTimeout(() => { waits.delete(id); fn(); }, ms);

@@ -89,6 +89,46 @@ describe("check", () => {
     expect(check(released({ "server/index.ts": "b", "telemetry/worker.ts": "new" }), false)).toEqual({ version: null, problems: [] });
   });
 
+  it("allows an unchanged version against a readable base in a fork without app tags, but never a release", () => {
+    const dir = released({ "server/index.ts": "b" });
+    run(dir, "tag", "-d", "v1.0.0", "remote-v1");
+    expect(check(dir, false, "HEAD^1")).toEqual({ version: null, problems: [] });
+    expect(() => check(dir, false)).toThrow("No v* tags");
+    expect(() => check(dir, false, "0000000000000000000000000000000000000000")).toThrow("No v* tags");
+    expect(() => check(dir, true, "HEAD^1")).toThrow("No v* tags");
+    releasePr(dir);
+    expect(() => check(dir, false, "HEAD^1")).toThrow("No v* tags");
+  });
+
+  it("fetches a manual run's base even when release tag patterns match nothing", () => {
+    const workflow = Bun.YAML.parse(readFileSync(join(import.meta.dir, "../.github/workflows/ci.yml"), "utf8")) as {
+      jobs: { fast: { steps: Array<{ name?: string; env?: Record<string, string>; run?: string }> } };
+    };
+    const guard = workflow.jobs.fast.steps.find((step) => step.name === "Release guards")!;
+    expect(guard.env!.BASE_SHA).toContain("github.event.repository.default_branch");
+    expect(guard.run).toContain("bun scripts/release-guards.ts --base FETCH_HEAD");
+    const fetchScript = guard.run!.split("\n").filter((line) => line.trim()).slice(0, -1).join("\n");
+    const remote = released({ "server/index.ts": "b" });
+    run(remote, "tag", "-d", "v1.0.0", "remote-v1");
+    const local = mkdtempSync(join(tmpdir(), "ovis-guard-fetch-"));
+    made.push(local);
+    run(local, "init", "-q");
+    run(local, "remote", "add", "origin", remote);
+    const result = spawnSync("bash", ["-e", "-c", fetchScript], {
+      cwd: local, encoding: "utf8", timeout: 5_000,
+      env: { ...process.env, BASE_SHA: "HEAD" },
+    });
+    expect(result.status).toBe(0);
+    const fetched = spawnSync("git", ["-C", local, "show", "FETCH_HEAD:package.json"], { encoding: "utf8" });
+    expect(fetched.status).toBe(0);
+    expect(JSON.parse(fetched.stdout).version).toBe("1.0.0");
+    const missing = spawnSync("bash", ["-e", "-c", fetchScript], {
+      cwd: local, encoding: "utf8", timeout: 5_000,
+      env: { ...process.env, BASE_SHA: "refs/heads/missing-base" },
+    });
+    expect(missing.status).not.toBe(0);
+  });
+
   it("passes a release PR that changed only the client", () => {
     const dir = released({ "src/App.tsx": "b" });
     releasePr(dir);

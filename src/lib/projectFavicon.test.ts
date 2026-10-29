@@ -2,15 +2,18 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 
 import type { FileInfo } from "../../shared/protocol.ts";
 import { faviconKey, forgetFaviconProbes, probeFavicon } from "./projectFavicon.ts";
+import { clearDirectTransports } from "./directTransport.ts";
 
 const realFetch = globalThis.fetch;
 const icon = (path: string): FileInfo => ({ path, name: path.slice(path.lastIndexOf("/") + 1), size: 3, modified: "2026-01-01T00:00:00.000Z", mime: "image/svg+xml", kind: "image" });
 const error = (status: number, code: string) => Response.json({ error: { code, message: code } }, { status });
 
-/** Answers each request with the next response (the last one repeats) and records what was asked. */
+/** Records favicon requests and answers each with the next response (the last one repeats). */
 function serve(...responses: (Response | Error)[]): string[] {
   const asked: string[] = [];
   globalThis.fetch = (async (url: string) => {
+    // This bridge has no optional direct transport; authorization is not a favicon probe.
+    if (url.endsWith("/direct-access")) return error(404, "direct_unavailable");
     asked.push(url);
     const next = responses.length > 1 ? responses.shift()! : responses[0]!;
     if (next instanceof Error) throw next;
@@ -20,8 +23,8 @@ function serve(...responses: (Response | Error)[]): string[] {
 }
 
 describe("project favicon probe", () => {
-  beforeEach(forgetFaviconProbes);
-  afterEach(() => { globalThis.fetch = realFetch; });
+  beforeEach(() => { forgetFaviconProbes(); clearDirectTransports(); });
+  afterEach(() => { clearDirectTransports(); globalThis.fetch = realFetch; });
 
   it("asks the folder's PC once for the best icon, however many places it may be kept", async () => {
     const asked = serve(Response.json({ icon: icon("/work/app/public/favicon.ico") }));

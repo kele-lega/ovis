@@ -204,11 +204,10 @@ jobs:
       # pass. The checkout is shallow, so the tags and the base it compares with are fetched first.
       - name: Release guards
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || format('refs/heads/{0}', github.event.repository.default_branch) }}
         run: |
-          git fetch --no-tags --depth=1 origin '+refs/tags/v*:refs/tags/v*' '+refs/tags/remote-v*:refs/tags/remote-v*'
-          if [ -n "$BASE_SHA" ]; then git fetch --no-tags --depth=1 origin "$BASE_SHA" || true; fi
-          bun scripts/release-guards.ts --base "$BASE_SHA"
+          git fetch --no-tags --depth=1 origin "$BASE_SHA" '+refs/tags/v*:refs/tags/v*' '+refs/tags/remote-v*:refs/tags/remote-v*'
+          bun scripts/release-guards.ts --base FETCH_HEAD
       - name: Preserve check report and verification logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
