@@ -43,6 +43,7 @@ describe("sidebar finish acknowledgement through React effects", () => {
       addEventListener: events.addEventListener.bind(events), removeEventListener: events.removeEventListener.bind(events),
     } });
     Object.defineProperty(globalThis, "window", { configurable: true, value: {
+      location: new URL("http://localhost"),
       addEventListener: (type: string, listener: EventListenerOrEventListenerObject) => {
         if (type === "storage") storageAdds++;
         storageEvents.addEventListener(type, listener);
