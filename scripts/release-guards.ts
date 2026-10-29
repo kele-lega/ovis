@@ -113,11 +113,11 @@ export interface Verdict {
 export function check(cwd: string, publishing: boolean, base?: string): Verdict {
   const read = (path: string) => readFileSync(join(cwd, path), "utf8");
   const version = (JSON.parse(read("package.json")) as { version: string }).version;
+  const before = base && !publishing ? git(cwd, "show", `${base}:package.json`) : null;
+  if (before?.ok && (JSON.parse(before.out) as { version: string }).version === version) return { version: null, problems: [] };
   const tags = git(cwd, "tag", "--list").out.split("\n").filter(Boolean);
   if (!tags.some((tag) => /^v\d/.test(tag))) throw new Error("No v* tags: fetch them first (git fetch --tags), or a release cannot be told apart from any other tree.");
   if (!publishing && tags.includes(`v${version}`)) return { version: null, problems: [] };
-  const before = base && !publishing ? git(cwd, "show", `${base}:package.json`) : null;
-  if (before?.ok && (JSON.parse(before.out) as { version: string }).version === version) return { version: null, problems: [] };
 
   const bundle = Number(bundleVersion(read(MACHINES)));
   const published = tags.flatMap((tag) => /^remote-v(\d+)$/.exec(tag)?.[1] ?? []).map(Number);
