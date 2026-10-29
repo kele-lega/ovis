@@ -31,6 +31,8 @@ export class PreferenceStore {
   private unsettled = true;
   /** As `unsettled`, for muted-panes.json. */
   private mutesUnsettled = true;
+  /** Deferred launch settings stay on disk for rollback, never in this release's API or launcher. */
+  private deferredCommands: { value: unknown } | undefined;
 
   constructor(stateDir: string) {
     this.path = join(stateDir, "preferences.json");
@@ -64,19 +66,28 @@ export class PreferenceStore {
   /** The document on disk: undefined when there is none, null when it is damaged. Throws when it cannot be read. */
   private readDisk(): SharedPreferences | null | undefined {
     const read = readStateDocument(this.path);
-    if (read.kind === "missing") return undefined;
+    if (read.kind === "missing") { this.deferredCommands = undefined; return undefined; }
     const parsed = read.kind === "json" ? read.value : undefined;
     const body = sharedPreferencesBody(parsed);
     if (body === null) {
       console.error(`${this.path} is ${read.kind === "malformed" ? "not JSON" : "not a preferences document"}; the next change keeps it as ${damagedCopy(this.path)}`);
       return null;
     }
+    const settings = isJsonObject(parsed) && isJsonObject(parsed["settings"]) ? parsed["settings"] : {};
+    this.deferredCommands = Object.hasOwn(settings, "agentCommands") ? { value: settings["agentCommands"] } : undefined;
     const revision = isJsonObject(parsed) && Number.isSafeInteger(parsed["revision"]) ? parsed["revision"] as number : 0;
     // the mutes are muted-panes.json's (readMutes): what this document holds of them is left out
     return { revision: Math.max(0, revision), settings: body.settings, ...(body.pins === undefined ? {} : { pins: body.pins }), muted_panes: this.current.muted_panes };
   }
 
   get(): SharedPreferences { return this.current; }
+
+  private diskDocument(preferences: SharedPreferences): { revision: number; settings: Record<string, unknown>; pins?: string[] } {
+    const { muted_panes: _muted, ...document } = preferences;
+    return this.deferredCommands === undefined ? document : {
+      ...document, settings: { ...document.settings, agentCommands: this.deferredCommands.value },
+    };
+  }
 
   set(change: PreferencesChange): SharedPreferences {
     let base = this.current;
@@ -92,7 +103,7 @@ export class PreferenceStore {
     // a change that names no list leaves the mutes; an empty list is the last one unmuted
     const muted = change.muted_panes ?? base.muted_panes ?? [];
     const next: SharedPreferences = { revision: base.revision + 1, settings: { ...base.settings, ...change.settings }, ...(pins === undefined ? {} : { pins }), muted_panes: muted };
-    if (byteLength(JSON.stringify(next)) > MAX_PREFERENCES_BYTES) throw new PreferencesTooLarge();
+    if (byteLength(JSON.stringify({ ...this.diskDocument(next), muted_panes: muted })) > MAX_PREFERENCES_BYTES) throw new PreferencesTooLarge();
     // the revision first: a save that fails there leaves the mutes as they were. One that fails at the
     // list puts the previous preferences.json back, so a refused save leaves nothing on disk that no
     // browser was told of. Two files cannot be swapped as one, so a window stays open, accepted for
@@ -100,14 +111,12 @@ export class PreferenceStore {
     // two renames, preferences.json keeps the refused change and a restart reads it, although memory
     // and the client were told it failed. Nothing is lost; at worst a refused change comes back.
     const keepDamagedMutes = change.muted_panes !== undefined && this.mutesUnsettled && this.readMutes() === null;
-    const { muted_panes: _stored, ...shared } = next;
-    writeStateDocument(this.path, `${JSON.stringify(shared, null, 2)}\n`, keepDamaged);
+    writeStateDocument(this.path, `${JSON.stringify(this.diskDocument(next), null, 2)}\n`, keepDamaged);
     if (change.muted_panes !== undefined) {
       try {
         writeStateDocument(this.mutesPath, `${JSON.stringify({ muted_panes: muted }, null, 2)}\n`, keepDamagedMutes);
       } catch (error) {
-        const { muted_panes: _held, ...before } = base;
-        try { writeStateDocument(this.path, `${JSON.stringify(before, null, 2)}\n`, false); }
+        try { writeStateDocument(this.path, `${JSON.stringify(this.diskDocument(base), null, 2)}\n`, false); }
         catch (restore) { console.error(`Cannot put ${this.path} back after a failed save of ${this.mutesPath}: ${restore instanceof Error ? restore.message : String(restore)}`); }
         throw error;
       }
@@ -141,6 +150,9 @@ export async function handlePreferencesRequest(request: Request, store: Preferen
   try { raw = JSON.parse(text); } catch { return badRequest("invalid_json", "The body is not JSON"); }
   const body = sharedPreferencesBody(raw);
   if (body === null) return badRequest("invalid_body", "Send { settings: object, pins?: string[], muted_panes?: string[] }");
+  if (isJsonObject(raw) && isJsonObject(raw["settings"]) && Object.hasOwn(raw["settings"], "agentCommands")) {
+    return reply({ error: { code: "unsupported_setting", message: "Custom agent commands are read-only in this release; reload Ovis before saving settings" } }, 400);
+  }
   try { return reply(store.set(body)); }
   catch (error) {
     if (error instanceof PreferencesTooLarge) return tooLarge();

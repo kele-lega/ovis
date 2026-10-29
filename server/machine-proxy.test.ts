@@ -10,10 +10,15 @@ const PLAN_CARD = { id: "claude-plan:abc", agent: "claude", kind: "plan", title:
 const historyAsked: (string | null)[] = [];
 const faviconAsked: { search: string; authorization: string | null; cookie: string | null }[] = [];
 const diffAsked: { path: string; search: string; authorization: string | null; cookie: string | null; forwarded: string | null }[] = [];
+const createAsked: { path: string; body: string; authorization: string | null; cookie: string | null }[] = [];
 const remote = Bun.serve({
   port: 0,
-  fetch(request) {
+  async fetch(request) {
     const path = new URL(request.url).pathname;
+    if (["/api/workspace/create", "/api/tab/create", "/api/worktree/create"].includes(path)) {
+      createAsked.push({ path, body: await request.text(), authorization: request.headers.get("authorization"), cookie: request.headers.get("cookie") });
+      return Response.json({ created: true });
+    }
     if (path === "/api/pane/conversation/image") return new Response(new Uint8Array([137, 80, 78, 71]), { headers: { "content-type": "image/png" } });
     if (path === "/api/pane/conversation/tool-output") return new Response("complete remote output", { headers: { "content-type": "text/plain; charset=utf-8" } });
     if (path === "/api/fs/file") return new Response("%PDF-1.7", { headers: { "content-type": "application/pdf" } });
@@ -52,6 +57,46 @@ const manager = {
 } as unknown as MachineManager;
 
 describe("PC proxy", () => {
+  it("refuses stale custom commands before contacting any remote runtime", async () => {
+    const noContact = { endpoint() { throw new Error("Must not contact a PC"); } } as unknown as MachineManager;
+    for (const path of ["workspace/create", "tab/create", "worktree/create"]) {
+      for (const command of ["fixture-custom", "", null, false, 42]) {
+        const response = await handleMachineRequest(new Request(`http://127.0.0.1/api/machines/pc1/${path}`, {
+          method: "POST", headers: { "x-herdr-machine": "1" },
+          body: JSON.stringify({ agent: { kind: "claude", command } }),
+        }), noContact);
+        expect(response.status).toBe(400);
+        expect(await response.json()).toMatchObject({ error: { code: "invalid_agent", message: expect.stringContaining("Custom agent commands are unavailable") } });
+      }
+    }
+    expect(createAsked).toEqual([]);
+  });
+
+  it("forwards ordinary create payloads byte-for-byte with only the PC credential", async () => {
+    const before = createAsked.length;
+    for (const path of ["workspace/create", "tab/create", "worktree/create"]) {
+      const body = ' { "agent": { "kind": "claude", "args": ["--model", "fixture-model"] }, "message": "fixture" } ';
+      const response = await handleMachineRequest(new Request(`http://127.0.0.1/api/machines/pc1/${path}`, {
+        method: "POST", headers: { "x-herdr-machine": "1", "content-type": "application/json", cookie: "browser=secret" }, body,
+      }), manager);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ created: true });
+      expect(createAsked.at(-1)).toEqual({ path: `/api/${path}`, body, authorization: "Bearer remote-token", cookie: null });
+    }
+    expect(createAsked).toHaveLength(before + 3);
+  });
+
+  it("bounds create bodies before parsing and rejects malformed JSON without contacting a PC", async () => {
+    const noContact = { endpoint() { throw new Error("Must not contact a PC"); } } as unknown as MachineManager;
+    const url = "http://127.0.0.1/api/machines/pc1/workspace/create";
+    const malformed = await handleMachineRequest(new Request(url, { method: "POST", headers: { "x-herdr-machine": "1" }, body: "{" }), noContact);
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toMatchObject({ error: { code: "invalid_json" } });
+    const oversized = await handleMachineRequest(new Request(url, { method: "POST", headers: { "x-herdr-machine": "1", "content-length": String(64 * 1024 * 1024 + 1) }, body: "{}" }), noContact);
+    expect(oversized.status).toBe(413);
+    expect(await oversized.json()).toMatchObject({ error: { code: "too_large" } });
+  });
+
   it("carries a conversation's ETag both ways and passes an unchanged answer on as a bodyless 304", async () => {
     const url = "http://127.0.0.1/api/machines/pc1/pane/conversation?pane_id=w1%3Ap1";
     const first = await handleMachineRequest(new Request(url), manager);

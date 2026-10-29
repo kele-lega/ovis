@@ -78,7 +78,53 @@ function Set-OvisAcl([string]$Path, [string]$AccountSid, [bool]$Directory, [bool
     }
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
-function Assert-OvisSshConfig([string]$Sshd, [bool]$SharedAdmin) {
+function Invoke-OvisSshCommand([string]$Command, [string[]]$Arguments) {
+    # Windows PowerShell wraps redirected native stderr in NativeCommandError.
+    # Capture it and the exit code without changing the caller's fail-closed policy.
+    $ErrorActionPreference = 'Continue'
+    $PSNativeCommandUseErrorActionPreference = $false
+    $output = @(& $Command @Arguments 2>&1)
+    return @{ Output = $output; ExitCode = $LASTEXITCODE }
+}
+function Initialize-OvisDefaultHostKeys([string]$Sshd, [string]$Config) {
+    $template = Join-Path (Split-Path $Sshd) 'sshd_config_default'
+    Assert-OvisSafePath $template $false
+    if (-not (Test-Path -LiteralPath $template -PathType Leaf)) { throw 'Cannot verify the packaged OpenSSH default configuration; initialize host keys manually.' }
+    $contents = [IO.File]::ReadAllText($Config)
+    # Do not invent a config parser or generate unused keys for a custom config.
+    if ($contents -cne [IO.File]::ReadAllText($template) -or $contents -match '(?im)^\s*(HostKey|HostKeyAgent|HostCertificate|Include)\b') { throw 'Host keys are missing from a custom SSH configuration; initialize them manually. No keys were replaced.' }
+    $directory = Join-Path $env:ProgramData 'ssh'
+    Assert-OvisSafePath $directory $true
+    $missing = @()
+    # Include legacy/new default names in safety checks even when this OpenSSH
+    # build does not generate those types. Never replace an empty key or lone .pub.
+    foreach ($type in @('rsa', 'dsa', 'ecdsa', 'ed25519', 'mldsa44_ed25519')) {
+        $private = Join-Path $directory "ssh_host_${type}_key"
+        $public = "$private.pub"
+        Assert-OvisSafePath $private $false
+        Assert-OvisSafePath $public $false
+        if (Test-Path -LiteralPath $private) {
+            if ((Get-Item -LiteralPath $private -Force).Length -eq 0) { throw 'An existing SSH host key is empty; repair it manually. No keys were replaced.' }
+        } elseif (Test-Path -LiteralPath $public) { throw 'An SSH host public key has no private key; repair it manually. No keys were replaced.' }
+        elseif ($type -in @('rsa', 'ecdsa', 'ed25519')) { $missing += $private }
+    }
+    if ($missing.Count -eq 0) { throw 'Default SSH host keys exist but could not be loaded; repair them manually.' }
+    $keygen = Join-Path (Split-Path $Sshd) 'ssh-keygen.exe'
+    Assert-OvisSafePath $keygen $false
+    if (-not (Test-Path -LiteralPath $keygen -PathType Leaf)) { throw 'Packaged ssh-keygen.exe is missing; initialize host keys manually.' }
+    if (-not (Test-Path -LiteralPath $directory)) { New-Item -ItemType Directory -Path $directory | Out-Null }
+    # OpenSSH -A generates only absent default private keys (and their .pub files).
+    # It can report individual failures on stderr even with a zero process exit.
+    $result = Invoke-OvisSshCommand $keygen @('-A')
+    if ($result.ExitCode -ne 0 -or @($result.Output | Where-Object { $_ -is [Management.Automation.ErrorRecord] }).Count -ne 0) { throw 'Could not initialize missing SSH host keys; repair manually or retry. Existing keys were not replaced.' }
+    foreach ($private in $missing) {
+        foreach ($path in @($private, "$private.pub")) {
+            Assert-OvisSafePath $path $false
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path -Force).Length -eq 0) { throw 'OpenSSH did not initialize all missing default host keys; repair manually or retry.' }
+        }
+    }
+}
+function Assert-OvisSshConfig([string]$Sshd, [bool]$SharedAdmin, [bool]$InitializeMissingHostKeys = $false) {
     $config = Join-Path $env:ProgramData 'ssh\sshd_config'
     Assert-OvisSafePath (Split-Path $config) $true
     Assert-OvisSafePath $config $false
@@ -89,8 +135,14 @@ function Assert-OvisSshConfig([string]$Sshd, [bool]$SharedAdmin) {
         Assert-OvisSafePath $config $false
         if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { throw 'Cannot inspect the packaged OpenSSH default configuration. Configure SSH manually before retrying.' }
     }
-    $effective = @(& $Sshd -T -f $config -C "user=$($User.ToLowerInvariant()),host=localhost,addr=$From,laddr=$Target,lport=22" 2>&1)
-    if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect sshd configuration. Fix it manually; no configuration is overwritten.' }
+    $arguments = @('-T', '-f', $config, '-C', "user=$($User.ToLowerInvariant()),host=localhost,addr=$From,laddr=$Target,lport=22")
+    $result = Invoke-OvisSshCommand $Sshd $arguments
+    if ($result.ExitCode -ne 0 -and $InitializeMissingHostKeys -and ($result.Output -join "`n") -match '(?m)^sshd: no hostkeys available -- exiting\.\r?$') {
+        Initialize-OvisDefaultHostKeys $Sshd $config
+        $result = Invoke-OvisSshCommand $Sshd $arguments
+    }
+    if ($result.ExitCode -ne 0) { throw 'Cannot inspect sshd configuration. Fix it manually; no configuration is overwritten.' }
+    $effective = @($result.Output)
     $ports = @($effective | Where-Object { "$_" -match '^port ' })
     if ($ports.Count -eq 0 -or @($ports | Where-Object { "$_" -ne 'port 22' }).Count -ne 0) { throw 'Existing SSH uses a non-22 port. Configure SSH manually.' }
     $auth = @($effective | Where-Object { "$_" -match '^authorizedkeysfile ' })
@@ -181,7 +233,7 @@ function Invoke-OvisBootstrap {
     Assert-OvisSafePath $authPath $false
     $rule = Get-OvisOwnedRule $options
     $sshd = Join-Path $env:SystemRoot 'System32\OpenSSH\sshd.exe'
-    if (Test-Path -LiteralPath $sshd) { Assert-OvisSshConfig $sshd $sharedAdmin }
+    if (Test-Path -LiteralPath $sshd) { Assert-OvisSshConfig $sshd $sharedAdmin (-not $Remove) }
     elseif (Test-Path -LiteralPath (Join-Path $env:ProgramData 'ssh\sshd_config')) { throw 'An existing sshd_config cannot be validated without sshd; install/validate OpenSSH manually first.' }
     if ($Remove) {
         # Check read/write access before removing the rule; keep authorization if
@@ -212,7 +264,7 @@ function Invoke-OvisBootstrap {
         }
     }
     if (-not (Test-Path -LiteralPath $sshd)) { throw 'OpenSSH capability did not provide sshd.exe. Complete setup manually.' }
-    Assert-OvisSshConfig $sshd $sharedAdmin
+    Assert-OvisSshConfig $sshd $sharedAdmin $true
     Update-OvisAuthorization $authPath $options.Line $false $account.SID.Value $sharedAdmin
     if ($null -eq $rule) {
         New-NetFirewallRule -Name "Ovis-SSH-$($options.Id)" -DisplayName "Ovis SSH $($options.Id)" -Description "Ovis bootstrap-v1 $($options.Id)" -Direction Inbound -Action Allow -Enabled True -Protocol TCP -LocalPort 22 -RemoteAddress $options.Source -LocalAddress $options.Destination -Profile Any -EdgeTraversalPolicy Block | Out-Null

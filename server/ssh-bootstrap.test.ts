@@ -38,6 +38,12 @@ describe("bootstrap authority and pinned assets", () => {
     expect(command).toContain("powershell.exe -NoProfile -ExecutionPolicy Bypass -File");
     expect(command).not.toContain("-NonInteractive");
   });
+  it("uses the shared PowerShell literal rules when constructing owner commands", () => {
+    const attempt = { id: "fixture", machine_id: "fixture", target: { destination: "alice@100.70.1.2", port: 22 }, os: "windows" as const, expires_at: Date.now() + BOOTSTRAP_TTL_MS, public_key: key("fixture"), source_ip: "100.70.1.1" };
+    const quoted = bootstrapCommand(BOOTSTRAP_ASSETS.windows, attempt, "o’brien");
+    expect(quoted).toContain("-User 'o’’brien'");
+    expect(() => bootstrapCommand(BOOTSTRAP_ASSETS.windows, attempt, "alice\ncommand")).toThrow("Invalid characters");
+  });
   it("checks release bytes, bounded redirects and success-only cache", async () => {
     const text = "fixture release asset\n";
     const asset = { url: BOOTSTRAP_ASSETS.linux.url, sha256: createHash("sha256").update(text).digest("hex") };

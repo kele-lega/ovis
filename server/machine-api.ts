@@ -4,6 +4,7 @@ import type { SharedPreferences } from "../shared/preferences.ts";
 import type { PanePromptResponse } from "../shared/protocol.ts";
 import type { SeenFinish } from "../shared/seen.ts";
 import { BootstrapError } from "./ssh-bootstrap.ts";
+import { customCommandFault } from "./agent-launch.ts";
 import { MachineManager } from "./machines.ts";
 import { readTailnetPeers } from "./tailnet-peers.ts";
 import { canSendSecret, sameOrigin } from "./machine-security.ts";
@@ -231,6 +232,21 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
       // a connection that may only watch is refused here as well as at the access check, by the same rule
       // (index.ts `mutating`): it writes nothing on another PC
       if (readOnly && !["GET", "HEAD", "OPTIONS"].includes(request.method)) return fail("read_only", "this device can only watch", 403);
+      let proxyBody: ReadableStream<Uint8Array> | Uint8Array<ArrayBuffer> | null = request.body;
+      if (request.method === "POST" && ["workspace/create", "tab/create", "worktree/create"].includes(path)) {
+        // Older runtime37 bridges ignore unknown command fields. Check before contacting them,
+        // holding at most the server's existing 64 MiB request ceiling and forwarding the same bytes.
+        try {
+          const bytes = await readCapped(new Response(request.body, { headers: request.headers }), 64 * 1024 * 1024);
+          const value = parseJson<unknown>(bytes);
+          const fault = customCommandFault(isJsonObject(value) ? value["agent"] : undefined);
+          if (fault) return fail("invalid_agent", fault, 400);
+          proxyBody = bytes;
+        } catch (error) {
+          if (error instanceof RemoteResponseTooLarge) return fail("too_large", "The create request is too large", 413);
+          return fail("invalid_json", "The body is not JSON", 400);
+        }
+      }
       const endpoint = manager.endpoint(id);
       if (!endpoint) {
         // a chat opened while the PC waits to reconnect asks it to try now, not after its delay
@@ -270,7 +286,7 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
       // a move's PC reads its roster again once the move is confirmed, so its receipt is soon shown
       const moved = path === "workspace/move" && request.method === "POST" ? manager.refreshAfterMove(id) : null;
       try {
-        const response = await fetch(target, { method: request.method, headers, body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body, redirect: "error", signal: AbortSignal.any([request.signal, abort.signal, AbortSignal.timeout(slowMachinePath(path) ? 165_000 : 75_000)]) });
+        const response = await fetch(target, { method: request.method, headers, body: ["GET", "HEAD"].includes(request.method) ? undefined : proxyBody, redirect: "error", signal: AbortSignal.any([request.signal, abort.signal, AbortSignal.timeout(slowMachinePath(path) ? 165_000 : 75_000)]) });
         if (moved && response.ok) moved();
         const etag = response.headers.get("etag");
         // held whole before it is passed on (and parsed, for a watcher's prompt), so only up to a size

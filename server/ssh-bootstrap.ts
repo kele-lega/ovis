@@ -8,6 +8,7 @@ import type { BootstrapAttempt, BootstrapOS, BootstrapRequest } from "../shared/
 import type { Machine, SshTarget } from "../shared/machines.ts";
 import { BOOTSTRAP_ASSETS, type BootstrapAsset } from "./bootstrap-assets.ts";
 import { shellQuote, validateTarget } from "./machine-security.ts";
+import { psQuote } from "./powershell.ts";
 import { parseTailnetPeers } from "./tailnet-peers.ts";
 import { tailscaleBinary } from "./tailscale.ts";
 import type { SshConnection } from "./ssh.ts";
@@ -80,7 +81,6 @@ export async function verifyBootstrapAsset(asset: BootstrapAsset, signal?: Abort
   } catch { return unavailable(); }
   return unavailable();
 }
-const psQuote = (text: string) => "'" + text.replaceAll("'", "''") + "'";
 export function bootstrapCommand(asset: BootstrapAsset, attempt: Omit<BootstrapAttempt, "command" | "cleanup_command">, username: string, remove = false): string {
   const target = attempt.target.destination.slice(attempt.target.destination.indexOf("@") + 1);
   const expires = String(Math.floor(attempt.expires_at / 1000));

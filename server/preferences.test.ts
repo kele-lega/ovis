@@ -79,6 +79,75 @@ describe("shared preferences", () => {
     expect(new PreferenceStore(dir).get()).toEqual({ revision: 4, settings: { showThinking: false, theme: "dark", agentOrder: "activity" }, pins: [], muted_panes: [] });
   });
 
+  it("preserves deferred custom commands on disk without exposing or accepting them", async () => {
+    const dir = root();
+    const path = join(dir, "preferences.json");
+    const commands = { claude: "  /opt/fixture/launch --model custom  " };
+    writeFileSync(path, JSON.stringify({ revision: 7, settings: { theme: "dark", agentCommands: commands } }));
+    const store = new PreferenceStore(dir);
+    const publicDocument = { revision: 7, settings: { theme: "dark" }, muted_panes: [] };
+    expect(store.get()).toEqual(publicDocument);
+    expect(await (await handlePreferencesRequest(new Request("http://x/api/preferences"), store)).json()).toEqual(publicDocument);
+    const heard: unknown[] = [];
+    store.subscribe((preferences) => heard.push(preferences));
+    const before = readFileSync(path, "utf8");
+    for (const agentCommands of [{ claude: "replacement" }, {}, null]) {
+      const refused = await put(store, JSON.stringify({ settings: { language: "ja", agentCommands } }));
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toMatchObject({ error: { code: "unsupported_setting" } });
+      expect(readFileSync(path, "utf8")).toBe(before);
+      expect(store.get()).toEqual(publicDocument);
+      expect(heard).toEqual([]);
+    }
+    const changed = await put(store, JSON.stringify({ settings: { language: "zh" } }));
+    expect(changed.status).toBe(200);
+    expect(await changed.json()).toEqual({ revision: 8, settings: { theme: "dark", language: "zh" }, muted_panes: [] });
+    expect(heard).toEqual([store.get()]);
+    expect(JSON.stringify(heard)).not.toContain("agentCommands");
+    expect(JSON.parse(readFileSync(path, "utf8")).settings.agentCommands).toEqual(commands);
+    const back = new PreferenceStore(dir);
+    await put(back, JSON.stringify({ settings: { showThinking: false } }));
+    expect(back.get().settings).toEqual({ theme: "dark", language: "zh", showThinking: false });
+    expect(JSON.parse(readFileSync(path, "utf8")).settings.agentCommands).toEqual(commands);
+  });
+
+  it.each([null, false, "future-shape", ["opaque", { future: true }]])("preserves unread deferred command shape %j without interpreting it", async (agentCommands) => {
+    const dir = root();
+    const path = join(dir, "preferences.json");
+    writeFileSync(path, JSON.stringify({ revision: 1, settings: { agentCommands } }));
+    const store = new PreferenceStore(dir);
+    expect((await put(store, JSON.stringify({ settings: { language: "zh" } }))).status).toBe(200);
+    expect(store.get().settings).toEqual({ language: "zh" });
+    expect(JSON.parse(readFileSync(path, "utf8")).settings.agentCommands).toEqual(agentCommands);
+  });
+
+  it("preserves repaired deferred commands when an unrelated mute save is rolled back", async () => {
+    const dir = root();
+    const path = join(dir, "preferences.json");
+    const store = new PreferenceStore(dir);
+    const commands = { codex: "fixture-codex" };
+    const repaired = { revision: 3, settings: { theme: "light", agentCommands: commands } };
+    writeFileSync(path, JSON.stringify(repaired));
+    const blocker = join(dir, `muted-panes.json.${process.pid}.tmp`);
+    mkdirSync(blocker);
+    expect((await put(store, JSON.stringify({ settings: { language: "ja" }, muted_panes: ["w1:p1"] }))).status).toBe(500);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(repaired);
+    rmSync(blocker, { recursive: true });
+    await put(store, JSON.stringify({ settings: { language: "zh" } }));
+    expect(JSON.parse(readFileSync(path, "utf8")).settings.agentCommands).toEqual(commands);
+  });
+
+  it("includes inert commands in the stored document size limit", async () => {
+    const dir = root();
+    const path = join(dir, "preferences.json");
+    const before = JSON.stringify({ revision: 3, settings: { agentCommands: { claude: "x".repeat(40_000) } } });
+    writeFileSync(path, before);
+    const store = new PreferenceStore(dir);
+    expect((await put(store, JSON.stringify({ settings: { quickReplies: ["y".repeat(40_000)] } }))).status).toBe(413);
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(store.get().revision).toBe(3);
+  });
+
   it("refuses what is not a preferences document", async () => {
     const store = new PreferenceStore(root());
     expect((await put(store, "{")).status).toBe(400);
