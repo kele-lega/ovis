@@ -123,6 +123,8 @@ try {
   assert.ok(build.success, String(build.logs));
   server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     const url = new URL(request.url);
+    // This relay-only fixture issues no optional direct credentials.
+    if (/^\/api\/machines\/[^/]+\/direct-access$/.test(url.pathname)) return new Response(null, { status: 204 });
     if (url.pathname.endsWith("/pane/conversation/tool-output")) { wholeReads++; return new Response(WHOLE_OUTPUT); }
     // the chat asks for the pane's slash commands to mark skill names in an answer: this pane has none
     if (url.pathname.endsWith("/pane/commands")) return Response.json({ commands: [] });

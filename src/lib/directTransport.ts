@@ -3,6 +3,8 @@ import { LOCAL_MACHINE } from "../../shared/machines.ts";
 import type { SocketEndpointResolver } from "./ws.ts";
 
 const COOLDOWN_MS = 60_000;
+/** Leave time for the relay handshake within HerdrSocket's initial 8s connect deadline. */
+const AUTHORIZATION_TIMEOUT_MS = 5_000;
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 type HttpCredential = Omit<DirectCredentialResponse, "ticket">;
 interface PendingCredential {
@@ -118,7 +120,7 @@ export class DirectTransport {
     let pending = state.pending;
     if (!pending || pending.controller.signal.aborted) {
       const controller = new AbortController();
-      const deadline = setTimeout(() => controller.abort(new DOMException("Direct authorization timed out", "TimeoutError")), 5000);
+      const deadline = setTimeout(() => controller.abort(new DOMException("Direct authorization timed out", "TimeoutError")), AUTHORIZATION_TIMEOUT_MS);
       this.controllers.add(controller);
       pending = {
         controller, users: 0,
@@ -157,9 +159,12 @@ export class DirectTransport {
       const cancel = () => controller.abort(abortReason(signal));
       signal.addEventListener("abort", cancel, { once: true });
       this.controllers.add(controller);
+      const timeout = new DOMException("Direct authorization timed out", "TimeoutError");
+      const deadline = setTimeout(() => controller.abort(timeout), AUTHORIZATION_TIMEOUT_MS);
       try {
         const credential = await abortable(this.issue(machineId, state, controller.signal), controller.signal);
         checkAbort(signal);
+        checkAbort(controller.signal);
         if (!credential) return { url: relay.href };
         const direct = new URL("/ws", credential.origin);
         direct.protocol = direct.protocol === "https:" ? "wss:" : "ws:";
@@ -175,7 +180,15 @@ export class DirectTransport {
             state.http = undefined;
           },
         };
+      } catch (error) {
+        // Only our deadline falls back. Caller cancellation and sign-out must still reject.
+        checkAbort(signal);
+        if (error !== timeout || this.machines.get(machineId) !== state) throw error;
+        state.failedUntil = this.now() + COOLDOWN_MS;
+        state.http = undefined;
+        return { url: relay.href };
       } finally {
+        clearTimeout(deadline);
         signal.removeEventListener("abort", cancel);
         this.controllers.delete(controller);
       }

@@ -20,7 +20,20 @@ const future = '99999999999';
 const args = ['--user', 'alice', '--key', key, '--from', from, '--target', target, '--expires', future];
 const unix = process.platform !== 'win32';
 const powershellCommand = process.platform === 'win32' ? 'pwsh.exe' : 'pwsh';
-const powershellAvailable = !spawnSync(powershellCommand, ['-NoLogo', '-NoProfile', '-Command', '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8' }).error;
+function runPowerShell(arguments_: string[]) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'ovis-bootstrap-pwsh-')));
+  try {
+    return spawnSync(powershellCommand, ['-NoLogo', '-NoProfile', ...arguments_], {
+      encoding: 'utf8', cwd: root,
+      env: {
+        ...process.env, HOME: root, USERPROFILE: root, TMPDIR: root, TMP: root, TEMP: root,
+        XDG_CONFIG_HOME: join(root, 'config'), XDG_STATE_HOME: join(root, 'state'), XDG_CACHE_HOME: join(root, 'cache'),
+        APPDATA: join(root, 'appdata'), LOCALAPPDATA: join(root, 'localappdata'), OVIS_STATE_DIR: join(root, 'ovis-state'),
+      },
+    });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
+const powershellAvailable = runPowerShell(['-Command', '$PSVersionTable.PSVersion.ToString()']).status === 0;
 
 // Instrument a COPY, never the publishable script. Every host-changing command
 // and absolute system path is replaced; the fixture refuses unmocked commands.
@@ -175,7 +188,8 @@ describe('publishable artifact contract', () => {
     if (process.env.CI || process.env.OVIS_REQUIRE_POWERSHELL) expect(powershellAvailable).toBe(true);
   });
   test.skipIf(!powershellAvailable)('native PowerShell parser and mocked helpers (no host SSH/firewall calls)', () => {
-    const r = spawnSync(powershellCommand, ['-NoLogo', '-NoProfile', '-File', resolve(directory, 'tests/helpers/test-powershell.ps1'), '-Script', powershell, '-ValidKey', key], { encoding: 'utf8' });
+    const r = runPowerShell(['-File', resolve(directory, 'tests/helpers/test-powershell.ps1'), '-Script', powershell, '-ValidKey', key]);
+    expect(r.stdout + r.stderr).toContain('PowerShell missing-host-key regressions passed');
     expect(r.stdout + r.stderr).toContain('PowerShell bootstrap mocked tests passed'); expect(r.status).toBe(0);
   });
 });

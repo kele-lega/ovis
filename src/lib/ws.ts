@@ -308,7 +308,7 @@ export class HerdrSocket {
     // close event would find it replaced). A late 4008 from it still stops output.
     const previous = this.socket;
     if (previous) {
-      this.endConnection(true);
+      this.endConnection();
       this.endedEarly.add(previous);
     }
     if (this.attempt) return;
@@ -367,7 +367,7 @@ export class HerdrSocket {
   }
 
   private failEndpoint(attempt: ConnectionAttempt): void {
-    if (!attempt.endpoint || attempt.opened || attempt.failed) return;
+    if (!attempt.endpoint || attempt.failed) return;
     attempt.failed = true;
     try { attempt.endpoint.failed?.(); } catch { /* endpoint bookkeeping cannot break reconnects */ }
   }
@@ -376,6 +376,8 @@ export class HerdrSocket {
     if (!this.currentAttempt(attempt)) return;
     const socket = this.socket;
     this.endConnection(true);
+    // A post-open error can precede the server's output-stalled close frame.
+    if (socket && attempt.opened) this.endedEarly.add(socket);
     socket?.close();
     this.scheduleReconnect();
   }
@@ -531,15 +533,14 @@ export class HerdrSocket {
     socket.addEventListener("error", () => {
       if (!this.currentAttempt(attempt) || this.socket !== socket) return;
       this.trace.record("socket_error", { connection: epoch, socket_state: socket.readyState }, true);
-      if (attempt.opened) socket.close();
-      else this.failAttempt(attempt);
+      this.failAttempt(attempt);
     });
   }
 
   /** The end of this connection, from its close event or a connect deadline; a stale socket's is ignored. */
   private closed(socket: WebSocket, code: number): void {
     if (this.socket !== socket) return;
-    this.endConnection(true);
+    this.endConnection(code !== 1000 && code !== 1001 && code !== OUTPUT_STALLED_CLOSE_CODE);
     if (code === OUTPUT_STALLED_CLOSE_CODE) {
       this.stopOutput();
       return;
@@ -676,7 +677,7 @@ export class HerdrSocket {
   private drop(socket: WebSocket): void {
     this.trace.record("probe_drop", { pending: this.submits.size }, true);
     this.probeDrops += 1;
-    this.endConnection();
+    this.endConnection(true);
     // a server close (4008) that comes after this still stops output
     this.endedEarly.add(socket);
     socket.close();
@@ -752,8 +753,9 @@ export class HerdrSocket {
       // never opened, so its close event can carry no output-stalled code: end it like its deadline would
       if (this.attempt) this.failAttempt(this.attempt);
     } else if (socket?.readyState === SOCKET_CLOSED) {
-      // ended now so its submits and listeners settle; its close event, when it runs, can still stop output
-      this.closed(socket, 1006);
+      // Its queued close code is still unknown: waking is not itself an endpoint failure.
+      // End its submits/listeners now; its late close can still stop output without ending the replacement.
+      this.endConnection();
       this.endedEarly.add(socket);
     }
     if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
