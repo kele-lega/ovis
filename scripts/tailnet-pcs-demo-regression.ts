@@ -14,10 +14,20 @@ const app = join(root, "app");
 const probe = `(() => {
   window.tailnetProbe = { reads: 0, setups: [], bootstraps: [], bootstrapConnects: 0, bootstrapCancels: 0, bootstrapMode: 'ready', bootstrapJob: null, revokes: [], revokeFails: true, forgotten: 0, copied: '', state: 'running', fixture: null, failure: null, watch: new URLSearchParams(location.search).has('tailnet_watch') };
   Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (text) => { window.tailnetProbe.copied = text; } }, configurable: true });
+  const EventSource = window.EventSource;
+  window.EventSource = function(url, init) {
+    const source = new EventSource(url, init);
+    if (new URL(String(url), location.href).pathname === '/api/machines/events') window.tailnetProbe.events = source;
+    return source;
+  };
+  window.tailnetProbe.emitSetups = (setups) => window.tailnetProbe.events.onmessage(new MessageEvent('message', { data: JSON.stringify({ type: 'machine-setups', setups }) }));
   const original = window.fetch;
   window.fetch = async (input, init) => {
     const path = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
     const p = window.tailnetProbe;
+    if (path === '/api/machines/setup/fixture-background-job' && init?.method === 'POST') {
+      p.backgroundActions = (p.backgroundActions || 0) + 1; p.emitSetups([]); return Response.json({ ok: true });
+    }
     if (path === '/api/machines/laptop/revoke-bootstrap') {
       p.revokes.push(JSON.parse(init.body));
       return p.revokeFails ? Response.json({ error: { code: 'bootstrap_revoke_failed', message: 'DEMO cleanup refused' } }, { status: 502 }) : Response.json({ ok: true });
@@ -237,6 +247,28 @@ try {
           const cancelsBefore = (await readProbe(page)).bootstrapCancels;
           await dialog.getByRole("button", { name: label("Close PC setup"), exact: true }).click();
           assert.equal((await readProbe(page)).bootstrapCancels, cancelsBefore, "closing a connected setup does not revoke its key");
+          // A new PC is not registered yet: its background task travels separately from the roster.
+          await page.evaluate(() => {
+            const p = (window as unknown as { tailnetProbe: { emitSetups(setups: unknown[]): void } }).tailnetProbe;
+            p.emitSetups([{ id: "fixture-background-job", machine_id: "fixture-new-pc", name: "Background fixture PC", phase: "installing", step: "Installing fictional bridge…", error: null, progress: { stage: "download", done: 50, total: 100, rate: null, elapsed_ms: 0 } }]);
+          });
+          if (width < 640) await page.getByRole("button", { name: label("Open workspace list"), exact: true }).click();
+          const task = page.locator(".machine-setup-task");
+          await task.getByText("Background fixture PC", { exact: true }).waitFor();
+          assert.equal(await task.getByRole("progressbar").getAttribute("aria-valuenow"), "50");
+          const sidebarFilter = page.getByRole("combobox", { name: label("Filter workspaces and agents"), exact: true });
+          await sidebarFilter.fill("no fixture workspace matches");
+          assert.equal(await task.isVisible(), true, "filtering workspaces never hides installation tasks");
+          assert.equal(await task.evaluate((node) => node.scrollWidth <= node.clientWidth + 1), true, "background progress fits the viewport");
+          if (evidence) await page.screenshot({ path: join(evidence, `background-install-${width}-${language}.png`) });
+          await task.getByRole("button", { name: label("Cancel install"), exact: true }).click();
+          await task.waitFor({ state: "detached" });
+          await page.evaluate(() => (window as unknown as { tailnetProbe: { emitSetups(setups: unknown[]): void } }).tailnetProbe.emitSetups([{ id: "fixture-background-job", machine_id: "fixture-new-pc", name: "Background fixture PC", phase: "failed", step: "Connection failed", error: "Fictional background install failed", progress: null }]));
+          await task.getByText("Fictional background install failed", { exact: true }).waitFor();
+          await task.getByRole("button", { name: label("Dismiss"), exact: true }).click();
+          await task.waitFor({ state: "detached" });
+          await sidebarFilter.fill("");
+          if (width < 640) await page.keyboard.press("Escape");
           // Expired attempts hide runnable install commands but keep local cleanup, then return safely.
           await page.evaluate(() => { (window as unknown as { tailnetProbe: Probe }).tailnetProbe.bootstrapMode = "expired"; });
           await openRemote();

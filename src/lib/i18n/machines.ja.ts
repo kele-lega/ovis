@@ -6,6 +6,7 @@
  * Register and fixed terms follow ../i18n.ja.ts; a key another feature also uses goes there.
  */
 export const MACHINES_JA: Record<string, string> = {
+  "Setting up PC": "PC をセットアップ中",
   "SSH default account": "SSH の既定アカウント",
   "Online": "オンライン",
   "Offline": "オフライン",

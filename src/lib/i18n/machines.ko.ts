@@ -6,6 +6,7 @@
  * Register and fixed terms follow ../i18n.ko.ts; a key another feature also uses goes there.
  */
 export const MACHINES_KO: Record<string, string> = {
+  "Setting up PC": "PC 설정 중",
   "SSH default account": "SSH 기본 계정",
   "Online": "온라인",
   "Offline": "오프라인",

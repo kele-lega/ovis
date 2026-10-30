@@ -6,6 +6,7 @@
  * Register and fixed terms follow ../i18n.zh.ts; a key another feature also uses goes there.
  */
 export const MACHINES_ZH: Record<string, string> = {
+  "Setting up PC": "正在配置电脑",
   "SSH default account": "SSH 默认账户",
   "Online": "在线",
   "Offline": "离线",
