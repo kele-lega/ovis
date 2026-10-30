@@ -2691,6 +2691,16 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
 - Remote PCs: an **Add PC** row (label, one-line description, button) opens the PC
   setup dialog and closes Settings behind it; when that dialog closes, focus lands on the header's
   workspace-list toggle. Under the row, once the server has answered, the bridge auto-update switch.
+- A first PC install continues outside its setup dialog as a task above the sidebar's PC groups.
+  It reuses the existing byte/stage progress and Cancel install button, stays visible through sidebar
+  filtering, and keeps a failed attempt's reason until dismissed. Completion replaces the task with
+  the registered PC; cancellation removes the task. The existing machine event stream sends a bounded
+  public summary on subscription and progress changes, without SSH challenges, output or credentials.
+  The task is never a registered or persisted PC: guided identity promotion and protected registration
+  still happen only after successful setup. Zed's remote-development documentation was checked
+  (`docs/src/remote-development.md` in zed-industries/zed): it documents download/start over SSH but
+  does not specify persistent sidebar progress. This deliberately follows Ovis's existing bridge-update
+  status instead, without importing Zed's UI or claiming a matching task design.
 - Tailscale network in Remote PCs uses those same Settings rows, not a separate wizard: Refresh
   reads this Host's own-user PCs, Add PC opens the existing SSH dialog without submitting it,
   and registered users/ports/sessions remain visible beside Add another account. Discovery always

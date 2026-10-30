@@ -92,9 +92,19 @@ export interface SetupJob {
   target: SshTarget;
   progress?: SetupProgress | null;
 }
+/** Public progress only: an unfinished setup is not a registered PC or an SSH credential. */
+export interface MachineSetupSummary {
+  id: string;
+  machine_id: string;
+  name: string;
+  phase: SetupPhase;
+  step: string;
+  error: string | null;
+  progress: SetupProgress | null;
+}
 export type SetupAction = { action: "answer"; challenge_id: string; answer: string } | { action: "approve" } | { action: "cancel" };
 /** `preferences`: what every browser of this server shares changed (shared/preferences.ts) */
-export type MachineEvent = { type: "machines"; machines: Machine[] } | { type: "machine-message"; machine_id: string; message: ServerMessage }
+export type MachineEvent = { type: "machine-setups"; setups: MachineSetupSummary[] } | { type: "machines"; machines: Machine[] } | { type: "machine-message"; machine_id: string; message: ServerMessage }
   | { type: "preferences"; preferences: SharedPreferences }
   /** the `$name` tokens herdr's `[ui.sidebar.agents]` rows draw on this server's PC, for every PC's agent rows (server/herdr-sidebar.ts) */
   | { type: "herdr-sidebar"; agents: AgentRowTokens | null }

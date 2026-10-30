@@ -4,7 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { createServer as tcpServer } from "node:net";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { BRIDGE_PROTOCOL, LOCAL_MACHINE, REMOTE_BUNDLE_VERSION, type BridgeIdentity, type Machine, type MachineAction, type MachineEvent, type MachineSettings, type SetupAction, type SetupJob, type SetupProgress, type SetupRequest, type SshTarget } from "../shared/machines.ts";
+import { BRIDGE_PROTOCOL, LOCAL_MACHINE, REMOTE_BUNDLE_VERSION, type BridgeIdentity, type Machine, type MachineAction, type MachineEvent, type MachineSettings, type MachineSetupSummary, type SetupAction, type SetupJob, type SetupProgress, type SetupRequest, type SshTarget } from "../shared/machines.ts";
 import type { ServerMessage, SessionSnapshot, HerdrPane } from "../shared/protocol.ts";
 import type { PushService } from "./push.ts";
 import { alertStatus } from "../shared/notify-policy.ts";
@@ -59,8 +59,11 @@ interface JobState {
   pending?: { resolve(value: string): void; reject(error: Error): void };
   ssh?: SshConnection;
   timer: ReturnType<typeof setTimeout>;
-  /** the registered PC a bridge update is for, which shows it as `updating` */
+  /** Registered PC whose setup/update progress is mirrored onto its sidebar row. */
   runtime?: Runtime;
+  /** New PC progress lives outside the registered-machine map and is never persisted. */
+  setupName?: string;
+  backgroundVisible?: boolean;
   stageStartedAt: number;
   finished: Promise<void>;
 }
@@ -368,11 +371,19 @@ export class MachineManager {
   }
   private runtime(machine: Machine): Runtime { return { machine, attempts: 0, generation: 0, refreshing: false, refreshQueued: false, snapshotRevision: 0, terminals: new Set() }; }
   list(): Machine[] { return [this.local, ...[...this.machines.values()].map((r) => r.machine)]; }
+  setupSummaries(): MachineSetupSummary[] {
+    return [...this.jobs.values()].filter((job) => job.backgroundVisible && !["connected", "cancelled"].includes(job.public.phase)).map(({ public: job, setupName }) => ({
+      id: job.id, machine_id: job.machine_id, name: setupName!, phase: job.phase,
+      step: job.step, error: job.error, progress: job.progress ?? null,
+    }));
+  }
   subscribe(listener: (event: MachineEvent) => void): () => void {
     this.listeners.add(listener);
     listener({ type: "machines", machines: this.list() });
+    listener({ type: "machine-setups", setups: this.setupSummaries() });
     return () => this.listeners.delete(listener);
   }
+  private emitSetups(): void { this.emit({ type: "machine-setups", setups: this.setupSummaries() }); }
   private emit(event?: MachineEvent): void {
     if (this.stopped) return;
     for (const listener of this.listeners) listener(event ?? { type: "machines", machines: this.list() });
@@ -543,12 +554,17 @@ export class MachineManager {
     }
     const auto = options.auto === true && request.update_remote === true && !!existing;
     const job: JobState = { update: request.update_remote === true, auto, public: { id, machine_id: machineId, target, phase: "connecting", step: "Connecting with SSH keys and ssh-agent…", challenge: null, installations: [], error: null, ssh_output: null, progress: null }, abort: new AbortController(), timer: setTimeout(() => this.cancelJob(id), 600_000), stageStartedAt: Date.now(), finished: Promise.resolve() };
-    if (job.update && existing) job.runtime = existing;
+    if (existing) job.runtime = existing;
     if (job.update && existing && !auto) existing.updateCancelled = false;
     job.timer.unref();
     this.jobs.set(id, job);
     if (this.jobs.size > 40) for (const [key, j] of this.jobs) if (["connected", "failed", "cancelled"].includes(j.public.phase) && key !== id) { this.jobs.delete(key); break; }
     const runtime = existing ?? this.runtime({ id: machineId, name: name?.trim() || target.destination, kind: "ssh", enabled: true, state: "connecting", target, snapshot: null, error: null });
+    if (!existing) {
+      job.setupName = runtime.machine.name;
+      for (const previous of this.jobs.values()) if (previous !== job && previous.public.machine_id === machineId) previous.backgroundVisible = false;
+      this.emitSetups();
+    }
     this.disconnect(runtime);
     // a setup or bridge update is a try to connect too: a failed one waits its interval (retryNow)
     runtime.triedAt = this.now();
@@ -648,6 +664,7 @@ export class MachineManager {
         clearTimeout(job.timer); job.public.challenge = null; job.public.ssh_output = null; job.pending = undefined; job.ssh = undefined;
         if (options.bootstrap) this.bootstrap.finish(options.bootstrap.id, bootstrapCommitted);
         if (job.runtime) { job.runtime.machine.updating = null; this.emit(); }
+        if (job.setupName !== undefined) this.emitSetups();
       }
     })();
     return job.public;
@@ -672,10 +689,11 @@ export class MachineManager {
   }
   /** Mirror a bridge update onto its PC, so the sidebar and header show it without the dialog. */
   private showUpdate(job: JobState): void {
-    if (!job.runtime) return;
-    job.runtime.machine.updating = { job_id: job.public.id, step: job.public.step, progress: job.public.progress ?? null };
+    if (job.setupName !== undefined && ["installing", "starting"].includes(job.public.phase)) job.backgroundVisible = true;
+    if (job.runtime) job.runtime.machine.updating = { job_id: job.public.id, step: job.public.step, progress: job.public.progress ?? null };
+    if (!job.runtime && !job.backgroundVisible) return;
     // progress arrives per chunk: a few events a second are plenty
-    if (!this.emitTimer) { this.emitTimer = setTimeout(() => { this.emitTimer = undefined; this.emit(); }, 250); this.emitTimer.unref(); }
+    if (!this.emitTimer) { this.emitTimer = setTimeout(() => { this.emitTimer = undefined; this.emit(); this.emitSetups(); }, 250); this.emitTimer.unref(); }
   }
   private wait(job: JobState): Promise<string> {
     if (job.abort.signal.aborted) return Promise.reject(new Error("Setup cancelled"));
@@ -699,11 +717,18 @@ export class MachineManager {
     // before prepare resumes, and must not still carry the question that was just answered
     job.public.phase = action.action === "approve" ? "installing" : "connecting";
     job.public.step = actionStep(action.action);
+    this.showUpdate(job);
     pending.resolve(action.action === "answer" ? action.answer : "approved");
   }
   private cancelJob(id: string): void {
     const job = this.jobs.get(id);
-    if (!job || ["connected", "failed", "cancelled"].includes(job.public.phase)) return;
+    if (!job) return;
+    if (["connected", "failed", "cancelled"].includes(job.public.phase)) {
+      if (job.backgroundVisible) { job.backgroundVisible = false; this.emitSetups(); }
+      return;
+    }
+    job.backgroundVisible = false;
+    this.emitSetups();
     job.public.phase = "cancelled"; job.public.step = "Cancelled"; job.public.challenge = null; job.public.ssh_output = null;
     job.abort.abort(); job.pending?.reject(new Error("Setup cancelled")); job.pending = undefined;
     job.ssh?.close(); clearTimeout(job.timer);

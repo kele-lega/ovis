@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { BootstrapError, BOOTSTRAP_TTL_MS, bootstrapCommand, bootstrapRequest, resolveBootstrapPeer, revokeBootstrap, SshBootstrap, tailnetIP, verifyBootstrapAsset, type BootstrapDependencies, type BootstrapMetadata } from "./ssh-bootstrap.ts";
 import { BOOTSTRAP_ASSETS } from "./bootstrap-assets.ts";
 import { MachineManager } from "./machines.ts";
+import { handleMachineRequest } from "./machine-api.ts";
 import type { PushService } from "./push.ts";
 import { CompletionTracker } from "./completion.ts";
 import { SshConnection } from "./ssh.ts";
@@ -125,6 +126,99 @@ describe("normal setup integration with a reserved bootstrap identity", () => {
     expect(stored.version).toBe(1);
     expect(stored.machines[0].id).toBe(machine.id);
     expect(readdirSync(join(f.dir, "ssh-bootstrap-pending"))).toEqual([]);
+  });
+  it("publishes first-install progress without registering or persisting the PC", async () => {
+    const f = fixture();
+    const attempt = await f.manager.createBootstrap({ ...request, name: "Fixture PC" });
+    const installing = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    const internal = f.manager as unknown as {
+      stage(job: unknown, phase: string, step: string): void;
+      progress(job: unknown, stage: string, done: number, total: number): void;
+    };
+    f.prepare.mockImplementation(async (_runtime, job) => {
+      internal.stage(job, "installing", "Installing fixture bundle…");
+      internal.progress(job, "download", 50, 100);
+      installing.resolve();
+      await finish.promise;
+    });
+    const job = f.manager.connectBootstrap(attempt.id);
+    await installing.promise;
+    const events: unknown[] = [];
+    const unsubscribe = f.manager.subscribe((event) => events.push(structuredClone(event)));
+    expect(events).toContainEqual({ type: "machine-setups", setups: [{
+      id: job.id, machine_id: attempt.machine_id, name: "Fixture PC", phase: "installing",
+      step: "Installing fixture bundle…", error: null, progress: expect.objectContaining({ stage: "download", done: 50, total: 100 }),
+    }] });
+    const controller = new AbortController();
+    const response = await handleMachineRequest(new Request("http://localhost/api/machines/events", { signal: controller.signal }), f.manager);
+    const reader = response.body!.getReader();
+    try {
+      const first = new TextDecoder().decode((await reader.read()).value);
+      const second = new TextDecoder().decode((await reader.read()).value);
+      const frames = first + second;
+      expect(frames).toContain('"type":"machine-setups"');
+      expect(frames).toContain('"name":"Fixture PC"');
+      for (const secret of ["FIXTURE_PRIVATE", "ssh-ed25519", "source_ip", "challenge", "ssh_output"]) expect(frames).not.toContain(secret);
+    } finally { controller.abort(); await reader.cancel(); }
+    expect(f.manager.list()).toHaveLength(1);
+    expect(existsSync(join(f.dir, "machines.json"))).toBe(false);
+    expect(existsSync(join(f.dir, "bootstrap-machines.json"))).toBe(false);
+    finish.resolve();
+    await f.internals.jobs.get(job.id)!.finished;
+    expect(job.phase).toBe("connected");
+    expect(events.at(-1)).toEqual({ type: "machine-setups", setups: [] });
+    unsubscribe();
+  });
+  it("keeps a failed background install visible until dismissed, without registering it", async () => {
+    const f = fixture(); const attempt = await f.manager.createBootstrap(request);
+    const internal = f.manager as unknown as { stage(job: unknown, phase: string, step: string): void };
+    f.prepare.mockImplementation(async (_runtime, job) => {
+      internal.stage(job, "installing", "Installing fixture bundle…");
+      throw new Error("fixture install failed");
+    });
+    const job = f.manager.connectBootstrap(attempt.id);
+    await f.internals.jobs.get(job.id)!.finished;
+    const events: unknown[] = [];
+    const unsubscribe = f.manager.subscribe((event) => events.push(structuredClone(event)));
+    expect(events.at(-1)).toEqual({ type: "machine-setups", setups: [expect.objectContaining({ id: job.id, phase: "failed", error: "fixture install failed" })] });
+    expect(f.manager.list()).toHaveLength(1);
+    f.manager.action(job.id, { action: "cancel" });
+    expect(events.at(-1)).toEqual({ type: "machine-setups", setups: [] });
+    expect(f.manager.bootstrapAttempt(attempt.id).machine_id).toBe(attempt.machine_id);
+    unsubscribe();
+  });
+  it("shows manual first-install tasks too, then removes them on cancellation", async () => {
+    const f = fixture();
+    const ready = Promise.withResolvers<void>();
+    const internal = f.manager as unknown as { stage(job: unknown, phase: string, step: string): void };
+    f.prepare.mockImplementation(async (_runtime, job) => {
+      internal.stage(job, "installing", "Installing fixture bundle…");
+      ready.resolve();
+      await new Promise<void>((resolve) => (job as { abort: AbortController }).abort.signal.addEventListener("abort", () => resolve(), { once: true }));
+    });
+    const job = f.manager.setup({ destination: "fixture-alias", name: "Manual fixture" });
+    await ready.promise;
+    expect(f.manager.setupSummaries()).toMatchObject([{ id: job.id, name: "Manual fixture", phase: "installing" }]);
+    expect(f.manager.list()).toHaveLength(1);
+    f.manager.action(job.id, { action: "cancel" });
+    await f.internals.jobs.get(job.id)!.finished;
+    expect(f.manager.setupSummaries()).toEqual([]);
+    expect(f.manager.list()).toHaveLength(1);
+  });
+  it("does not publish authentication or approval as an unattended installation", async () => {
+    const f = fixture(); const attempt = await f.manager.createBootstrap(request);
+    const ready = Promise.withResolvers<void>();
+    const internal = f.manager as unknown as { stage(job: unknown, phase: string, step: string): void };
+    f.prepare.mockImplementation(async (_runtime, job) => {
+      internal.stage(job, "approval", "Review the changes on this PC");
+      ready.resolve();
+      await new Promise<void>((resolve) => (job as { abort: AbortController }).abort.signal.addEventListener("abort", () => resolve(), { once: true }));
+    });
+    f.manager.connectBootstrap(attempt.id); await ready.promise;
+    expect(f.manager.setupSummaries()).toEqual([]);
+    await f.manager.cancelBootstrap(attempt.id);
+    expect(f.manager.setupSummaries()).toEqual([]);
   });
   it("failed observation leaves no registration; retry keeps UUID/key", async () => {
     const f = fixture(); f.observe.mockRejectedValueOnce(new Error("fixture failure")); const attempt = await f.manager.createBootstrap(request);

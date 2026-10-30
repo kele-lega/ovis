@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
-import type { Machine, MachineEvent } from "../../shared/machines.ts";
+import type { Machine, MachineEvent, MachineSetupSummary } from "../../shared/machines.ts";
 import { ApiError, authenticate, fetchMachines, verifySourceBoot } from "./api.ts";
 import { passingFolder, recentDirectories } from "./recent-directories.ts";
 import { keepEventStream } from "./eventStream.ts";
@@ -32,8 +32,9 @@ const REFETCH_DEBOUNCE_MS = 500;
 
 export function useRosterState() {
   const [machines, setMachines] = useState<Machine[]>([]);
+  const [machineSetups, setMachineSetups] = useState<MachineSetupSummary[]>([]);
   const [machineRosterLoaded, setMachineRosterLoaded] = useState(false);
-  return { machines, setMachines, machineRosterLoaded, setMachineRosterLoaded };
+  return { machines, setMachines, machineSetups, setMachineSetups, machineRosterLoaded, setMachineRosterLoaded };
 }
 
 export function useRecentFolderMemory({ machines }: { machines: Machine[] }) {
@@ -147,13 +148,14 @@ export function useRosterLoader({ rosterIn, setMachines, setMachineRosterLoaded,
   return { snapshotRequests, reorderCoordinator, load, scheduleRefetch };
 }
 
-export function useRosterEvents({ locked, receivePreferencesRef, snapshotRequests, onRoster, reorderCoordinator, setMachines, rosterIn, setMachineRosterLoaded, machinesRef, onPaneStatus, onPaneExited, followFocusRef, selectionRef, splitShownRef, splitRef, pendingLink, selectionHint, setSelectedPaneId, setNotificationViewTarget, setTerminalPeek, setAutoSelected, scheduleRefetch, preferencesResubscribedRef, preferencesDisconnectedRef, preferencesClosedRef, dropIn, chime, getTakeNotificationTargetRef }: {
+export function useRosterEvents({ locked, receivePreferencesRef, snapshotRequests, onRoster, reorderCoordinator, setMachines, setMachineSetups, rosterIn, setMachineRosterLoaded, machinesRef, onPaneStatus, onPaneExited, followFocusRef, selectionRef, splitShownRef, splitRef, pendingLink, selectionHint, setSelectedPaneId, setNotificationViewTarget, setTerminalPeek, setAutoSelected, scheduleRefetch, preferencesResubscribedRef, preferencesDisconnectedRef, preferencesClosedRef, dropIn, chime, getTakeNotificationTargetRef }: {
   locked: boolean | null;
   receivePreferencesRef: RefObject<ReturnType<typeof usePreferencesSync>["receive"]>;
   snapshotRequests: RefObject<SnapshotRequests>;
   onRoster: ReturnType<typeof useAlertSignals>["onRoster"];
   reorderCoordinator: ReorderCoordinator;
   setMachines: Dispatch<SetStateAction<Machine[]>>;
+  setMachineSetups: Dispatch<SetStateAction<MachineSetupSummary[]>>;
   rosterIn: () => void;
   setMachineRosterLoaded: Dispatch<SetStateAction<boolean>>;
   machinesRef: RefObject<Machine[]>;
@@ -184,6 +186,7 @@ export function useRosterEvents({ locked, receivePreferencesRef, snapshotRequest
       const takeNotificationTargetRef = getTakeNotificationTargetRef();
       let payload: MachineEvent;
       try { payload = JSON.parse(event.data); } catch { return; }
+      if (payload.type === "machine-setups") { setMachineSetups((before) => sameData(before, payload.setups) ? before : payload.setups); return; }
       if (payload.type === "preferences") { receivePreferencesRef.current(payload.preferences); return; }
       if (payload.type === "herdr-sidebar") { setAgentRowTokens(payload.agents); return; }
       if (payload.type === "seen") { receiveSeen(payload.finishes); return; }
