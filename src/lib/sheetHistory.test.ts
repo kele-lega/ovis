@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, jest } from "bun:test";
+import { closedSheetTraversals } from "./historyKeys.ts";
 
 let originalWindow: PropertyDescriptor | undefined;
 
@@ -15,9 +16,10 @@ function fakeWindow() {
     if (next === index) return;
     const land = (): void => {
       index = Math.min(next, entries.length - 1);
-      for (const listener of listeners) listener({ state: entries[index]!.state });
+      const event = { state: entries[index]!.state };
+      for (const listener of listeners) listener(event);
     };
-    if (!deferred) { index = next; queueMicrotask(() => { for (const listener of listeners) listener({ state: entries[index]!.state }); }); return; }
+    if (!deferred) { index = next; queueMicrotask(() => { const event = { state: entries[index]!.state }; for (const listener of listeners) listener(event); }); return; }
     pending = true;
     setTimeout(() => { pending = false; land(); }, 1);
   };
@@ -237,7 +239,8 @@ describe("a phone's sheet in the history", () => {
   it("tells the app a closed sheet's own step off its entry from a Back", async () => {
     // the app's Back listens after this module, as App's effect does
     const seen: boolean[] = [];
-    fake.window.addEventListener("popstate", () => { seen.push(sheetHistory.sheetSteppedOff()); });
+    const marked: boolean[] = [];
+    fake.window.addEventListener("popstate", (event) => { seen.push(sheetHistory.sheetSteppedOff()); marked.push(closedSheetTraversals.has(event as unknown as Event)); });
     // an item that opened a pane the roster does not list yet: nothing wrote the address, so the sheet steps back
     const leave = hooks.enter(() => {});
     leave(); await settled();
@@ -245,5 +248,6 @@ describe("a phone's sheet in the history", () => {
     hooks.enter(() => {});
     h.back(); await settled();
     expect(seen).toEqual([true, false]);
+    expect(marked).toEqual([true, false]);
   });
 });

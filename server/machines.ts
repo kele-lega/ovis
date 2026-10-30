@@ -944,15 +944,16 @@ export class MachineManager {
    */
   retryNow(id: string): void {
     const runtime = this.machines.get(id);
-    if (!runtime || runtime.retry === undefined || this.stopped || !runtime.machine.enabled) return;
+    if (!runtime || runtime.retry === undefined || this.stopped || !runtime.machine.enabled || this.revoking.has(id)) return;
     if (runtime.triedAt !== undefined && this.now() - runtime.triedAt < DEMANDED_RETRY_INTERVAL_MS) return;
     clearTimeout(runtime.retry); runtime.retry = undefined;
     void this.reconnect(runtime);
   }
   private async reconnect(runtime: Runtime): Promise<void> {
-    if (this.revoking.has(runtime.machine.id)) return;
     if (!this.mayConnect(runtime)) return;
     if (this.stopped || !runtime.machine.enabled) return;
+    // A timer that fires during revocation must not consume the PC's only retry.
+    if (this.revoking.has(runtime.machine.id)) { this.retryLater(runtime); return; }
     this.disconnect(runtime);
     runtime.triedAt = this.now();
     runtime.machine.state = "reconnecting"; runtime.machine.action_required = null; this.emit();

@@ -210,9 +210,26 @@ async function settingsSearch(browser: import("playwright-core").Browser, url: s
           await openPalette(page, query);
           const settingsRows = await page.locator(".palette-section[data-section='settings-pages'] [role='option']").count();
           const overflow = await sideways(page);
+          if (width === 390) await page.evaluate(() => {
+            // Hold the palette's traversal until Settings has pushed its own entry.
+            // The original Back targeted the entry under the palette, now two steps away.
+            const back = history.back.bind(history);
+            const traversal = { ready: false, release: () => new Promise<void>((resolve) => {
+              window.addEventListener("popstate", () => resolve(), { once: true });
+              history.go(-2);
+            }) };
+            (window as unknown as { paletteTraversal: typeof traversal }).paletteTraversal = traversal;
+            history.back = () => { history.back = back; traversal.ready = true; };
+          });
           await page.keyboard.press("Escape");
           await page.locator(".command-palette").waitFor({ state: "detached" });
+          if (width === 390) await page.waitForFunction(() => (window as unknown as { paletteTraversal: { ready: boolean } }).paletteTraversal.ready);
           await openSettings(page);
+          if (width === 390) {
+            await page.waitForFunction(() => (history.state as Record<string, unknown> | null)?.["ovis:settings"] !== undefined);
+            await page.evaluate(() => (window as unknown as { paletteTraversal: { release(): Promise<void> } }).paletteTraversal.release());
+            await page.waitForFunction(() => document.querySelector(".settings-dialog") !== null && (history.state as Record<string, unknown> | null)?.["ovis:settings"] !== undefined);
+          }
           const opened = await landing(page, label);
           const steps: { page: string | null; section: string | null }[] = [opened];
           if (width === 1440) {

@@ -71,8 +71,10 @@ create a runnable command when the pinned asset is unavailable or its hash diffe
   administrator are not supported by this first version. The script can install OpenSSH Server,
   enable it at boot and start it if stopped, without restarting a running daemon. For a verified
   packaged default configuration, it initializes missing default host keys before validation and
-  service startup. Existing keys are preserved; empty keys, orphan public keys and custom configs
-  with unloadable keys require manual repair. Cleanup never generates host keys. It adds only an
+  service startup. The `sshd` service must use the exact packaged System32 OpenSSH executable
+  without custom arguments; another binary or `-f`/`-o`/`-p` requires manual setup, not startup
+  against a different configuration. Existing keys are preserved; empty keys, orphan public keys
+  and custom configs with unloadable keys require manual repair. Cleanup never generates host keys. It adds only an
   `Ovis-SSH-<machine-id>` inbound TCP/22 rule restricted to the exact Ovis source and selected
   target IP. A broad default rule newly created by this capability installation is disabled;
   preexisting rules are preserved and warned about. Administrator accounts use the **shared**

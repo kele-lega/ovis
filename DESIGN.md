@@ -2725,6 +2725,12 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   Zed remote-development docs were unavailable to fetch during this change, so the design uses
   Ovis's existing integration-command Copy row and manual host-key/install approvals instead
   of claiming an unverified third-party precedent.
+- A phone palette's delayed close traversal is not Back for Settings opened in the meantime.
+  The sheet module marks that exact popstate event; Settings rebuilds its requested levels and
+  leaves the next actual Back unchanged. This repairs Ovis's existing layered phone history,
+  not its visual layout or focus flow. Zed's remote-development reference was checked again but
+  remained unavailable to fetch; no verified coding-agent app precedent for this browser-history
+  race is claimed, and no third-party implementation is copied.
 - Install (a row of the Phone group) reflects installed, promptable or browser-instructions state;
   About links the repository.
 - Portal, a group of its own between Phone and Devices where the server offers it: while it runs,

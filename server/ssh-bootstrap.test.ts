@@ -175,6 +175,34 @@ describe("normal setup integration with a reserved bootstrap identity", () => {
     run.mockResolvedValue("ovis-bootstrap-revoked"); await restored.revokeBootstrap(attempt.machine_id);
     expect(restored.list()[1]!.can_revoke_bootstrap).toBe(false); expect(existsSync(join(f.dir, "ssh", attempt.machine_id))).toBe(true);
   });
+  it("keeps reconnect scheduling when a retry meets an in-flight revocation", async () => {
+    const f = fixture(); const attempt = await f.manager.createBootstrap(request);
+    const job = f.manager.connectBootstrap(attempt.id); await f.internals.jobs.get(job.id)!.finished;
+    const internal = f.manager as unknown as {
+      machines: Map<string, { machine: { state: string }; retry?: ReturnType<typeof setTimeout>; triedAt?: number }>;
+      disconnect(runtime: unknown): void;
+      retryLater(runtime: unknown): void;
+      reconnect(runtime: unknown): Promise<void>;
+    };
+    const runtime = internal.machines.get(attempt.machine_id)!;
+    internal.disconnect(runtime); internal.retryLater(runtime); runtime.triedAt = -100_000;
+    const release = Promise.withResolvers<void>();
+    f.start.mockImplementationOnce(async () => { await release.promise; throw new Error("fixture offline"); });
+    const revoking = f.manager.revokeBootstrap(attempt.machine_id).catch((error: unknown) => error);
+    const waiting = runtime.retry;
+    f.manager.retryNow(attempt.machine_id);
+    const demandedRetry = runtime.retry;
+    clearTimeout(runtime.retry); runtime.retry = undefined;
+    await internal.reconnect(runtime);
+    const automaticRetry = runtime.retry;
+    release.resolve();
+    expect(await revoking).toMatchObject({ code: "bootstrap_revoke_failed" });
+    expect(demandedRetry).toBe(waiting);
+    expect(automaticRetry).toBeDefined();
+    expect(runtime.machine.state).toBe("reconnecting");
+    expect(runtime.retry).toBeDefined();
+    expect(f.manager.list()[1]!.can_revoke_bootstrap).toBe(true);
+  });
   it("refuses secret challenges even when an SSH double attempts one", async () => {
     const f = fixture(); f.start.mockImplementation(async (challenge) => { await challenge!("Password:", false); });
     const attempt = await f.manager.createBootstrap(request); const job = f.manager.connectBootstrap(attempt.id); await f.internals.jobs.get(job.id)!.finished;

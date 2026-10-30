@@ -136,6 +136,7 @@ function Reset-HostFixture {
     $script:commands = @(); $script:configCalls = 0
     $script:configMode = 'missing'; $script:keygenMode = 'success'; $script:unsafePath = ''
     $script:capabilityState = 'Installed'; $script:serviceStatus = 'Stopped'
+    $script:serviceCommand = '"' + $script:fakeSshd + '"'; $script:servicePresent = $true
     $script:fakeRule = $null; $script:capabilityRuleCreated = $false
 }
 function Assert-NoHostEffects {
@@ -151,6 +152,12 @@ function Get-WindowsCapability { param([switch]$Online, $Name) return [pscustomo
 function New-NetFirewallRule { param($Name, $DisplayName, $Description, $Direction, $Action, $Enabled, $Protocol, $LocalPort, $RemoteAddress, $LocalAddress, $Profile, $EdgeTraversalPolicy) $script:commands += 'firewall' }
 function Set-Service { param($Name, $StartupType) $script:commands += 'set-service' }
 function Get-Service { param($Name) return [pscustomobject]@{ Status = $script:serviceStatus } }
+function Get-CimInstance {
+    param($ClassName, $Filter, $ErrorAction)
+    Assert-True ($ClassName -ceq 'Win32_Service' -and $Filter -ceq "Name='sshd'") 'Unexpected service query'
+    if ($script:servicePresent) { return [pscustomobject]@{ PathName = $script:serviceCommand } }
+    return @()
+}
 function Start-Service { param($Name) $script:commands += 'start-service' }
 function Add-WindowsCapability {
     param([switch]$Online, $Name)
@@ -165,6 +172,20 @@ function Disable-NetFirewallRule { param([Parameter(ValueFromPipeline = $true)]$
 function Remove-NetFirewallRule { throw 'Unexpected firewall removal' }
 function Get-ChildItem { param($LiteralPath, $Filter) Assert-True ($LiteralPath.StartsWith($hostFixture)) 'Fingerprint scan escaped fixture'; return @() }
 try {
+    Reset-HostFixture
+    foreach ($command in @($script:fakeSshd, ('"' + $script:fakeSshd + '"'))) {
+        $script:serviceCommand = $command
+        Assert-OvisSshService $script:fakeSshd $true
+    }
+    foreach ($command in @('C:\Custom\sshd.exe', ('"' + $script:fakeSshd + '" -f C:\custom.conf'), ($script:fakeSshd + ' -p 2222'), ('"' + $script:fakeSshd + '" -o AuthorizedKeysFile=C:\other'))) {
+        Reset-HostFixture; $script:serviceCommand = $command
+        $authPath = Join-Path $hostFixture 'authorization'
+        Assert-Rejected { & $installTail } 'Accepted a custom service executable/arguments'
+        Assert-True ($script:commands.Count -eq 0) 'Service rejection changed host keys or authorization'
+    }
+    Reset-HostFixture; $script:servicePresent = $false
+    Assert-OvisSshService $script:fakeSshd
+    Assert-Rejected { Assert-OvisSshService $script:fakeSshd $true } 'Required service was absent'
     Reset-HostFixture
     Remove-Item -LiteralPath $script:hostDirectory -Recurse
     Assert-OvisSshConfig $script:fakeSshd $false $true

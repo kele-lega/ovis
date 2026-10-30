@@ -154,6 +154,16 @@ function Assert-OvisSshConfig([string]$Sshd, [bool]$SharedAdmin, [bool]$Initiali
     } elseif ($path -ne '.ssh/authorized_keys' -and $path -ne '.ssh/authorized_keys .ssh/authorized_keys2') { throw 'Custom AuthorizedKeysFile; authorize/remove the exact Ovis line manually.' }
     if ('pubkeyauthentication yes' -notin $effective) { throw 'Public-key authentication is disabled; configure SSH manually.' }
 }
+function Assert-OvisSshService([string]$Sshd, [bool]$Required = $false) {
+    $services = @(Get-CimInstance -ClassName Win32_Service -Filter "Name='sshd'" -ErrorAction Stop)
+    if ($services.Count -eq 0 -and -not $Required) { return }
+    if ($services.Count -ne 1) { throw 'Cannot resolve the OpenSSH sshd service; configure SSH manually.' }
+    $command = "$($services[0].PathName)".Trim()
+    # -T below validates this binary's default config, not an arbitrary service's
+    # -f/-o/-p arguments or a different OpenSSH installation. Never start that service.
+    $quoted = '"' + $Sshd + '"'
+    if ($command -ine $quoted -and ($Sshd -match '\s' -or $command -ine $Sshd)) { throw 'Custom SSH service executable or arguments; configure SSH manually. No service was started.' }
+}
 function Get-OvisOwnedRule([hashtable]$Options) {
     $name = "Ovis-SSH-$($Options.Id)"
     $rule = Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue
@@ -233,6 +243,7 @@ function Invoke-OvisBootstrap {
     Assert-OvisSafePath $authPath $false
     $rule = Get-OvisOwnedRule $options
     $sshd = Join-Path $env:SystemRoot 'System32\OpenSSH\sshd.exe'
+    Assert-OvisSshService $sshd
     if (Test-Path -LiteralPath $sshd) { Assert-OvisSshConfig $sshd $sharedAdmin (-not $Remove) }
     elseif (Test-Path -LiteralPath (Join-Path $env:ProgramData 'ssh\sshd_config')) { throw 'An existing sshd_config cannot be validated without sshd; install/validate OpenSSH manually first.' }
     if ($Remove) {
@@ -264,6 +275,7 @@ function Invoke-OvisBootstrap {
         }
     }
     if (-not (Test-Path -LiteralPath $sshd)) { throw 'OpenSSH capability did not provide sshd.exe. Complete setup manually.' }
+    Assert-OvisSshService $sshd $true
     Assert-OvisSshConfig $sshd $sharedAdmin $true
     Update-OvisAuthorization $authPath $options.Line $false $account.SID.Value $sharedAdmin
     if ($null -eq $rule) {

@@ -7,3 +7,6 @@
 export const SHEET_HISTORY_KEY = "ovis:sheet";
 /** the sheet's id on the entry it opened over, and on its own: one that takes the sheet's entry over can tell that entry */
 export const SHEET_UNDER_KEY = "ovis:sheet-under";
+
+/** Exact popstate events caused by a closed sheet's delayed traversal, not a user's Back. */
+export const closedSheetTraversals = new WeakSet<Event>();
