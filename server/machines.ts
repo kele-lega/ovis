@@ -1,6 +1,6 @@
 import { authenticatedWebSocket } from "./remote-websocket.ts";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer as tcpServer } from "node:net";
 import { hostname } from "node:os";
 import { join } from "node:path";
@@ -195,6 +195,7 @@ export class MachineManager {
   private saveTimer?: ReturnType<typeof setTimeout>;
   private profileState: HerdrProfileState;
   private statePath: string;
+  private bootstrapPath: string;
   private sshDir: string;
   private local: Machine = { id: LOCAL_MACHINE, name: localMachineName(), kind: "local", enabled: true, state: "connecting", error: null, snapshot: null };
   private localDiagnostics = new ConnectionDiagnostics("machine.local");
@@ -224,6 +225,7 @@ export class MachineManager {
     if (this.bootId) this.local.source_boot_id = this.bootId;
     this.profileState = new HerdrProfileState(stateDir);
     this.statePath = join(stateDir, "machines.json");
+    this.bootstrapPath = join(stateDir, "bootstrap-machines.json");
     this.sshDir = join(stateDir, "ssh");
     this.bootstrap = new SshBootstrap(stateDir, options.bootstrap);
     this.settingsPath = join(stateDir, "machine-settings.json");
@@ -235,18 +237,29 @@ export class MachineManager {
         : error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : "read failed";
       if (cause !== "ENOENT") console.error(`Cannot read ${this.settingsPath}; remote PC settings start empty`, cause);
     }
+    const rows: { item: StoredMachine; guided: boolean }[] = [];
     if (existsSync(this.statePath)) {
       const saved: unknown = JSON.parse(readFileSync(this.statePath, "utf8"));
       if (!Array.isArray(saved)) throw new Error("Invalid machines.json; registrations were preserved");
-      for (const item of saved as StoredMachine[]) {
-        if (!/^[a-f0-9-]{36}$/.test(item.id) || typeof item.name !== "string" || typeof item.enabled !== "boolean") throw new Error("Invalid machine registration");
-        const machine: Machine = { id: item.id, name: item.name, kind: "ssh", enabled: item.enabled, target: validateTarget(item.target), state: "disconnected", snapshot: item.snapshot ?? null, error: null };
-        if (this.bootstrap.metadata(item.id, machine.target)) machine.can_revoke_bootstrap = !this.bootstrap.metadata(item.id, machine.target)!.revoked;
-        const runtime = this.runtime(machine);
-        this.machines.set(item.id, runtime);
-        if (item.enabled) queueMicrotask(() => void this.reconnect(runtime));
-      }
+      rows.push(...saved.map((item: StoredMachine) => ({ item, guided: false })));
     }
+    if (existsSync(this.bootstrapPath)) {
+      if (lstatSync(this.bootstrapPath).isSymbolicLink()) throw new Error("Invalid bootstrap-machines.json; registrations were preserved");
+      const saved = JSON.parse(readFileSync(this.bootstrapPath, "utf8")) as { version?: unknown; machines?: unknown } | null;
+      if (saved?.version !== 1 || !Array.isArray(saved.machines)) throw new Error("Invalid bootstrap-machines.json; registrations were preserved");
+      rows.push(...saved.machines.map((item: StoredMachine) => ({ item, guided: true })));
+    }
+    for (const { item, guided } of rows) {
+      if (!item || !/^[a-f0-9-]{36}$/.test(item.id) || typeof item.name !== "string" || typeof item.enabled !== "boolean" || this.machines.has(item.id)) throw new Error("Invalid machine registration");
+      const machine: Machine = { id: item.id, name: item.name, kind: "ssh", enabled: item.enabled, target: validateTarget(item.target), state: "disconnected", snapshot: item.snapshot ?? null, error: null };
+      const metadata = this.bootstrap.metadata(item.id, machine.target);
+      if (guided && !metadata) throw new Error("Missing bootstrap SSH metadata; registrations and credentials were preserved");
+      if (!guided && metadata) throw new Error("Bootstrap PC in legacy storage; registrations and credentials were preserved");
+      if (metadata) machine.can_revoke_bootstrap = !metadata.revoked;
+      this.machines.set(item.id, this.runtime(machine));
+    }
+    // Validate every protected row before allowing any connection or state rewrite.
+    for (const runtime of this.machines.values()) if (runtime.machine.enabled) queueMicrotask(() => void this.reconnect(runtime));
     void this.refreshLocal();
     this.localTimer = setInterval(() => void this.refreshLocal(), 5000);
     this.localTimer.unref();
@@ -428,14 +441,23 @@ export class MachineManager {
   }
   private persist(): void {
     mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
-    const data: StoredMachine[] = [...this.machines.values()].filter(({ machine }) => !machine.herdr_profile_id).map(({ machine: m }) => ({ id: m.id, name: m.name, target: m.target!, enabled: m.enabled, snapshot: m.snapshot }));
-    const tmp = this.statePath + ".tmp";
+    const data: StoredMachine[] = [], guided: StoredMachine[] = [];
+    for (const { machine: m } of this.machines.values()) {
+      if (m.herdr_profile_id) continue;
+      const row = { id: m.id, name: m.name, target: m.target!, enabled: m.enabled, snapshot: m.snapshot };
+      (this.bootstrap.metadata(m.id, m.target) ? guided : data).push(row);
+    }
     for (const { machine } of this.machines.values()) if (machine.herdr_profile_id) this.profileState.saveSnapshot(machine.herdr_profile_id, machine.snapshot);
     this.profileState.flush();
-    // The machine row is the final durable write. A failed profile flush must not
-    // leave a bootstrap row whose identity is rolled back to pending credentials.
-    writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
-    chmodSync(tmp, 0o600); renameSync(tmp, this.statePath);
+    const tmp = this.statePath + ".tmp", protectedTmp = this.bootstrapPath + ".tmp";
+    try {
+      writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 }); chmodSync(tmp, 0o600);
+      writeFileSync(protectedTmp, JSON.stringify({ version: 1, machines: guided }), { mode: 0o600 }); chmodSync(protectedTmp, 0o600);
+      // Old readers see only ordinary PCs. The protected row is the final durable
+      // write, after identity metadata and every other fallible persistence step.
+      renameSync(tmp, this.statePath);
+      renameSync(protectedTmp, this.bootstrapPath);
+    } catch (error) { rmSync(tmp, { force: true }); rmSync(protectedTmp, { force: true }); throw error; }
   }
   job(id: string): SetupJob | undefined { return this.jobs.get(id)?.public; }
   settings(): MachineSettings { return { ...this.preferences }; }
@@ -484,10 +506,11 @@ export class MachineManager {
     if (!runtime || !metadata || metadata.revoked) throw new BootstrapError("bootstrap_not_managed", "This PC has no managed SSH bootstrap key", 404);
     if (this.revoking.has(id) || [...this.jobs.values()].some((job) => job.public.machine_id === id && !["connected", "failed", "cancelled"].includes(job.public.phase))) throw new BootstrapError("bootstrap_busy", "Finish the current PC connection first", 409);
     this.revoking.add(id);
-    // A fresh key-only connection checks the stored host fingerprint strictly and never asks
-    // for passwords, learns a new fingerprint, or borrows a pre-existing SSH master.
-    const ssh = new SshConnection(metadata.target, this.sshDir, join(this.sshDir, id), true, undefined, true);
+    let ssh: SshConnection | undefined;
     try {
+      // A fresh key-only connection checks the stored host fingerprint strictly and never asks
+      // for passwords, learns a new fingerprint, or borrows a pre-existing SSH master.
+      ssh = new SshConnection(metadata.target, this.sshDir, join(this.sshDir, id), true, undefined, true);
       await ssh.start();
       await revokeBootstrap(ssh, id, metadata, removeFirewall);
       this.bootstrap.register(id, { ...metadata, revoked: true });
@@ -495,7 +518,7 @@ export class MachineManager {
       // Preserve the local key/registration until the UI's separate, explicit forget step.
       this.emit();
     } catch { throw new BootstrapError("bootstrap_revoke_failed", "The SSH bootstrap key could not be revoked. The local PC and key were kept; retry after checking SSH permissions.", 502); }
-    finally { ssh.close(); this.revoking.delete(id); }
+    finally { try { ssh?.close(); } finally { this.revoking.delete(id); } }
   }
   setup(request: SetupRequest, options: { auto?: boolean; bootstrap?: BootstrapLease } = {}): SetupJob {
     if (this.stopped) throw new Error("Server stopping");

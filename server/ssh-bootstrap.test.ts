@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BootstrapError, BOOTSTRAP_TTL_MS, bootstrapCommand, bootstrapRequest, resolveBootstrapPeer, revokeBootstrap, SshBootstrap, tailnetIP, verifyBootstrapAsset, type BootstrapDependencies, type BootstrapMetadata } from "./ssh-bootstrap.ts";
@@ -120,7 +120,10 @@ describe("normal setup integration with a reserved bootstrap identity", () => {
     expect(readFileSync(join(f.dir, "ssh", machine.id), "utf8")).toBe("FIXTURE_PRIVATE");
     expect(f.internals.machines.get(machine.id)!.ssh.keyPath).toBe(join(f.dir, "ssh", machine.id));
     expect(f.internals.machines.get(machine.id)!.ssh.exclusiveIdentity).toBe(true);
-    expect(JSON.parse(readFileSync(join(f.dir, "machines.json"), "utf8"))).toHaveLength(1);
+    expect(JSON.parse(readFileSync(join(f.dir, "machines.json"), "utf8"))).toEqual([]);
+    const stored = JSON.parse(readFileSync(join(f.dir, "bootstrap-machines.json"), "utf8"));
+    expect(stored.version).toBe(1);
+    expect(stored.machines[0].id).toBe(machine.id);
     expect(readdirSync(join(f.dir, "ssh-bootstrap-pending"))).toEqual([]);
   });
   it("failed observation leaves no registration; retry keeps UUID/key", async () => {
@@ -138,7 +141,8 @@ describe("normal setup integration with a reserved bootstrap identity", () => {
     expect(existsSync(join(f.dir, "ssh", attempt.machine_id))).toBe(true);
     const records = JSON.parse(readFileSync(join(f.dir, "bootstrap-registrations.json"), "utf8"));
     expect(records.registrations[attempt.machine_id].username).toBe("alice");
-    expect(JSON.parse(readFileSync(join(f.dir, "machines.json"), "utf8"))[0].id).toBe(attempt.machine_id);
+    expect(JSON.parse(readFileSync(join(f.dir, "machines.json"), "utf8"))).toEqual([]);
+    expect(JSON.parse(readFileSync(join(f.dir, "bootstrap-machines.json"), "utf8")).machines[0].id).toBe(attempt.machine_id);
   });
   it("profile persistence failure cannot leave a row that falls back to ambient SSH", async () => {
     const f = fixture();
@@ -202,6 +206,63 @@ describe("normal setup integration with a reserved bootstrap identity", () => {
     expect(runtime.machine.state).toBe("reconnecting");
     expect(runtime.retry).toBeDefined();
     expect(f.manager.list()[1]!.can_revoke_bootstrap).toBe(true);
+  });
+  it("keeps guided rows out of legacy storage across ordinary saves and restarts", async () => {
+    const f = fixture();
+    const manual = f.manager.setup({ destination: "manual-alias", name: "Manual PC" }); await f.internals.jobs.get(manual.id)!.finished;
+    const attempt = await f.manager.createBootstrap(request); const job = f.manager.connectBootstrap(attempt.id); await f.internals.jobs.get(job.id)!.finished;
+    f.manager.patch(attempt.machine_id, { enabled: false, name: "Guided PC" });
+    f.manager.patch(manual.machine_id, { enabled: false }); f.manager.stop();
+    const legacy = JSON.parse(readFileSync(join(f.dir, "machines.json"), "utf8"));
+    expect(legacy.map((row: { id: string }) => row.id)).toEqual([manual.machine_id]);
+    const restored = new MachineManager(f.dir, {} as PushService, new CompletionTracker(null), async () => { throw new Error("fixture offline"); }); cleanup.push(() => restored.stop());
+    expect(restored.list().find((machine) => machine.id === attempt.machine_id)).toMatchObject({ name: "Guided PC", can_revoke_bootstrap: true });
+    expect(restored.list().find((machine) => machine.id === manual.machine_id)?.target?.destination).toBe("manual-alias");
+    restored.remove(attempt.machine_id);
+    expect(JSON.parse(readFileSync(join(f.dir, "bootstrap-machines.json"), "utf8")).machines).toEqual([]);
+    expect(JSON.parse(readFileSync(join(f.dir, "machines.json"), "utf8"))).toEqual(legacy);
+  });
+  it("refuses unsupported or unprotected guided rows without rewriting either store", () => {
+    for (const document of [{ version: 99, machines: [] }, { version: 1, machines: [{ id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", name: "Unprotected", target: { destination: "alice@100.70.1.2", port: 22 }, enabled: true }] }]) {
+      const dir = root(), path = join(dir, "bootstrap-machines.json"), bytes = JSON.stringify(document);
+      writeFileSync(path, bytes);
+      expect(() => new MachineManager(dir, {} as PushService, new CompletionTracker(null))).toThrow();
+      expect(readFileSync(path, "utf8")).toBe(bytes);
+      expect(existsSync(join(dir, "machines.json"))).toBe(false);
+    }
+  });
+  it("rolls back a guided identity when the protected row cannot commit", async () => {
+    const f = fixture(), path = join(f.dir, "bootstrap-machines.json");
+    mkdirSync(path);
+    const attempt = await f.manager.createBootstrap(request), job = f.manager.connectBootstrap(attempt.id);
+    await f.internals.jobs.get(job.id)!.finished;
+    expect(job.phase).toBe("failed");
+    expect(JSON.parse(readFileSync(join(f.dir, "machines.json"), "utf8"))).toEqual([]);
+    expect(existsSync(join(f.dir, "ssh", attempt.machine_id))).toBe(false);
+    expect(f.manager.list()).toHaveLength(1);
+    rmSync(path, { recursive: true });
+    const retry = f.manager.connectBootstrap(attempt.id); await f.internals.jobs.get(retry.id)!.finished;
+    expect(retry.phase).toBe("connected");
+    expect(retry.machine_id).toBe(attempt.machine_id);
+  });
+  it("releases revocation state when the connection constructor fails", async () => {
+    const f = fixture(); const attempt = await f.manager.createBootstrap(request);
+    const job = f.manager.connectBootstrap(attempt.id); await f.internals.jobs.get(job.id)!.finished;
+    const path = join(f.dir, "ssh"); renameSync(path, path + ".saved"); writeFileSync(path, "fixture blocker");
+    try { await expect(f.manager.revokeBootstrap(attempt.machine_id)).rejects.toMatchObject({ code: "bootstrap_revoke_failed" }); }
+    finally { unlinkSync(path); renameSync(path + ".saved", path); }
+    expect((f.manager as unknown as { revoking: Set<string> }).revoking.has(attempt.machine_id)).toBe(false);
+    const run = spyOn(SshConnection.prototype, "run").mockResolvedValue("ovis-bootstrap-revoked"); cleanup.push(() => run.mockRestore());
+    await f.manager.revokeBootstrap(attempt.machine_id);
+    expect(f.manager.list()[1]!.can_revoke_bootstrap).toBe(false);
+  });
+  it("releases revocation state even when closing the connection throws", async () => {
+    const f = fixture(); const attempt = await f.manager.createBootstrap(request);
+    const job = f.manager.connectBootstrap(attempt.id); await f.internals.jobs.get(job.id)!.finished;
+    const run = spyOn(SshConnection.prototype, "run").mockRejectedValue(new Error("fixture revoke failure")); cleanup.push(() => run.mockRestore());
+    const close = spyOn(SshConnection.prototype, "close").mockImplementationOnce(() => { throw new Error("fixture close failure"); }); cleanup.push(() => close.mockRestore());
+    await expect(f.manager.revokeBootstrap(attempt.machine_id)).rejects.toThrow();
+    expect((f.manager as unknown as { revoking: Set<string> }).revoking.has(attempt.machine_id)).toBe(false);
   });
   it("refuses secret challenges even when an SSH double attempts one", async () => {
     const f = fixture(); f.start.mockImplementation(async (challenge) => { await challenge!("Password:", false); });

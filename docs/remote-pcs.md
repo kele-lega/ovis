@@ -110,8 +110,14 @@ removes only pending **local** credentials. A key already written to the PC **do
 Save **Undo this SSH authorization** and run that cleanup command on the PC to remove exactly
 this key and its exact owned Windows rule, even after expiry. Cleanup never uninstalls or stops SSH
 or Herdr. After connection the dedicated private key moves to `<stateDir>/ssh/<machine-id>`, mode
-`0600`; strict registration metadata is stored atomically in `bootstrap-registrations.json`.
-Invalid metadata fails closed rather than falling back to ambient SSH credentials.
+`0600`; strict identity metadata is stored atomically in `bootstrap-registrations.json`, and
+guided PC rows in the separate version-1 `bootstrap-machines.json`. Ordinary manual rows remain
+in the legacy `machines.json` array. Older releases do not read the guided store, so a code
+rollback cannot reinterpret these PCs as ordinary ambient SSH registrations; they reappear on
+returning to a compatible release. Ordinary saves by either release leave the other's rows alone.
+Invalid or unsupported guided rows/metadata fail closed without rewriting their bytes. This
+unreleased format has no automatic migration from intermediate development bootstrap rows in
+`machines.json`; preserve those rows/keys and repair them explicitly before restarting.
 
 **Remove PC** optionally revokes the exact guided-setup public key first, with an independent
 option to remove its Windows firewall rule. Remote cleanup requires a working SSH connection;
@@ -234,7 +240,7 @@ starts an incompatible bridge during an update, setup reports a **Bridge connect
 instead of offering an automatic update loop. Update or disconnect the other app before retrying.
 The update path never takes over a terminal or stops herdr sessions.
 
-PC registrations and last snapshots persist in `<stateDir>/machines.json`; `OVIS_STATE_DIR` chooses the state directory. A disconnected PC retains its last roster with controls disabled. Retries back off from 1 second to 60 seconds. Other PCs keep working. Reconnection never changes a non-empty selection or sends held input. Composer drafts, held messages, terminal drafts, lenses, recent panes and notification identities include both machine and pane. Held messages have an explicit **Send now** action.
+Ordinary PC registrations and last snapshots persist in `<stateDir>/machines.json`; guided SSH registrations use the versioned `<stateDir>/bootstrap-machines.json` with strict identity metadata in `bootstrap-registrations.json`. `OVIS_STATE_DIR` chooses the state directory. A disconnected PC retains its last roster with controls disabled. Retries back off from 1 second to 60 seconds. Other PCs keep working. Reconnection never changes a non-empty selection or sends held input. Composer drafts, held messages, terminal drafts, lenses, recent panes and notification identities include both machine and pane. Held messages have an explicit **Send now** action.
 
 SSH commands ignore configured `LocalForward`, `RemoteForward` and `DynamicForward`
 tunnels. The app adds only its own loopback forward through the existing control socket, without
