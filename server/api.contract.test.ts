@@ -1003,6 +1003,19 @@ describe("Portal API", () => {
 });
 
 describe("mutation body validation", () => {
+  it("refuses stale custom launches on local aliases and relayed create routes before any connection", async () => {
+    for (const machine of ["local", "unregistered-fixture"]) {
+      for (const path of ["workspace/create", "tab/create", "worktree/create"]) {
+        const response = await fetch(`${base()}/api/machines/${machine}/${path}`, {
+          method: "POST", headers: { "content-type": "application/json", "x-herdr-machine": "1" },
+          body: JSON.stringify({ workspace_id: "not-a-real-workspace", branch: "fixture", agent: { kind: "claude", command: "fixture-custom" } }),
+        });
+        expect(response.status).toBe(400);
+        expect(await response.json()).toMatchObject({ error: { code: "invalid_agent" } });
+      }
+    }
+  });
+
   it("rejects non-object JSON without touching herdr or losing the error envelope", async () => {
     for (const path of [
       "/api/workspace/create", "/api/tab/create", "/api/tab/rename", "/api/tab/close", "/api/tab/move", "/api/tab/move-to-workspace", "/api/workspace/rename", "/api/workspace/move", "/api/workspace/close",
@@ -1026,6 +1039,9 @@ describe("mutation body validation", () => {
       ["/api/pane/keys", { pane_id: "unknown", keys: [null] }, "missing_keys"],
       ["/api/pane/image", { pane_id: "unknown", content_type: "image/png", data_base64: {} }, "invalid_image"],
       ["/api/workspace/create", { agent: { kind: "claude", args: "--help" } }, "invalid_agent"],
+      ["/api/workspace/create", { agent: { kind: "claude", command: "fixture-custom" } }, "invalid_agent"],
+      ["/api/tab/create", { workspace_id: "unknown", agent: { kind: "claude", command: "fixture-custom", args: [] } }, "invalid_agent"],
+      ["/api/worktree/create", { workspace_id: "unknown", branch: "fixture", agent: { kind: "codex", command: "fixture-custom" } }, "invalid_agent"],
     ] as const) {
       const response = await fetch(`${base()}${path}`, {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),

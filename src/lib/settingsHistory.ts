@@ -10,7 +10,7 @@
  * traversal lands, and whether it was one of its own.
  */
 
-import { SHEET_HISTORY_KEY, SHEET_UNDER_KEY } from "./historyKeys.ts";
+import { closedSheetTraversals, SHEET_HISTORY_KEY, SHEET_UNDER_KEY } from "./historyKeys.ts";
 
 const KEY = "ovis:settings";
 /** names an opening of Settings on the entry it began from and on each of its entries */
@@ -231,7 +231,8 @@ if (typeof window !== "undefined") {
     }
     const matches = pending !== null && (entry?.depth ?? 0) === pending.depth
       && (pending.level === null || (entry !== null && same(pending.level, entry)));
-    const own = matches && pending?.claim === true;
+    // A palette's delayed close is not Back for Settings opened meanwhile.
+    const own = closedSheetTraversals.has(event) || matches && pending?.claim === true;
     // Settings closing lands on the entry it was opened over: by its controls (this module's own
     // step back), or a Back onto the entry with the opening's mark. A jump past that entry (the
     // browser's Back menu) goes to another pane, Forward onto an entry above Settings (a preview

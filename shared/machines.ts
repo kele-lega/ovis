@@ -22,6 +22,8 @@ export interface Machine {
   kind: "local" | "ssh";
   target?: SshTarget;
   enabled: boolean;
+  /** This registration owns a source-restricted bootstrap public key. */
+  can_revoke_bootstrap?: boolean;
   state: MachineState;
   error: string | null;
   /** set when retrying cannot help: the user has to update the remote bridge or approve setup */

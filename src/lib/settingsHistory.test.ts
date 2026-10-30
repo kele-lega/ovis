@@ -1,4 +1,5 @@
 import { afterAll, afterEach, describe, expect, it } from "bun:test";
+import { closedSheetTraversals } from "./historyKeys.ts";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
 
@@ -286,9 +287,11 @@ async function delayedHistory(initial: unknown[] = [null]) {
   } });
   Object.defineProperty(globalThis, "clearTimeout", { configurable: true, writable: true, value: (id: number) => timers.delete(id) });
   const module: typeof import("./settingsHistory.ts") = await import(`./settingsHistory.ts?delayed=${++loadId}`);
-  const dispatch = async () => {
+  const dispatch = async (closedSheet = false) => {
     await new Promise<void>((resolve) => queueMicrotask(() => {
-      for (const listener of listeners) listener({ state: history.state });
+      const event = { state: history.state };
+      if (closedSheet) closedSheetTraversals.add(event as unknown as Event);
+      for (const listener of listeners) listener(event);
       resolve();
     }));
   };
@@ -300,7 +303,7 @@ async function delayedHistory(initial: unknown[] = [null]) {
       if (target === undefined) throw new Error("no requested traversal to land");
       if (target >= 0 && target < stack.length && target !== index) { index = target; await dispatch(); }
     },
-    async move(by: number) { index += by; await dispatch(); },
+    async move(by: number, closedSheet = false) { index += by; await dispatch(closedSheet); },
     dispatch,
     advance(ms: number) {
       const end = now + ms;
@@ -317,6 +320,19 @@ async function delayedHistory(initial: unknown[] = [null]) {
 }
 
 describe("history traversal races", () => {
+  it("rebuilds Settings after a closed palette's delayed traversal without consuming the next Back", async () => {
+    const browser = await delayedHistory([null, { "ovis:sheet": "palette", "ovis:sheet-under": "palette" }]);
+    browser.recordSettings(browser.settingsLevels(true, null, false));
+    const moves: boolean[] = [];
+    browser.onSettingsHistory((_entry, own) => moves.push(own));
+    // A palette already asked for Back; Settings opened before that traversal landed.
+    await browser.move(-2, true);
+    expect(moves).toEqual([true]);
+    expect(browser.settingsEntry(browser.history.state)).toEqual({ page: null, keyBar: false, depth: 1 });
+    await browser.move(-1);
+    expect(moves).toEqual([true, false]);
+    expect(browser.settingsEntry(browser.history.state)).toBeNull();
+  });
   it("keeps a late width-change traversal its own after the landing deadline", async () => {
     const browser = await delayedHistory();
     browser.recordSettings(browser.settingsLevels(true, "terminal", true));

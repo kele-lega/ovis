@@ -11,10 +11,18 @@ import { launchArgsFault } from "../shared/launch-rules.ts";
 
 export type AgentPayload = { kind?: unknown; name?: unknown; args?: unknown };
 
+/** An old feature tab must not turn its custom command into a default-agent start. */
+export function customCommandFault(agent: unknown): string | null {
+  return agent !== null && typeof agent === "object" && Object.hasOwn(agent, "command")
+    ? "Custom agent commands are unavailable in this release; reload Ovis before creating an agent" : null;
+}
+
 /** What is wrong with a request's `agent`, in the API's words; null when it can be started. */
 export function agentFault(agent: AgentPayload | undefined): string | null {
   if (agent === undefined) return null;
   if (typeof agent !== "object" || typeof agent.kind !== "string" || agent.kind.length === 0) return "agent.kind is required";
+  const customFault = customCommandFault(agent);
+  if (customFault) return customFault;
   if ((agent.name !== undefined && typeof agent.name !== "string")
     || (agent.args !== undefined && (!Array.isArray(agent.args) || !agent.args.every((arg) => typeof arg === "string")))) {
     return "agent.name must be a string and agent.args must be an array of strings";

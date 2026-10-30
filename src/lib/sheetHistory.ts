@@ -13,7 +13,7 @@
  * own close, does not close it. Any other sheet still up under a new one closes with it, as before.
  */
 import { useEffect, useRef } from "react";
-import { SHEET_HISTORY_KEY, SHEET_UNDER_KEY } from "./historyKeys.ts";
+import { closedSheetTraversals, SHEET_HISTORY_KEY, SHEET_UNDER_KEY } from "./historyKeys.ts";
 import { SHEET_QUERY } from "./sheets.ts";
 import { useMediaQuery } from "./useMediaQuery.ts";
 
@@ -159,6 +159,7 @@ if (typeof window !== "undefined") {
     const step = stepping;
     stepping = null;
     steppedOff = step !== null;
+    if (steppedOff) closedSheetTraversals.add(event);
     // the sheets that stay: their entries are made again over where the history landed
     const again: Array<[string, () => boolean | void]> = [];
     for (const [id, onBack] of [...open]) {

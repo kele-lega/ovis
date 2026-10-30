@@ -2,6 +2,150 @@
 
 Use **Add PC** in Settings → Remote PCs (the command palette has it too) to connect a Linux or macOS computer (x64 or arm64) or a Windows PC (x64) running OpenSSH Server. Enter an SSH alias or `user@hostname`; the name defaults to that address. Advanced settings accept a port, a key path on the **web server**, and a named herdr session. Each registration selects one herdr socket. The sidebar groups PC → workspace → pane, and the header and new-session dialog show the destination PC. **Settings → Remote PCs → Show in sidebar** keeps a PC out of this device's sidebar, Agents list and command palette; it stays connected, and links and alerts still open its panes.
 
+### Tailscale discovery
+
+Settings → Remote PCs → **Tailscale network** lists other Linux, macOS and Windows PCs owned by
+this connection server's Tailscale user. It reads `tailscale status --json` when the page opens
+and when you choose Refresh, not the browser device's network. Phones, other users' devices,
+shared nodes and tagged nodes are omitted. A tagged connection server cannot infer a personal
+owner; use Add PC manually there. Watch-only devices cannot read this list.
+
+Choose **Add PC** to open the SSH dialog with that PC's **literal Tailscale IP**: IPv4 first,
+IPv6 only when no IPv4 is available. Names and MagicDNS names are display/registration metadata,
+never the discovered connection destination. This works even when the connection server does not
+accept Tailscale DNS. PCs with no valid Tailscale IP are omitted; discovery never resolves DNS or
+probes a port. No SSH connection or install starts until you submit the dialog. Online is only
+Tailscale's reported state, not a check that SSH is available; offline PCs cannot be added from
+the list.
+
+For a discovered PC the address is read-only and **Remote username** is required: the dialog
+submits `user@<Tailscale-IP>`, never silently falling back to the Ovis server's own account.
+Use a simple local SSH account name (letters, numbers, underscores, dots or hyphens; not a PC
+name or email). The port starts at 22 and can be changed under Advanced settings. Folded help
+shows `whoami` and the appropriate SSH prerequisites on the **target PC**, not on the Ovis server:
+Windows administrator PowerShell installs/starts OpenSSH Server; macOS uses Remote Login in
+System Settings; Linux shows Debian/Ubuntu and Fedora/RHEL commands. Nothing executes the
+instructions automatically. Windows uses the account password, not a Windows Hello PIN; domain
+accounts and other account names unsupported by this compact form use manual Add PC. Windows
+terminal mirroring still has the limitations [below](#windows-pcs).
+
+The dialog adds localized hints for refused connections, timeouts, SSH sign-in failures and DNS
+failures, keeping the original error selectable. A timeout can mean sleep, routing, firewall or
+tailnet access rules; refusal alone does not prove SSH is uninstalled. An SSH `HostName` or proxy
+rule on the server can still override a literal IP: the existing SSH configuration is respected,
+not rewritten. No public port forwarding or server DNS change is needed.
+
+Existing registrations are matched by IP, full MagicDNS name or (when enabled) short MagicDNS
+name, even though new destinations are IPs. A bounded static read of `~/.ssh/config` also handles
+simple Host/HostName/User/Port aliases; it never invokes SSH or executes Match commands.
+Includes, Match rules, patterns and expansions are deliberately left unresolved. The list shows
+known users, ports and herdr sessions; unknown users in older registrations are labeled as the SSH
+default account and unspecified ports are not guessed. **Add another account…** opens a new blank
+username for the same PC. No registration is rewritten, merged or deleted automatically. An old
+DNS-based registration remains unchanged; edit it explicitly through Reconnect / setup or remove
+it and add it again with the IP. The original manual Add PC flow still accepts SSH aliases and
+`user@hostname`, with its existing account/port defaults and no discovery prefill left behind.
+
+No Ovis login token is needed or collected. SSH authentication, host-key confirmation and bridge
+installation approval use the existing setup flow. This feature does not enable Tailscale SSH,
+Serve or browser-direct transport, scan a LAN, or change Tailscale configuration. Registrations
+are shared by the Ovis installation, not isolated per visiting user; do not share drive access
+with someone who must not access its registered accounts.
+
+### First-time SSH authorization from discovery
+
+If a discovered PC has no usable SSH credentials, expand **First time: generate an SSH setup
+command**. Enter the local username first; guided setup requires port 22 and no custom private-key
+path. The connection server revalidates the selected online, same-owner Tailscale peer, chooses
+its literal IP and a same-family server Tailscale source IP, reserves a machine identity and creates
+a dedicated Ed25519 key. Generating or copying a command never opens SSH.
+
+Run the generated command once **on the selected PC**, not on the connection server. It downloads
+one fixed `bootstrap-v1` asset from `kele-lega/ovis` on GitHub and verifies the built-in SHA256
+before execution. It contains only public material, not an Ovis token, password or private key.
+Both the connection server and target need access to GitHub's Release assets. Ovis refuses to
+create a runnable command when the pinned asset is unavailable or its hash differs.
+
+- **Windows x64, build 17763 or newer:** use an elevated PowerShell terminal signed in as the
+  same enabled local account. Domain, Microsoft/Entra accounts and elevation through a different
+  administrator are not supported by this first version. The script can install OpenSSH Server,
+  enable it at boot and start it if stopped, without restarting a running daemon. For a verified
+  packaged default configuration, it initializes missing default host keys before validation and
+  service startup. The `sshd` service must use the exact packaged System32 OpenSSH executable
+  without custom arguments; another binary or `-f`/`-o`/`-p` requires manual setup, not startup
+  against a different configuration. Existing keys are preserved; empty keys, orphan public keys
+  and custom configs with unloadable keys require manual repair. Cleanup never generates host keys. It adds only an
+  `Ovis-SSH-<machine-id>` inbound TCP/22 rule restricted to the exact Ovis source and selected
+  target IP. A broad default rule newly created by this capability installation is disabled;
+  preexisting rules are preserved and warned about. Administrator accounts use the **shared**
+  `administrators_authorized_keys` file: the key can authenticate as other permitted administrators,
+  not just the entered username. The script requires typing `ALLOW SHARED ADMIN KEY` before
+  granting that access. Do not accept unless this account breadth is appropriate.
+- **Linux with apt/dnf and systemd:** OpenSSH must already be installed and running. Review SSH
+  authentication and restrict the listener in the firewall manually first. Package installation
+  can auto-start a public/password listener, so this version deliberately does not install
+  packages or start/restart an inactive daemon. It can retain boot enablement of an active one.
+- **macOS:** first enable Remote Login in System Settings → General → Sharing and select the
+  intended users. The command does not enable all users or bypass TCC/Full Disk Access restrictions.
+  On Linux/macOS the command uses local `sudo`; its password stays in the local terminal.
+
+Custom SSH ports or effective authorized-key paths are refused with manual instructions. Scripts
+reject unsafe account paths, symlinks/reparse points and hardlinked key files rather than guessing.
+The exact public-key line restricts its source to the Ovis Tailscale IP and disables agent/X11
+forwarding and PTY allocation. TCP forwarding remains available for Ovis's loopback bridge.
+Existing keys, SSH configuration and unrelated firewall rules remain untouched. POSIX bootstrap
+makes no firewall changes. Source restrictions on this one key do not restrict other preexisting
+keys, password authentication or broader firewall rules.
+
+Save the printed SSH host fingerprints, tick the acknowledgement and choose **I ran it — continue**.
+Ovis uses only this dedicated key and bypasses ambient SSH configuration/agent identities for
+guided registrations, including after restart. The existing manual connection flow still honors
+SSH configuration. Compare the fingerprint manually, then separately approve the proposed runtime
+and bridge installation. No full Ovis web service, agent CLI or agent login is installed by the
+bootstrap script. Herdr sessions are never stopped.
+
+Pending attempts expire after 15 minutes (an active setup pauses cleanup) and at most four can
+exist at once. Closing before deployment approval, cancelling, expiration or server shutdown
+removes only pending **local** credentials. A key already written to the PC **does not expire**.
+Save **Undo this SSH authorization** and run that cleanup command on the PC to remove exactly
+this key and its exact owned Windows rule, even after expiry. Cleanup never uninstalls or stops SSH
+or Herdr. After connection the dedicated private key moves to `<stateDir>/ssh/<machine-id>`, mode
+`0600`; strict identity metadata is stored atomically in `bootstrap-registrations.json`, and
+guided PC rows in the separate version-1 `bootstrap-machines.json`. Ordinary manual rows remain
+in the legacy `machines.json` array. Older releases do not read the guided store, so a code
+rollback cannot reinterpret these PCs as ordinary ambient SSH registrations; they reappear on
+returning to a compatible release. Ordinary saves by either release leave the other's rows alone.
+Invalid or unsupported guided rows/metadata fail closed without rewriting their bytes. This
+unreleased format has no automatic migration from intermediate development bootstrap rows in
+`machines.json`; preserve those rows/keys and repair them explicitly before restarting.
+
+**Remove PC** optionally revokes the exact guided-setup public key first, with an independent
+option to remove its Windows firewall rule. Remote cleanup requires a working SSH connection;
+if it fails the registration and local key stay available for retry. Ordinary forgetting deletes
+only the local key and registration; remote authorization remains until explicitly removed.
+
+The manual-only `.github/workflows/ssh-bootstrap.yml` publish job validates isolated script tests
+on Linux/macOS/Windows and requires identical LF assets and SHA256 manifests. It refuses an
+existing `bootstrap-v1` tag/release instead of overwriting assets. Publishing is a separate release
+operation, not a side effect of development or command generation. A changed script requires new
+pins and a new immutable release version; do not replace the published asset under an old hash.
+
+### Standalone bootstrap release and existing settings
+
+This release does not include custom Agent launch commands or browser-direct transport. SSH
+setup uses the ordinary connection-server relay and never invokes a custom launcher. Existing
+`preferences.json` → `settings.agentCommands` values are retained opaquely on disk for a future
+fixed release or rollback, but are not exposed as active preferences or executed. The separate
+browser `ovis:agent-commands` record is left untouched. An already-open feature tab must reload:
+explicit writes to the deferred setting and command-bearing workspace/tab/worktree creation
+requests are refused, including requests relayed to older remote bridges, instead of silently
+saving nothing or launching a default agent. Existing preset launch modes remain available.
+
+Bootstrap authorization runs on the connection server and does not require a new remote bridge
+protocol or runtime version. New installations use the existing checksum-verified runtime37
+release. Operators must check runtime source overrides and existing bridge provenance: an equal
+version number alone does not prove that an older development build excludes deferred features.
+
 **Machines already saved in herdr appear automatically.** The connection server reads its account's
 `herdr machine list --json` at startup and every five seconds after the previous read finishes. Failed reads back off up to five minutes and
 log only a changed failure; a successful read resets the delay. It
@@ -63,12 +207,19 @@ The current server keeps one status-only WebSocket per remote PC without attachi
 | `GET /api/machines` | PC state plus cached snapshots; each snapshot keeps its server's `order_epoch`/`read_seq`, and `source_boot_id` is the boot id the manager last proved for that PC (its own for the local PC) |
 | `GET /api/machines?verify_source_boot=:id` | The roster plus `verified_source_boot: { machine_id, boot_id }`, the boot id of the server behind that PC asked for during this request (a remote one by the manager's authenticated `GET /api/health` over its connection, never a cached answer). 400 for an empty or repeated query, 404 for an unknown PC, 503 `source_unverified` when no fresh proof came, and 503 with `Retry-After: 1` when that PC's last health call started under a second ago: the browser asks again at its next poll, reconnect or roster from another server lifetime. The manager runs at most one such call per PC and starts them at least 1000 ms apart; that bound, not the browser's coalescing or the 15 s deadline, is what limits the load on a remote PC. It adds no access beyond the authenticated reads the proxy already makes |
 | `GET /api/machines/events` | SSE roster and machine-scoped status events |
+| `POST /api/machines/bootstrap` | Generate public command material for an online same-owner discovered peer |
+| `GET/DELETE /api/machines/bootstrap/:id` | Inspect or discard a pending authorization attempt |
+| `POST /api/machines/bootstrap/:id/connect` | Begin ordinary fingerprint/install-approved setup with the dedicated key |
+| `POST /api/machines/:id/revoke-bootstrap` | Revoke the exact managed key, optionally its Windows firewall rule; retain local registration for subsequent removal |
 | `POST /api/machines/setup` | Create an interactive setup job |
 | `GET/POST/DELETE /api/machines/setup/:id` | Inspect, answer/approve, cancel |
 | `PATCH /api/machines/:id` | Rename or change `enabled` |
 | `DELETE /api/machines/:id` | Forget the PC and remove its local private key |
 | `/api/machines/:id/{session,agents,pane/*,workspace/*}` | Allowlisted target API routes |
 | `/ws?machine_id=…` | Immutable terminal destination |
+
+Bootstrap routes, including pending-attempt GET, require drive access, same origin and
+`X-Herdr-Machine: 1`; responses and access refusals use `Cache-Control: no-store`.
 
 Legacy HTTP paths, `/ws` without a machine, and old stored preferences/notification links mean **local**. Machine mutations require `X-Herdr-Machine: 1`, the existing token gate and same-origin browser requests. The proxy passes a bridge credential read through SSH; browser cookies, bearer tokens, forwarded headers and remote cookies are not forwarded. Authentication, push devices, VAPID keys and app updates belong to the current connection server.
 
@@ -89,7 +240,7 @@ starts an incompatible bridge during an update, setup reports a **Bridge connect
 instead of offering an automatic update loop. Update or disconnect the other app before retrying.
 The update path never takes over a terminal or stops herdr sessions.
 
-PC registrations and last snapshots persist in `<stateDir>/machines.json`; `OVIS_STATE_DIR` chooses the state directory. A disconnected PC retains its last roster with controls disabled. Retries back off from 1 second to 60 seconds. Other PCs keep working. Reconnection never changes a non-empty selection or sends held input. Composer drafts, held messages, terminal drafts, lenses, recent panes and notification identities include both machine and pane. Held messages have an explicit **Send now** action.
+Ordinary PC registrations and last snapshots persist in `<stateDir>/machines.json`; guided SSH registrations use the versioned `<stateDir>/bootstrap-machines.json` with strict identity metadata in `bootstrap-registrations.json`. `OVIS_STATE_DIR` chooses the state directory. A disconnected PC retains its last roster with controls disabled. Retries back off from 1 second to 60 seconds. Other PCs keep working. Reconnection never changes a non-empty selection or sends held input. Composer drafts, held messages, terminal drafts, lenses, recent panes and notification identities include both machine and pane. Held messages have an explicit **Send now** action.
 
 SSH commands ignore configured `LocalForward`, `RemoteForward` and `DynamicForward`
 tunnels. The app adds only its own loopback forward through the existing control socket, without

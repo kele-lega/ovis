@@ -104,7 +104,7 @@ export class SshConnection {
   /** ssh's recent stderr while the master connection is still being established */
   onOutput: ((text: string) => void) | null = null;
 
-  constructor(readonly target: SshTarget, readonly stateDir: string, readonly keyPath?: string, readonly keyOnly = false, readonly multiplexed = !WINDOWS) {
+  constructor(readonly target: SshTarget, readonly stateDir: string, public keyPath?: string, readonly keyOnly = false, readonly multiplexed = !WINDOWS, readonly exclusiveIdentity = false) {
     chmodSync(this.dir, 0o700);
     mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   }
@@ -115,6 +115,13 @@ export class SshConnection {
   private options(clearForwardings = true): string[] {
     const args = ["-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "PermitLocalCommand=no", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"];
     if (clearForwardings) args.unshift("-o", "ClearAllForwardings=yes");
+    if (this.exclusiveIdentity) {
+      if (!this.keyPath || !existsSync(this.keyPath) || this.target.identity_file) throw new Error("Dedicated SSH identity is unavailable");
+      // Bootstrap authorizes one literal IP/account. Config aliases, proxy commands, extra
+      // identities, ambient agents and secret authentication must never change that authority.
+      args.unshift("-F", "none");
+      args.push("-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "PreferredAuthentications=publickey", "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no", "-o", "HostbasedAuthentication=no", "-o", "GSSAPIAuthentication=no", "-o", `GlobalKnownHostsFile=${WINDOWS ? "NUL" : "/dev/null"}`);
+    }
     if (this.keyOnly) args.push("-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none");
     // the account's own `ControlMaster auto` would make Windows' ssh fail every connection
     if (!this.multiplexed) args.push("-o", "ControlMaster=no", "-o", "ControlPath=none");
@@ -124,11 +131,11 @@ export class SshConnection {
     return args;
   }
   private base(): string[] {
-    return ["ssh", "-S", this.control, ...this.options()];
+    return ["ssh", "-S", this.control, ...this.options(), ...(this.exclusiveIdentity ? ["-o", this.knownHostsOption()] : [])];
   }
   private knownHosts(): string { return join(this.stateDir, "known_hosts"); }
   private knownHostsOption(): string {
-    return `UserKnownHostsFile=${[this.knownHosts(), join(homedir(), ".ssh/known_hosts"), join(homedir(), ".ssh/known_hosts2")].map((path) => shellQuote(sshPath(path))).join(" ")}`;
+    return `UserKnownHostsFile=${(this.exclusiveIdentity ? [this.knownHosts()] : [this.knownHosts(), join(homedir(), ".ssh/known_hosts"), join(homedir(), ".ssh/known_hosts2")]).map((path) => shellQuote(sshPath(path))).join(" ")}`;
   }
   /**
    * A direct-mode ssh. It always checks the host strictly; it may answer a prompt only when
@@ -170,7 +177,7 @@ export class SshConnection {
           if (answer === undefined) {
             // once connected, nothing asks the user again: a new prompt is an auth that failed
             if (this.started) throw new Error("SSH asked again after connecting");
-            if (!challenge) throw new Error("SSH authentication required; reconnect from PC settings");
+            if (!challenge || this.exclusiveIdentity && !hostKey) throw new Error("SSH authentication required; reconnect from PC settings");
             if (!hostKey) this.usedSecret = true;
             answer = await challenge(prompt, hostKey);
             if (!hostKey && !this.multiplexed) this.typed.set(prompt, answer);
@@ -261,7 +268,7 @@ export class SshConnection {
   private async learnHostKey(challenge: (prompt: string, hostKey: boolean) => Promise<string>): Promise<void> {
     const file = join(this.dir, "learned_hosts");
     rmSync(file, { force: true });
-    const seen = await this.attempt(["ssh", ...this.options(), "-o", "BatchMode=yes", "-o", "PreferredAuthentications=none", "-o", "IdentityAgent=none", "-o", "StrictHostKeyChecking=accept-new", "-o", `UserKnownHostsFile=${shellQuote(sshPath(file))}`, "-o", `GlobalKnownHostsFile=${WINDOWS ? "NUL" : "/dev/null"}`, "-T", this.target.destination, "exit"], Date.now() + 25_000, false);
+    const seen = await this.attempt(["ssh", "-o", "PreferredAuthentications=none", ...this.options(), "-o", "BatchMode=yes", "-o", "PreferredAuthentications=none", "-o", "IdentityAgent=none", "-o", "StrictHostKeyChecking=accept-new", "-o", `UserKnownHostsFile=${shellQuote(sshPath(file))}`, "-o", `GlobalKnownHostsFile=${WINDOWS ? "NUL" : "/dev/null"}`, "-T", this.target.destination, "exit"], Date.now() + 25_000, false);
     const learned = existsSync(file) ? readFileSync(file, "utf8").trim() : "";
     if (!learned) throw new Error(seen.stderr.trim() || "Could not read the server's host key");
     const fingerprints = (await this.exec(["ssh-keygen", "-l", "-f", file])).split(/\r?\n/).flatMap((line) => {
@@ -312,7 +319,7 @@ export class SshConnection {
     const put = new TextEncoder().encode(`put "${sshPath(localPath)}" "${remote}"\n`);
     // sftp's -b adds BatchMode=yes after the options before it, and ssh keeps the first value
     const options = this.multiplexed
-      ? [...this.options(), "-o", `ControlPath=${this.control}`, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
+      ? [...this.options(), ...(this.exclusiveIdentity ? ["-o", this.knownHostsOption()] : []), "-o", `ControlPath=${this.control}`, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
       : this.direct().slice(1);
     await this.exec(["sftp", ...options, "-b", "-", this.target.destination], put, timeout);
   }

@@ -2691,6 +2691,46 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
 - Remote PCs: an **Add PC** row (label, one-line description, button) opens the PC
   setup dialog and closes Settings behind it; when that dialog closes, focus lands on the header's
   workspace-list toggle. Under the row, once the server has answered, the bridge auto-update switch.
+- Tailscale network in Remote PCs uses those same Settings rows, not a separate wizard: Refresh
+  reads this Host's own-user PCs, Add PC opens the existing SSH dialog without submitting it,
+  and registered users/ports/sessions remain visible beside Add another account. Discovery always
+  selects a literal Tailscale IPv4 (IPv6 fallback), not MagicDNS: a tailnet-wide DNS flag does not
+  prove this server accepts that DNS. Peer hostnames and DNS names remain visible metadata and
+  match older registrations, never silently migrate them. The discovered-PC dialog shows the
+  read-only IP and focuses a required remote username; it submits `user@IP`, port 22 unless changed.
+  Username/SSH-enabling instructions are native details folds for the selected OS, explicitly run
+  on that PC, not on the server; nothing connects or executes a command merely by opening a fold.
+  SSH refusal, timeout, authentication and DNS hints name checks rather than asserting a cause,
+  and leave the raw error selectable. Authentication, fingerprint trust and install/key approval
+  are the existing flow; no Ovis token or persisted setting is added. Manual Add PC retains its
+  editable alias/address and defaults, and never inherits discovery context. Phones and other
+  owners are omitted; watch devices do not mount the group. Missing/stopped/unreadable Tailscale
+  has one actionable hint and never blocks manual Add PC. This deliberately follows Ovis's
+  existing SSH dialog and disclosure controls rather than importing another app's remote-host UX:
+  Zed and VS Code Remote SSH documentation could not be fetched in this development environment.
+  No third-party pixels or code are copied.
+- First-time SSH bootstrap adds one optional disclosure in that same discovered-PC dialog,
+  not a new settings page. Generate requires a valid local username and port 22, then replaces
+  editable fields with a read-only account/IP/source summary, a selectable fixed-release command
+  and Copy. An explicit “I ran it” checkbox precedes Continue. Creating or copying the command
+  never opens SSH, trusts a fingerprint or approves installation. Expired commands disappear;
+  cleanup remains available because an installed public key does not expire with the pending
+  server key. Discard goes back; closing before approved install cancels pending authorization.
+  Windows explains same-account elevation and its shared administrator key file before the
+  script's own confirmation. Linux/macOS explicitly require manually enabled SSH rather than
+  promising automatic service installation. Cleanup and optional remote revocation preserve SSH and herdr.
+  The command heading receives focus after generation; Discard returns focus to the account field.
+  Copy uses the existing clipboard fallback and announces success/failure; long commands wrap
+  within the existing phone sheet. No token/private key enters browser storage. As above,
+  Zed remote-development docs were unavailable to fetch during this change, so the design uses
+  Ovis's existing integration-command Copy row and manual host-key/install approvals instead
+  of claiming an unverified third-party precedent.
+- A phone palette's delayed close traversal is not Back for Settings opened in the meantime.
+  The sheet module marks that exact popstate event; Settings rebuilds its requested levels and
+  leaves the next actual Back unchanged. This repairs Ovis's existing layered phone history,
+  not its visual layout or focus flow. Zed's remote-development reference was checked again but
+  remained unavailable to fetch; no verified coding-agent app precedent for this browser-history
+  race is claimed, and no third-party implementation is copied.
 - Install (a row of the Phone group) reflects installed, promptable or browser-instructions state;
   About links the repository.
 - Portal, a group of its own between Phone and Devices where the server offers it: while it runs,

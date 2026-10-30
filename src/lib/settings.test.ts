@@ -66,6 +66,15 @@ describe("saved theme migration", () => {
     expect(readOld().palette).toBe("amber");
   });
 
+  it("leaves deferred custom command bytes untouched through unrelated saves", () => {
+    const commands = ' { "claude": "  /opt/fixture/launch --custom  ", "future": [1, 2] } ';
+    records.set("ovis:agent-commands", commands);
+    saveSettings({ ...loadSettings(), terminalFontSize: 18 });
+    oldSaveSettings({ ...readOld(), terminalFontSize: 19 });
+    saveSettings({ ...loadSettings(), language: "zh" });
+    expect(records.get("ovis:agent-commands")).toBe(commands);
+  });
+
   it("survives an old sanitizer and whole-record unrelated save (f)", () => {
     saveSettings(sanitizeSettings({ darkTheme: "tokyo-night" }));
     const old = readOld();

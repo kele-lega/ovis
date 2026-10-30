@@ -523,9 +523,9 @@ async function verifySourceBoot(machineId: string): Promise<Response> {
     orderOf(local.id).seq++;
   },
   /** a second fictional PC, with its own server and order */
-  addPc: () => {
+  addPc: (guided = false) => {
     if (machines.some((machine) => machine.id === "laptop")) return "laptop";
-    machines.push({ ...structuredClone(local), id: "laptop", name: "laptop", kind: "ssh" } as Machine);
+    machines.push({ ...structuredClone(local), id: "laptop", name: "laptop", kind: "ssh", ...(guided ? { can_revoke_bootstrap: true, target: { destination: "demo@100.64.0.9", port: 22 } } : {}) } as Machine);
     publishRoster();
     return "laptop";
   },
@@ -1106,7 +1106,13 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
   }
   if (path === "/api/cliproxy/login" || path === "/api/cliproxy/callback") return error("demo", "Sign in from an installed server, not the public demo.", 409);
   if (path === "/api/push" || path.startsWith("/api/push/")) return error("push_unavailable", "the demo sends no alerts", 404);
+  if (path === "/api/machines/tailnet") return json({ state: "running", peers: [
+    { id: "demo-tailnet-linux", name: "build-box", hostname: "build-box", dns_name: "build-box.example.ts.net", destination: "100.64.0.2", addresses: ["100.64.0.2", "build-box.example.ts.net"], os: "linux", online: true, registrations: [{ machine_id: "demo-root", name: "Build box", user: "root", port: 22, session: "default" }] },
+    { id: "demo-tailnet-windows", name: "windows-pc", hostname: "WINDOWS-PC", dns_name: "windows-pc.example.ts.net", destination: "100.64.0.3", addresses: ["100.64.0.3", "windows-pc.example.ts.net"], os: "windows", online: false, registrations: [] },
+  ] });
   if (path === "/api/machines/settings") return json({ auto_update_bridges: true });
+  // Never give visitors a runnable provisioning command or generate credentials in a public demo.
+  if (path === "/api/machines/bootstrap") return error("bootstrap_unavailable", "SSH provisioning requires an installed server, not the public demo.", 503);
   if (path.startsWith("/api/machines/")) return error("demo", "remote PCs need a real machine", 404);
 
   if (path === "/api/sessions/history") {
