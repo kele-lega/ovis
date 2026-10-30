@@ -554,7 +554,7 @@ export class MachineManager {
     }
     const auto = options.auto === true && request.update_remote === true && !!existing;
     const job: JobState = { update: request.update_remote === true, auto, public: { id, machine_id: machineId, target, phase: "connecting", step: "Connecting with SSH keys and ssh-agent…", challenge: null, installations: [], error: null, ssh_output: null, progress: null }, abort: new AbortController(), timer: setTimeout(() => this.cancelJob(id), 600_000), stageStartedAt: Date.now(), finished: Promise.resolve() };
-    if (existing) job.runtime = existing;
+    if (job.update && existing) job.runtime = existing;
     if (job.update && existing && !auto) existing.updateCancelled = false;
     job.timer.unref();
     this.jobs.set(id, job);

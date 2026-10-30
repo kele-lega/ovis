@@ -220,6 +220,20 @@ describe("normal setup integration with a reserved bootstrap identity", () => {
     await f.manager.cancelBootstrap(attempt.id);
     expect(f.manager.setupSummaries()).toEqual([]);
   });
+  it("does not label an ordinary registered-PC reconnect as a bridge update", async () => {
+    const f = fixture(); const attempt = await f.manager.createBootstrap(request);
+    const first = f.manager.connectBootstrap(attempt.id); await f.internals.jobs.get(first.id)!.finished;
+    const ready = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    f.start.mockImplementationOnce(async () => { ready.resolve(); await finish.promise; });
+    const job = f.manager.setup({ ...attempt.target, machine_id: attempt.machine_id });
+    await ready.promise;
+    expect(job.phase).toBe("connecting");
+    expect(f.manager.list().find((machine) => machine.id === attempt.machine_id)?.updating ?? null).toBeNull();
+    expect(f.manager.setupSummaries()).toEqual([]);
+    f.manager.action(job.id, { action: "cancel" }); finish.resolve();
+    await f.internals.jobs.get(job.id)!.finished;
+  });
   it("failed observation leaves no registration; retry keeps UUID/key", async () => {
     const f = fixture(); f.observe.mockRejectedValueOnce(new Error("fixture failure")); const attempt = await f.manager.createBootstrap(request);
     const failed = f.manager.connectBootstrap(attempt.id); await f.internals.jobs.get(failed.id)!.finished; expect(failed.phase).toBe("failed"); expect(f.manager.list()).toHaveLength(1);
