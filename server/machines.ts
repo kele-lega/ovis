@@ -372,7 +372,7 @@ export class MachineManager {
   private runtime(machine: Machine): Runtime { return { machine, attempts: 0, generation: 0, refreshing: false, refreshQueued: false, snapshotRevision: 0, terminals: new Set() }; }
   list(): Machine[] { return [this.local, ...[...this.machines.values()].map((r) => r.machine)]; }
   setupSummaries(): MachineSetupSummary[] {
-    return [...this.jobs.values()].filter((job) => job.backgroundVisible && !["connected", "cancelled"].includes(job.public.phase)).map(({ public: job, setupName }) => ({
+    return [...this.jobs.values()].filter((job) => job.backgroundVisible && job.public.phase !== "cancelled").map(({ public: job, setupName }) => ({
       id: job.id, machine_id: job.machine_id, name: setupName!, phase: job.phase,
       step: job.step, error: job.error, progress: job.progress ?? null,
     }));

@@ -7,6 +7,8 @@
  */
 export const MACHINES_KO: Record<string, string> = {
   "Setting up PC": "PC 설정 중",
+  "PC setup complete": "PC 설정 완료",
+  "Open the PC to view its workspaces, or create a workspace and choose an agent.": "PC를 열어 워크스페이스를 확인하거나 새 워크스페이스를 만들고 에이전트를 선택하세요.",
   "SSH default account": "SSH 기본 계정",
   "Online": "온라인",
   "Offline": "오프라인",

@@ -2693,14 +2693,20 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   workspace-list toggle. Under the row, once the server has answered, the bridge auto-update switch.
 - A first PC install continues outside its setup dialog as a task above the sidebar's PC groups.
   It reuses the existing byte/stage progress and Cancel install button, stays visible through sidebar
-  filtering, and keeps a failed attempt's reason until dismissed. Completion replaces the task with
-  the registered PC; cancellation removes the task. The existing machine event stream sends a bounded
+  filtering, and keeps a failed attempt's reason until dismissed. Successful installation keeps a
+  **PC setup complete** task with **Open PC**, **New workspace** and **Dismiss**; the registered PC
+  exists separately. New workspace uses the installed PC's existing workspace/agent picker, and
+  neither completion nor opening the PC creates a workspace or starts an agent automatically.
+  Actions wait for the live connected roster, including PCs hidden on this device. Dismiss only
+  acknowledges the task, never removes the PC or its SSH identity. Cancellation removes an active task.
+  The existing machine event stream sends a bounded
   public summary on subscription and progress changes, without SSH challenges, output or credentials.
   The task is never a registered or persisted PC: guided identity promotion and protected registration
   still happen only after successful setup. Zed's remote-development documentation was checked
-  (`docs/src/remote-development.md` in zed-industries/zed): it documents download/start over SSH but
-  does not specify persistent sidebar progress. This deliberately follows Ovis's existing bridge-update
-  status instead, without importing Zed's UI or claiming a matching task design.
+  (`docs/src/remote-development.md` in zed-industries/zed): after server download/start it explicitly
+  prompts for a remote path. Ovis follows that handoff with its existing workspace/agent picker, but
+  keeps background completion as an explicit sidebar action rather than stealing focus. Its task
+  presentation follows Ovis's bridge-update status; no Zed UI or code was copied.
 - Tailscale network in Remote PCs uses those same Settings rows, not a separate wizard: Refresh
   reads this Host's own-user PCs, Add PC opens the existing SSH dialog without submitting it,
   and registered users/ports/sessions remain visible beside Add another account. Discovery always

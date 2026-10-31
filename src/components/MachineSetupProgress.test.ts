@@ -36,6 +36,22 @@ describe("first PC installation sidebar task", () => {
     expect(html).not.toContain('role="progressbar"');
     expect(html).not.toContain("Cancel install");
   });
+  test("completed setup keeps explicit next steps, not a progress bar or cancellation", () => {
+    const html = render({ ...setup, phase: "connected", step: "Connected", progress: null });
+    expect(html).toContain("PC setup complete");
+    expect(html).toContain("Open PC");
+    expect(html).toContain("New workspace");
+    expect(html).toContain("Dismiss");
+    expect(html).not.toContain("Cancel install");
+    expect(html).not.toContain('role="progressbar"');
+  });
+  test("a watching device cannot invoke completion actions", () => {
+    const html = render({ ...setup, phase: "connected", progress: null }, true);
+    expect(html).toContain("PC setup complete");
+    expect(html).not.toContain("New workspace");
+    expect(html).not.toContain("Open PC");
+    expect(html).not.toContain("Dismiss");
+  });
   test("a watching device sees progress but cannot cancel the setup", () => {
     expect(render(setup, true)).toContain("Fixture PC");
     expect(render(setup, true)).not.toContain("Cancel install");

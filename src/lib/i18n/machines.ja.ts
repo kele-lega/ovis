@@ -7,6 +7,8 @@
  */
 export const MACHINES_JA: Record<string, string> = {
   "Setting up PC": "PC をセットアップ中",
+  "PC setup complete": "PC のセットアップ完了",
+  "Open the PC to view its workspaces, or create a workspace and choose an agent.": "PC を開いてワークスペースを確認するか、新しいワークスペースを作成してエージェントを選択してください。",
   "SSH default account": "SSH の既定アカウント",
   "Online": "オンライン",
   "Offline": "オフライン",
