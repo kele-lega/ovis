@@ -30,7 +30,7 @@ export const STATE_WORD: Readonly<Record<MachineState, string>> = {
 
 /** `activity`: App's live counters per PC and finishes looked at here; both sidebar lists draw from it.
  *  `machines` are the PCs this device shows; `hiddenCount` says how many it keeps out (Settings → Remote PCs) */
-interface Props { machines: Machine[]; setups?: MachineSetupSummary[]; hiddenCount?: number; selectedMachineId: string; selectedPaneId: string | null; activity: SidebarActivity; actions: AppActions; watching?: boolean; /** a phone's drawer is out: closing it clears the filter */ drawerOpen?: boolean; onSelect(machineId: string, paneId: string | null): void; onNew(machineId: string): void; onSetup(machine: Machine, update?: boolean): void }
+interface Props { machines: Machine[]; setupMachines?: Machine[]; setups?: MachineSetupSummary[]; hiddenCount?: number; selectedMachineId: string; selectedPaneId: string | null; activity: SidebarActivity; actions: AppActions; watching?: boolean; /** a phone's drawer is out: closing it clears the filter */ drawerOpen?: boolean; onSelect(machineId: string, paneId: string | null): void; onNew(machineId: string): void; onSetup(machine: Machine, update?: boolean): void }
 export function MachineSidebar(props: Props) {
   const t = useT();
   const { canInstall, installed, install, help } = useInstallPrompt();
@@ -83,7 +83,7 @@ export function MachineSidebar(props: Props) {
     </div>
     <div className="machine-list" aria-label={t("PCs and workspaces")}>
       <p className={noMatchWords === null ? "visually-hidden" : "tree-state sidebar-filter-empty"} role="status">{noMatchWords}</p>
-      {props.setups?.map((setup) => <MachineSetupProgress key={setup.id} setup={setup} watching={props.watching} />)}
+      {props.setups?.map((setup) => <MachineSetupProgress key={setup.id} setup={setup} watching={props.watching} ready={(props.setupMachines ?? props.machines).some((machine) => machine.id === setup.machine_id && machine.state === "connected")} onOpen={() => props.onSelect(setup.machine_id, null)} onNew={() => props.onNew(setup.machine_id)} />)}
       {props.machines.map((machine) => <MachineGroup key={machine.id} {...props} machine={machine} />)}
       <p className={loadingWords === null ? "visually-hidden" : "tree-state"} role="status">{loadingWords}</p>
       {/* a PC kept out on this device is said, with the way to show it again */}
@@ -102,13 +102,14 @@ export function MachineSidebar(props: Props) {
   </div></SidebarFilterProvider></SidebarActivityProvider>;
 }
 
-/** A first install is a task, not a registered PC: no workspace, reconnect or removal controls. */
-export function MachineSetupProgress({ setup, watching }: { setup: MachineSetupSummary; watching?: boolean }) {
+/** A first install stays a task through completion, with an explicit path to the PC or a workspace. */
+export function MachineSetupProgress({ setup, watching, ready = false, onOpen, onNew }: { setup: MachineSetupSummary; watching?: boolean; ready?: boolean; onOpen?(): void; onNew?(): void }) {
   const t = useT();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
   const failed = setup.phase === "failed";
+  const complete = setup.phase === "connected";
   const cancel = async () => {
     if (inFlight.current) return;
     inFlight.current = true; setBusy(true); setError(null);
@@ -118,10 +119,13 @@ export function MachineSetupProgress({ setup, watching }: { setup: MachineSetupS
   };
   return <section className="machine-group machine-setup-task" aria-label={t("PC {name}", { name: setup.name })}>
     <header className="machine-header"><div className="machine-title"><span className="sidebar-mark" aria-hidden="true"><Monitor /></span><span className="machine-name">{setup.name}</span></div></header>
-    <div className="machine-action is-updating" role={failed ? "alert" : "status"}>
-      <p className="machine-action-text"><strong>{t(failed ? "Connection failed" : "Setting up PC")}</strong></p>
-      {failed ? <p className="machine-error">{machineErrorText(setup.error ?? setup.step, t)}</p> : <BridgeUpdateProgress update={{ job_id: setup.id, step: setup.step, progress: setup.progress }} />}
-      {!watching && <button type="button" className="btn" disabled={busy} onClick={() => void cancel()}>{t(failed ? "Dismiss" : "Cancel install")}</button>}
+    <div className={`machine-action ${complete ? "is-setup" : "is-updating"}`} role={failed ? "alert" : "status"}>
+      <p className="machine-action-text"><strong>{t(complete ? "PC setup complete" : failed ? "Connection failed" : "Setting up PC")}</strong></p>
+      {complete ? <p className="machine-action-text">{t("Open the PC to view its workspaces, or create a workspace and choose an agent.")}</p> : failed ? <p className="machine-error">{machineErrorText(setup.error ?? setup.step, t)}</p> : <BridgeUpdateProgress update={{ job_id: setup.id, step: setup.step, progress: setup.progress }} />}
+      {!watching && <div className="machine-action-buttons">
+        {complete && <><button type="button" className="btn btn-primary" disabled={!ready || !onNew} onClick={onNew}>{t("New workspace")}</button><button type="button" className="btn" disabled={!ready || !onOpen} onClick={onOpen}>{t("Open PC")}</button></>}
+        <button type="button" className="btn" disabled={busy} onClick={() => void cancel()}>{t(complete || failed ? "Dismiss" : "Cancel install")}</button>
+      </div>}
       {error && <p className="machine-error" role="alert">{error}</p>}
     </div>
   </section>;

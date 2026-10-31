@@ -7,6 +7,8 @@
  */
 export const MACHINES_ZH: Record<string, string> = {
   "Setting up PC": "正在配置电脑",
+  "PC setup complete": "电脑配置完成",
+  "Open the PC to view its workspaces, or create a workspace and choose an agent.": "打开电脑查看工作区，或新建工作区并选择 Agent。",
   "SSH default account": "SSH 默认账户",
   "Online": "在线",
   "Offline": "离线",

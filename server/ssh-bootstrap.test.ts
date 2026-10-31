@@ -167,8 +167,15 @@ describe("normal setup integration with a reserved bootstrap identity", () => {
     finish.resolve();
     await f.internals.jobs.get(job.id)!.finished;
     expect(job.phase).toBe("connected");
-    expect(events.at(-1)).toEqual({ type: "machine-setups", setups: [] });
-    unsubscribe();
+    expect(events.at(-1)).toEqual({ type: "machine-setups", setups: [expect.objectContaining({ id: job.id, phase: "connected", name: "Fixture PC" })] });
+    const reconnected: unknown[] = [];
+    const unsubscribeAgain = f.manager.subscribe((event) => reconnected.push(structuredClone(event)));
+    expect(reconnected.at(-1)).toEqual(events.at(-1));
+    f.manager.action(job.id, { action: "cancel" });
+    expect(f.manager.setupSummaries()).toEqual([]);
+    expect(f.manager.list().some((machine) => machine.id === attempt.machine_id)).toBe(true);
+    expect(existsSync(join(f.dir, "ssh", attempt.machine_id))).toBe(true);
+    unsubscribeAgain(); unsubscribe();
   });
   it("keeps a failed background install visible until dismissed, without registering it", async () => {
     const f = fixture(); const attempt = await f.manager.createBootstrap(request);

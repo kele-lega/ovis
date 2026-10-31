@@ -267,8 +267,32 @@ try {
           await task.getByText("Fictional background install failed", { exact: true }).waitFor();
           await task.getByRole("button", { name: label("Dismiss"), exact: true }).click();
           await task.waitFor({ state: "detached" });
+          // A completed background install keeps its next actions, without auto-opening anything.
+          await page.evaluate(() => {
+            (window as unknown as { __herdrDemoOrder: { addPc(guided: boolean): void } }).__herdrDemoOrder.addPc(true);
+            (window as unknown as { tailnetProbe: { emitSetups(setups: unknown[]): void } }).tailnetProbe.emitSetups([{ id: "fixture-background-job", machine_id: "laptop", name: "Background fixture PC", phase: "connected", step: "Connected", error: null, progress: null }]);
+          });
+          await task.getByText(label("PC setup complete"), { exact: true }).waitFor();
+          assert.equal(await task.getByRole("progressbar").count(), 0);
+          assert.equal(await page.locator(".new-session-modal").count(), 0, "completion never steals focus or creates a workspace");
+          assert.equal(await task.evaluate((node) => node.scrollWidth <= node.clientWidth + 1), true, "completion actions fit the viewport");
+          if (evidence) await page.screenshot({ path: join(evidence, `background-complete-${width}-${language}.png`) });
+          await task.getByRole("button", { name: label("New workspace"), exact: true }).click();
+          const workspaceDialog = page.getByRole("dialog", { name: `${label("New workspace")} · laptop`, exact: true });
+          await workspaceDialog.waitFor();
+          await page.keyboard.press("Escape");
+          await workspaceDialog.waitFor({ state: "hidden" });
+          if (width < 640) await page.getByRole("button", { name: label("Open workspace list"), exact: true }).click();
+          await task.getByRole("button", { name: label("Open PC"), exact: true }).click();
+          if (width < 640) await page.getByRole("button", { name: label("Open workspace list"), exact: true }).click();
+          await page.locator('.machine-group.is-current[aria-label="' + label("PC {name}").replace("{name}", "laptop") + '"]').waitFor();
+          assert.equal(await task.isVisible(), true, "opening the PC does not dismiss its completion");
+          await task.getByRole("button", { name: label("Dismiss"), exact: true }).click();
+          await task.waitFor({ state: "detached" });
           await sidebarFilter.fill("");
-          if (width < 640) await page.keyboard.press("Escape");
+          // Restore the Host before the independent removal fixture; removing the selected PC
+          // intentionally changes selection and closes a phone drawer.
+          await page.locator(".machine-group").filter({ has: page.locator(".machine-kind") }).locator(".workspace-select").first().click();
           // Expired attempts hide runnable install commands but keep local cleanup, then return safely.
           await page.evaluate(() => { (window as unknown as { tailnetProbe: Probe }).tailnetProbe.bootstrapMode = "expired"; });
           await openRemote();
