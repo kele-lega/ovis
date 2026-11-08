@@ -10,8 +10,8 @@
     "url": "git+https://github.com/devswha/ovis.git"
   },
   "scripts": {
-    "dev": "bun --bun vite",
-    "build": "bun --bun vite build",
+    "dev": "bun node_modules/vite/bin/vite.js",
+    "build": "bun node_modules/vite/bin/vite.js build",
     "server": "bun run server/index.ts",
     "start": "bun run build && bun run server/managed.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tools.json",

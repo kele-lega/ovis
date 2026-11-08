@@ -42,6 +42,8 @@ it.skipIf(process.platform === "win32")("neither follows nor writes a symlinked 
   roots.push(root);
   const target = join(root, "untouched.txt");
   writeFileSync(target, "unchanged", { mode: 0o640 });
+  // Establish the existing policy independently of the test runner's umask.
+  chmodSync(target, 0o640);
   symlinkSync(target, join(root, "http-requests.jsonl"));
   // When
   const writer = new RequestLog(root);

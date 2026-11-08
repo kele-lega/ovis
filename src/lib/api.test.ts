@@ -3,11 +3,13 @@ import { MAX_ATTACHMENT_BYTES } from "../../shared/attachments.ts";
 import { NOTICE_VERSION } from "../../shared/telemetry.ts";
 import { AttachmentTooLargeError, ApiError, changeTelemetry, fetchAgentKinds, fetchTelemetry, swapPaneWith, uploadPaneImage, verifySourceBoot } from "./api.ts";
 import { movingHerdrFocusOn } from "./followFocus.ts";
+import { clearDirectTransports } from "./directTransport.ts";
 import { DEFAULT_SETTINGS, telemetrySettingsSnapshot } from "./settings.ts";
 
 const realFetch = globalThis.fetch;
 const abortSignalStatics = Object.getOwnPropertyDescriptors(AbortSignal);
 afterEach(() => {
+  clearDirectTransports();
   globalThis.fetch = realFetch;
   Object.defineProperties(AbortSignal, { any: abortSignalStatics.any!, timeout: abortSignalStatics.timeout! });
   jest.useRealTimers();
@@ -16,7 +18,8 @@ afterEach(() => {
 it("suppresses this PC's focus frames until an explicit swap answers, including refusals", async () => {
   for (const changed of [true, false]) {
     const response = Promise.withResolvers<Response>();
-    globalThis.fetch = (async (_url: string) => response.promise) as typeof fetch;
+    globalThis.fetch = (async (url: string) => url.endsWith("/direct-access")
+      ? Response.json({ error: { code: "not_found" } }, { status: 404 }) : response.promise) as typeof fetch;
     const pending = swapPaneWith("source", "target", "office");
     try {
       expect(movingHerdrFocusOn("office")).toBe(true);
@@ -47,6 +50,7 @@ it("offers Copilot from an older remote bridge without installation metadata", a
   const requests: string[] = [];
   const copilot = { kind: "copilot", label: "GitHub Copilot" };
   globalThis.fetch = (async (url: string) => {
+    if (url.endsWith("/direct-access")) return Response.json({}, { status: 404 });
     requests.push(url);
     return Response.json({ agents: [copilot, { kind: "hermes", label: "Hermes", installed: false }] });
   }) as typeof fetch;
@@ -185,11 +189,11 @@ it("ends a source boot check when the caller aborts it or after 20 s, without Ab
   const before = new AbortController();
   before.abort();
   expect(await verifySourceBoot("pc-2", before.signal).catch((error: unknown) => error)).toMatchObject({ name: "AbortError" });
-  expect(requests[1]!.signal.aborted).toBe(true);
+  expect(requests).toHaveLength(1); // an already aborted direct transport never calls fetch
 
   const slow = verifySourceBoot("pc-2", new AbortController().signal).catch((error: unknown) => error);
   jest.advanceTimersByTime(19_999);
-  expect(requests[2]!.signal.aborted).toBe(false);
+  expect(requests[1]!.signal.aborted).toBe(false);
   jest.advanceTimersByTime(1);
   expect(await slow).toMatchObject({ name: "AbortError" });
 });
@@ -200,6 +204,7 @@ it("offers Letta Code in the agent menus where it is installed, and from an olde
   const unsaid = { kind: "letta", label: "letta" };
   let agents: object[] = [letta, { kind: "someagent", label: "someagent", installed: true }];
   globalThis.fetch = (async (url: string) => {
+    if (url.endsWith("/direct-access")) return Response.json({}, { status: 404 });
     requests.push(url);
     return Response.json({ agents });
   }) as typeof fetch;

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { normalizeDirectOrigin, type DirectCredentialResponse } from "../shared/direct.ts";
+import type { Access } from "./access.ts";
 import { DirectSigner } from "./direct-auth.ts";
 import type { MachineManager } from "./machines.ts";
 
@@ -112,7 +113,16 @@ export class DirectBroker {
   }
 }
 
-/** No master credential is sent to the bridge or written to diagnostics. */
-export function directSubject(deviceId: string | undefined, credential: string): string {
-  return deviceId ? `device:${deviceId}` : `browser:${createHash("sha256").update(credential).digest("hex")}`;
+/**
+ * Only validated access, never raw request headers, names a grant's revocation identity.
+ * The shared token has no individual session ID: all its users conservatively share logout.
+ * Local/open access likewise has no individual credential; Serve uses its verified login.
+ */
+export function directSubject(access: Access, sharedToken: string): string | null {
+  if (access.level !== "full") return null;
+  const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+  if (access.via === "device") return access.device ? `device:${access.device.id}` : null;
+  if (access.via === "token") return sharedToken ? `token:${hash(sharedToken)}` : null;
+  if (access.via === "tailscale") return access.login ? `tailscale:${hash(access.login.toLowerCase())}` : null;
+  return `access:${access.via}`;
 }

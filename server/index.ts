@@ -314,10 +314,19 @@ export function createServer(
         if (!directClaims || (pathname === "/ws" && url.searchParams.has("machine_id"))) return unauthorizedJson();
       }
       const bridgeAuthorized = !directOnly && isAuthenticated(request, bridgeToken);
+      const ip = bunServer.requestIP(request);
+      const client = authClient(ip?.address ?? null, request.headers);
       if (!directOnly && pathname === "/api/direct/trust") {
         setRequestRoute("/api/direct/trust");
-        // Only the existing SSH bridge credential, never a browser cookie or an open LAN, may delegate.
-        if (!directListener || !(bridgeAuthorized || (token !== "" && bearerMatches(request, token)))) return unauthorizedJson();
+        // Only a Bearer credential may delegate. Ignore cookies even when a wrong Bearer is
+        // accompanied by the right shared-token cookie; that guess must still spend its budget.
+        const bridgeBearerAuthorized = bearerMatches(request, bridgeToken);
+        const bearerRequest = new Request(request.url, { headers: { authorization: request.headers.get("authorization") ?? "" } });
+        const presented = bridgeBearerAuthorized ? "none" : presentedToken(bearerRequest, token, client);
+        // No await between the budget check and its failure: concurrent guesses cannot overrun it.
+        if (presented === "wrong") recordPresentedTokenFailure(client);
+        if (presented === "held") return presentedTokenHeld(client);
+        if (!directListener || !(bridgeBearerAuthorized || presented === "match")) return unauthorizedJson();
         try {
           const body = await request.json() as Record<string, unknown>;
           if (request.method === "POST") directAuthority.register(body);
@@ -331,7 +340,6 @@ export function createServer(
       const bootstrapRoute = pathname === "/api/machines/bootstrap" || pathname.startsWith("/api/machines/bootstrap/") || /^\/api\/machines\/[^/]+\/revoke-bootstrap$/.test(pathname);
       const bootstrapNoStore = (response: Response): Response => { if (bootstrapRoute) response.headers.set("cache-control", "no-store"); return response; };
       const bridgePath = pathname === "/api/bridge" || pathname === "/api/session" || pathname === SESSION_HISTORY_PATH || pathname === SESSION_RESUME_PATH || pathname === "/api/agents" || pathname === "/api/agent/rename" || pathname === "/api/agent/commands" || pathname === "/api/integrations" || pathname === "/api/plugins/actions" || pathname === "/api/plugin/action" || pathname.startsWith("/api/pane/") || pathname.startsWith("/api/workspace/") || pathname.startsWith("/api/worktree/") || pathname.startsWith("/api/tab/") || pathname === "/api/layout/ratio" || pathname.startsWith("/api/fs/") || pathname === "/ws";
-      const ip = bunServer.requestIP(request);
       const loopback = ip !== null && isLoopbackAddress(ip.address);
       const forwarded = cameThroughProxy(request.headers);
       const funnel = request.headers.has("tailscale-funnel-request");
@@ -339,7 +347,6 @@ export function createServer(
       const forwardedFor = request.headers.get("x-forwarded-for");
       const requestHost = request.headers.get("host");
       // the guessing budget of the address that asks (auth.ts): a token presented while it waits is not compared
-      const client = authClient(ip?.address ?? null, request.headers);
       const presented = directClaims ? "none" : presentedToken(request, token, client);
       // counted at once, before any await below lets a concurrent guess pass the same check. Every
       // wrong token counts, a paired watch device's too (a right one would upgrade it to drive);
@@ -428,7 +435,8 @@ export function createServer(
         const origin = request.headers.get("origin");
         if (!origin || !directBroker) return jsonResponse({ error: { code: "direct_unavailable", message: "Direct access is not configured" } }, 404);
         const deviceId = access.level === "full" ? access.device?.id : undefined;
-        const subject = directSubject(deviceId, request.headers.get("cookie") ?? request.headers.get("authorization") ?? client ?? "unknown");
+        const subject = directSubject(access, token);
+        if (!subject) return unauthorizedJson();
         try {
           const credential = await directBroker.issue(directAccess[1]!, origin, subject, readOnly, deviceId ? (close) => devices.onRevoke(deviceId, close) : undefined);
           return credential ? jsonResponse(credential, 200, { "cache-control": "no-store" }) : jsonResponse({ error: { code: "direct_unavailable", message: "Direct access is not configured for this PC and page origin" } }, 404);
@@ -485,7 +493,11 @@ export function createServer(
         // a browser can hold the token and a device cookie at once, and its renders are then the
         // client's: signing out ends both kinds
         if (request.method === "DELETE" && authenticated) {
-          directBroker?.revoke(directSubject(access.level === "full" ? access.device?.id : undefined, request.headers.get("cookie") ?? request.headers.get("authorization") ?? client ?? "unknown"));
+          const subject = directSubject(access, token);
+          if (subject) directBroker?.revoke(subject);
+          // Token access takes precedence over a device in decideAccess. Logout clears both
+          // credentials, so also revoke grants issued earlier by the validated device alone.
+          if (pairedDevice !== null && subject !== `device:${pairedDevice.id}`) directBroker?.revoke(`device:${pairedDevice.id}`);
           if (pairedDevice !== null) forgetPageMedia({ device: pairedDevice.id });
           forgetPageMedia({ client });
         }

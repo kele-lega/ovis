@@ -94,7 +94,12 @@ existing CSP and proxy paths.
   they send an interact role frame. Administrative APIs and trust registration are not exposed there.
 - A renews each active bridge trust lease every 25 seconds; B closes connections if the lease is not
   renewed within 90 seconds. Device revocation, logout and machine disconnect revoke direct access.
+  Revocation uses the validated device, shared token or verified Serve login, not unrelated cookies
+  or their order. Shared-token sign-ins have no separate session ID, so logging out conservatively
+  revokes direct grants for every browser using that token; those browsers can request fresh grants.
   If a control-path revocation cannot reach B, A stops renewing that lease and expiry fails closed.
+  Trust registration accepts only an authenticated bridge/shared-token Bearer; shared-token guesses
+  use the same bounded attempt budget as normal API requests, never a browser cookie.
 - Direct HTTP provides explicit-origin CORS including authorization preflights and ETag/range headers.
   Programmatic chat, file and Git diff requests use the central machine-scoped fetch transport.
   Images, videos, PDF frames and download links that cannot carry bearer headers continue through
