@@ -2,3 +2,6 @@
 # with a git clone and runs its shell scripts with sh: on WSL a clone that inherits Windows'
 # core.autocrlf=true gets CRLF scripts, and sh stops at `set -u\r` ("set: Illegal option -").
 * text=auto eol=lf
+
+# Unified-diff blank context lines are a single space; preserve the pinned patch bytes.
+patches/herdr-atomic-command-launch.patch whitespace=-blank-at-eol,-blank-at-eof

@@ -4303,6 +4303,46 @@
           },
           "type": "object"
         },
+        "TabCreateWithCommandParams": {
+          "description": "Atomic, creation-only launch; never persisted or replayed on restore.",
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        },
         "TabListParams": {
           "properties": {
             "workspace_id": {
@@ -4412,6 +4452,47 @@
               ]
             }
           },
+          "type": "object"
+        },
+        "WorkspaceCreateWithCommandParams": {
+          "description": "Atomic, creation-only launch; never persisted or replayed on restore.",
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source_workspace_id": {
+              "description": "Workspace whose focused pane supplies the `follow` cwd policy.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "command"
+          ],
           "type": "object"
         },
         "WorkspaceMoveBlockParams": {
@@ -4598,6 +4679,61 @@
           },
           "type": "object"
         },
+        "WorktreeCreateWithCommandParams": {
+          "description": "Atomic, creation-only launch; never persisted or replayed on restore.",
+          "properties": {
+            "base": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "command": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "trust_repository": {
+              "type": "boolean"
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        },
         "WorktreeListParams": {
           "properties": {
             "cwd": {
@@ -4658,6 +4794,55 @@
               ]
             }
           },
+          "type": "object"
+        },
+        "WorktreeOpenWithCommandParams": {
+          "description": "Atomic, creation-only launch; never persisted or replayed on restore.",
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "command": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "trust_repository": {
+              "type": "boolean"
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "command"
+          ],
           "type": "object"
         },
         "WorktreeRemoveParams": {
@@ -6305,6 +6490,70 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PluginPaneCloseParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workspace.create_with_command",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceCreateWithCommandParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "tab.create_with_command",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TabCreateWithCommandParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "worktree.create_with_command",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorktreeCreateWithCommandParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "worktree.open_with_command",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorktreeOpenWithCommandParams"
             }
           },
           "required": [

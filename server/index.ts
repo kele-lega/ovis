@@ -30,6 +30,7 @@ import { forgetPageMedia } from "./file-view.ts";
 import { handleFileRequest } from "./file-routes.ts";
 import { BACKGROUND_AGENT_PATH, handleBackgroundAgentRequest, type BackgroundAgentDeps } from "./background-agent.ts";
 import {
+  atomicCommandLaunchSupported,
   herdrSocketPath,
   paneGet,
   ping,
@@ -451,8 +452,8 @@ export function createServer(
           if (!/^\/api\/(session|agents|integrations|pane\/|workspace\/|worktree\/|tab\/|layout\/ratio$|agent\/(?:rename|commands)$|plugins\/actions$|plugin\/action$|sessions\/(?:history|resume)$)/.test(pathname)) return badRequest("invalid_route", "Unknown PC endpoint");
           url.pathname = pathname;
         } else {
-          // a worktree made with an agent waits on git and then agent.start, up to 150 s on the PC, and a
-          // resume on agent.start and then its store check (machine-api.ts slowMachinePath)
+          // worktree creation/opening with a command can take 150 s on the PC; resume also waits
+          // on its start and store check. Share the proxy's slow-path classification.
           bunServer.timeout(request, pathname === "/api/machines/events" ? 0 : slowMachinePath(pathname.split("/").slice(4).join("/")) ? 180 : 80);
           const deviceId = access.level === "full" ? access.device?.id : undefined;
           const response = await handleMachineRequest(request, machines, deviceId ? (close) => devices.onRevoke(deviceId, close) : undefined, preferences, readOnly, herdrSidebar, seen);
@@ -559,12 +560,13 @@ export function createServer(
         // reconnaissance, not help. Nothing here changes who is let in (server/access.ts).
         const lan_exposure = access.level === "full" && lanExposed({ hostname, tokenConfigured: token !== "", gated: devices.gated })
           ? { host: hostname } : undefined;
+        // Bridge liveness must not wait on a daemon. Capability comes from live /api/bridge or /api/agents.
         if (url.searchParams.get("scope") === "bridge") return jsonResponse({ ok: true, auth, bridge_protocol: BRIDGE_PROTOCOL });
         try {
           const info = await ping();
           // a forced answer (tests) and a runtime without the PTY sidecar are told the way a Windows herdr's own would be
           const herdr = attachableIdentity(info, sidecar);
-          return jsonResponse({ ok: true, herdr, auth, ...(lan_exposure ? { lan_exposure } : {}),
+          return jsonResponse({ ok: true, herdr, launch_command: atomicCommandLaunchSupported(info), auth, ...(lan_exposure ? { lan_exposure } : {}),
             web_ui: { boot_id: bootId, revision: process.env["OVIS_REVISION"] ?? null } });
         } catch (error) {
           return errorResponse(error);

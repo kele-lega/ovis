@@ -7,7 +7,7 @@
 
 import type { TelemetrySettings } from "../../shared/telemetry.ts";
 import { mirrorPalette, SHARED_SETTING_KEYS, type SharedSettingKey } from "../../shared/preferences.ts";
-import { createContext, createElement, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, createElement, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DEFAULT_THEME, terminalColors, themeColor as themeTableColor, type ThemeId, type ThemeEntry } from "./themes.ts";
 import { LANGUAGE_SETTINGS, LOCALE_TAGS, resolveLanguage, setCurrentLanguage, type Language, type LanguageSetting } from "./i18n.ts";
 import type { AlertPrefs, DoneAlerts } from "../../shared/notify-policy.ts";
@@ -60,7 +60,7 @@ import { sanitizeShortcutOverrides, type ShortcutOverrides } from "./shortcutBin
 import type { StatusIndicators } from "./status.ts";
 import { WEB_LINK_TARGETS, type WebLinkTarget } from "./webPanel.ts";
 import { FILE_OPEN_TARGETS, type FilePresentation } from "./filePresentation.ts";
-import { CLAUDE_LAUNCH_MODES, CODEX_LAUNCH_MODES, type ClaudeLaunchMode, type CodexLaunchMode } from "./agentLaunchMode.ts";
+import { CLAUDE_LAUNCH_MODES, CODEX_LAUNCH_MODES, sanitizeAgentCommands, type ClaudeLaunchMode, type CodexLaunchMode } from "./agentLaunchMode.ts";
 
 export interface Settings {
   terminalInputMode: "auto" | "line" | "direct";
@@ -184,6 +184,8 @@ export interface Settings {
   claudeLaunchMode: ClaudeLaunchMode;
   /** the same for Codex: a sandbox and approval preset */
   codexLaunchMode: CodexLaunchMode;
+  /** Explicit full commands for new agents only. Plaintext, shared across devices; never telemetry. */
+  agentCommands: Record<string, string>;
 }
 
 export const MARKDOWN_WIDTHS = ["readable", "full"] as const;
@@ -193,11 +195,11 @@ export type DiffStyle = (typeof DIFF_STYLES)[number];
 
 /** Raw custom text, key combinations and account keys are never copied. Requiring every other
  * Settings field in the projection makes a new field require an explicit collection decision.
- * fileOpen, webLinks, the launch modes, followHerdrFocus, composerNewTabButton, terminalMirrorWrap and the interface font are
+ * fileOpen, webLinks, the launch modes and commands, followHerdrFocus, composerNewTabButton, terminalMirrorWrap and the interface font are
  * not collected: the telemetry schema (shared/telemetry.ts) does not carry them. */
 type TelemetrySourceSettings = Omit<Settings,
   "keyBarExtras" | "keyBarItems" | "shortcutOverrides" | "terminalFontFamily" | "chatFontFamily" | "uiFontFamily"
-  | "quickReplies" | "usageOrder" | "usageHidden" | "fileOpen" | "webLinks" | "claudeLaunchMode" | "codexLaunchMode"
+  | "quickReplies" | "usageOrder" | "usageHidden" | "fileOpen" | "webLinks" | "claudeLaunchMode" | "codexLaunchMode" | "agentCommands"
   | "followHerdrFocus" | "composerNewTabButton" | "terminalMirrorWrap">;
 
 /** Compare structured custom settings by content against this app's built-in defaults. */
@@ -288,7 +290,7 @@ export const SETTING_SCOPE = {
   // Viewer layout follows this screen, as chatWidth does.
   wrapCode: "device", markdownWidth: "device", diffStyle: "device", fileOpen: "device", webLinks: "device",
   // a new agent starts the same way whichever device opened it
-  claudeLaunchMode: "shared", codexLaunchMode: "shared",
+  claudeLaunchMode: "shared", codexLaunchMode: "shared", agentCommands: "shared",
 } as const satisfies Record<keyof Settings, "shared" | "device">;
 
 /** The shared part of `settings`, by the names shared/preferences.ts lists. */
@@ -355,6 +357,7 @@ export const DEFAULT_SETTINGS: Settings = {
   webLinks: "tab",
   claudeLaunchMode: "default",
   codexLaunchMode: "default",
+  agentCommands: {},
 };
 
 export const QUICK_REPLIES_MAX = 12;
@@ -535,6 +538,7 @@ export function sanitizeSettings(raw: unknown): Settings {
     webLinks: WEB_LINK_TARGETS.find((target) => target === record["webLinks"]) ?? DEFAULT_SETTINGS.webLinks,
     claudeLaunchMode: CLAUDE_LAUNCH_MODES.find((mode) => mode === record["claudeLaunchMode"]) ?? DEFAULT_SETTINGS.claudeLaunchMode,
     codexLaunchMode: CODEX_LAUNCH_MODES.find((mode) => mode === record["codexLaunchMode"]) ?? DEFAULT_SETTINGS.codexLaunchMode,
+    agentCommands: sanitizeAgentCommands(record["agentCommands"]),
   };
 }
 
@@ -567,28 +571,52 @@ function readMirrorWrap(): boolean | null {
   }
 }
 
+/** New-agent commands have their own key so an older tab's unrelated whole-settings save cannot erase them. */
+export const AGENT_COMMANDS_STORAGE_KEY = "ovis:agent-commands";
+
+function readAgentCommands(fallback: Record<string, string> = {}): Record<string, string> {
+  let raw: string | null;
+  try {
+    raw = window.localStorage.getItem(AGENT_COMMANDS_STORAGE_KEY);
+  } catch {
+    return fallback;
+  }
+  try {
+    return raw === null ? {} : sanitizeAgentCommands(JSON.parse(raw));
+  } catch {
+    return {};
+  }
+}
+
 export function loadSettings(): Settings {
   // read as the page's boot script reads them (themeBoot.ts), so React starts on the row the first frame showed
   const stored = readStoredAppearance(() => window.localStorage);
   const settings = stored.main === null ? DEFAULT_SETTINGS : sanitizeSettings(stored.main.value);
   const merged = stored.themes === null ? settings : sanitizeSettings({ ...settings, ...stored.themes });
-  return { ...merged, uiFontFamily: readUiFontFamily(), terminalMirrorWrap: readMirrorWrap() };
+  return { ...merged, uiFontFamily: readUiFontFamily(), terminalMirrorWrap: readMirrorWrap(), agentCommands: readAgentCommands() };
 }
 
-export function saveSettings(settings: Settings): void {
+/** Returns whether the command map was persisted; skipped or failed command writes return false. */
+export function saveSettings(settings: Settings, saveAgentCommands = true): boolean {
   const mirrored = sanitizeSettings(settings);
+  let commandsSaved = false;
   try {
     window.localStorage.setItem(THEMES_STORAGE_KEY, JSON.stringify({
       darkTheme: mirrored.darkTheme, lightTheme: mirrored.lightTheme,
       mirror: { palette: mirrored.palette, paletteDark: mirrored.paletteDark, paletteLight: mirrored.paletteLight },
     }));
-    const { uiFontFamily, terminalMirrorWrap, ...main } = mirrored;
+    const { uiFontFamily, terminalMirrorWrap, agentCommands, ...main } = mirrored;
+    if (saveAgentCommands) {
+      window.localStorage.setItem(AGENT_COMMANDS_STORAGE_KEY, JSON.stringify(agentCommands));
+      commandsSaved = true;
+    }
     window.localStorage.setItem(UI_FONT_STORAGE_KEY, JSON.stringify(uiFontFamily));
     window.localStorage.setItem(MIRROR_WRAP_STORAGE_KEY, JSON.stringify(terminalMirrorWrap));
     window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(main));
   } catch {
     /* private mode: preferences last for the session */
   }
+  return commandsSaved;
 }
 
 type TerminalColors = { background: string; foreground: string; cursor: string; selectionBackground: string };
@@ -645,13 +673,22 @@ const SettingsContext = createContext<SettingsContextValue | null>(null);
 
 export function SettingsProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<Settings>(loadSettings);
+  // A readable but unwritable store still holds old bytes. Keep an explicit Save/Clear in this
+  // session until its command write succeeds, instead of refreshing it away on the next edit/event.
+  const pendingAgentCommands = useRef<Record<string, string> | null>(null);
   const [systemDark, setSystemDark] = useState(() => resolveTheme("system") === "dark");
 
   useEffect(() => {
     const onStorage = (event: StorageEvent): void => {
-      if (event.storageArea !== window.localStorage || (event.key !== SETTINGS_STORAGE_KEY && event.key !== null)) return;
-      const { shortcutOverrides } = loadSettings();
-      setSettings((current) => ({ ...current, shortcutOverrides }));
+      if (event.storageArea !== window.localStorage) return;
+      const shortcutsChanged = event.key === SETTINGS_STORAGE_KEY || event.key === null;
+      const commandsChanged = event.key === AGENT_COMMANDS_STORAGE_KEY || event.key === null;
+      if (!shortcutsChanged && !commandsChanged) return;
+      setSettings((current) => ({
+        ...current,
+        ...(shortcutsChanged ? { shortcutOverrides: loadSettings().shortcutOverrides } : {}),
+        ...(commandsChanged ? { agentCommands: pendingAgentCommands.current ?? readAgentCommands(current.agentCommands) } : {}),
+      }));
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
@@ -684,9 +721,15 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   }, [settings, resolvedEntry, resolvedLanguage]);
 
   const update = useCallback((patch: Partial<Settings>) => {
+    const commandsChanged = Object.hasOwn(patch, "agentCommands");
     setSettings((current) => {
-      const next = sanitizeSettings({ ...current, ...patch });
-      saveSettings(next);
+      // A storage event may still be queued (or missed). Never save this tab's stale command map
+      // with an unrelated edit; explicit Save/Clear and remote preference patches remain authoritative.
+      const agentCommands = commandsChanged ? patch.agentCommands : pendingAgentCommands.current ?? readAgentCommands(current.agentCommands);
+      const next = sanitizeSettings({ ...current, ...patch, agentCommands });
+      const persistCommands = commandsChanged || pendingAgentCommands.current !== null;
+      const commandsSaved = saveSettings(next, persistCommands);
+      if (persistCommands) pendingAgentCommands.current = commandsSaved ? null : next.agentCommands;
       return next;
     });
   }, []);

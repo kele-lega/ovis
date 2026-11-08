@@ -132,7 +132,7 @@ export type { Machine, MachineEvent, MachineRoster, PaneTarget, SetupJob, SetupR
  *         { enabled?, notice_seen?: true, notice_version?, settings? }. A notice acknowledgement
  *         requires the current NOTICE_VERSION. X-Herdr-Update: 1 and same-origin.
  *         404 from a server that sends no telemetry.
- *  GET    /api/agents                    -> { agents: AgentKind[] } (herdr's agent manifests: the
+ *  GET    /api/agents                    -> AgentsResponse (herdr's agent manifests: the
  *         kinds `agent.start` accepts, plus omo and gjc when they are on this server's PATH,
  *         each with `installed`: whether its command is on this server's PATH; for the
  *         new-session dialog)
@@ -497,6 +497,13 @@ export type { FileKind, FileInfo, ProjectFavicon } from "./files.ts";
 export type { RepoDiffScope, RepoBranchComparison, RepoDiffRefs, RepoDiffStatus, RepoDiffRepository, RepoDiffFile, RepoDiffFileList, RepoDiffFilePatch } from "./repo-diff.ts";
 
 export type { AgentKind } from "./agents.ts";
+
+/** GET /api/agents: launchable kinds and capabilities of this PC's bridge (not the host's). */
+export interface AgentsResponse {
+  agents: import("./agents.ts").AgentKind[];
+  /** Absent or false on bridges that cannot start an exact custom command. Never fall back to args. */
+  launch_command?: boolean;
+}
 
 export type { AgentIntegration, IntegrationsResponse } from "./integrations.ts";
 

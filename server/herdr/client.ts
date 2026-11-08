@@ -14,6 +14,7 @@ import type {
 } from "../../shared/protocol.ts";
 import type { AgentInfo, AgentManifestInfo, AgentStartParams, PaneInfo, PaneLayoutSnapshot, PaneProcessInfo, PaneScrollInfo, TabInfo, WorkspaceInfo } from "../../shared/herdr-api.generated.ts";
 import type { HerdrMethod, HerdrMethods, SingleHerdrMethod, UntypedHerdrMethod } from "./methods.ts";
+import { launchCommandFault } from "../../shared/launch-rules.ts";
 import type { HerdrIdentity } from "../../shared/machines.ts";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -326,7 +327,34 @@ export async function ping(socketPath?: string): Promise<HerdrIdentity> {
   const result = await herdrRpc<{ version: string; protocol: number; capabilities?: Record<string, unknown> }>("ping", {}, socketPath);
   const attach = terminalAttachSupported(result.capabilities);
   // without attach the web server repaints the pane's screen instead (server/mirror.ts)
-  return { version: result.version, protocol: result.protocol, terminal_attach: attach, ...(attach ? {} : { terminal_mirror: true }) };
+  const atomic = result.capabilities?.["atomic_command_launch"];
+  return { version: result.version, protocol: result.protocol, terminal_attach: attach, ...(attach ? {} : { terminal_mirror: true }),
+    ...(typeof atomic === "boolean" ? { capabilities: { atomic_command_launch: atomic } } : {}),
+  };
+}
+
+/** Both this Ovis implementation and the live daemon must support atomic command creation. */
+export function atomicCommandLaunchSupported(identity: Pick<HerdrIdentity, "capabilities">, platform: string = process.platform): boolean {
+  return platform !== "win32" && identity.capabilities?.atomic_command_launch === true;
+}
+
+/** No legacy create or shell-input fallback: an uncertain create must never be repeated. */
+async function atomicCommandCreate<M extends "workspace.create_with_command" | "tab.create_with_command" | "worktree.create_with_command" | "worktree.open_with_command">(
+  method: SingleHerdrMethod<M>, params: HerdrMethods[M]["params"], socketPath?: string, timeoutMs?: number,
+): Promise<HerdrMethods[M]["result"]> {
+  const fault = launchCommandFault(params.command);
+  if (fault !== null) throw new HerdrError("invalid_agent", fault);
+  try {
+    if (process.platform === "win32" || !atomicCommandLaunchSupported(await ping(socketPath))) {
+      throw new HerdrError("command_launch_unsupported", "This PC does not support atomic custom command launch");
+    }
+    return await herdrRpc<M>(method, params, socketPath, timeoutMs);
+  } catch (error) {
+    const code = error instanceof HerdrError ? error.code : "command_launch_failed";
+    throw new HerdrError(code, code === "command_launch_unsupported"
+      ? "This PC does not support atomic custom command launch"
+      : "The custom command creation was not confirmed; it was not retried");
+  }
 }
 
 export async function sessionSnapshot(socketPath?: string, timeoutMs?: number): Promise<SessionSnapshot> {
@@ -441,6 +469,10 @@ export async function workspaceCreate(
   );
 }
 
+export function workspaceCreateWithCommand(options: { command: string; cwd?: string; label?: string; env?: Record<string, string> }, socketPath?: string): Promise<WorkspaceCreateResult> {
+  return atomicCommandCreate("workspace.create_with_command", { ...options, focus: false }, socketPath);
+}
+
 export interface TabCreateResult {
   type: "tab_created";
   tab: TabInfo;
@@ -457,6 +489,11 @@ export async function tabCreate(
     { workspace_id: options.workspaceId, ...(options.cwd === undefined ? {} : { cwd: options.cwd }), ...(options.label === undefined ? {} : { label: options.label }), ...(options.env === undefined ? {} : { env: options.env }), focus: false },
     socketPath,
   );
+}
+
+export function tabCreateWithCommand(options: { command: string; workspaceId: string; cwd?: string; label?: string; env?: Record<string, string> }, socketPath?: string): Promise<TabCreateResult> {
+  const { workspaceId, ...rest } = options;
+  return atomicCommandCreate("tab.create_with_command", { ...rest, workspace_id: workspaceId, focus: false }, socketPath);
 }
 
 /** herdr keeps the label as given: an empty one leaves the tab without a name, so callers refuse it. */
@@ -602,6 +639,16 @@ export async function worktreeOpen(
     ...(options.label === undefined ? {} : { label: options.label }),
     focus: false,
   }, socketPath);
+}
+
+export function worktreeCreateWithCommand(options: { command: string; workspaceId: string; branch: string; base?: string; label?: string; path?: string }, socketPath?: string): Promise<WorktreeOpenResult> {
+  const { workspaceId, ...rest } = options;
+  return atomicCommandCreate("worktree.create_with_command", { ...rest, workspace_id: workspaceId, focus: false }, socketPath, WORKTREE_GIT_TIMEOUT_MS);
+}
+
+export function worktreeOpenWithCommand(options: { command: string; workspaceId: string; path?: string; branch?: string; label?: string }, socketPath?: string): Promise<WorktreeOpenResult> {
+  const { workspaceId, ...rest } = options;
+  return atomicCommandCreate("worktree.open_with_command", { ...rest, workspace_id: workspaceId, focus: false }, socketPath, WORKTREE_GIT_TIMEOUT_MS);
 }
 
 export interface PaneReadOptions {

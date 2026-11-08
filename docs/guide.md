@@ -269,6 +269,39 @@ or **Discard**. A message is never pasted over text typed in Claude Code's own i
 that box holds a draft the message stays in the list with the reason, and **Send now** delivers it
 once the draft is sent or cleared in the terminal.
 
+## Custom agent launch commands
+
+**Settings → Chat → New agents** saves an optional single-line launch command for each agent.
+Choose the agent, enter the complete command and press **Save**. **Clear** restores that agent's
+normal launch behavior. For example, a command may name an absolute executable path, a wrapper,
+or shell environment assignments. The selected kind still tells Ovis which agent to recognize
+and which transcript format to read; the command must actually start that agent.
+
+Herdr executes the unchanged command as the new pane's initial process on the selected PC,
+through its creation-time command interface, not by typing into an already-running terminal.
+Ovis does not append permission-mode, model, reasoning-effort flags or an initial prompt.
+Model and effort controls are hidden while a command is configured. A first message uses the
+normal pending-message queue after startup; it is not part of the shell command. If the launched
+process cannot be identified safely (for example, an ambiguous wrapper), the first message stays
+in the new tab's draft for you to send explicitly. Creation is not retried after an uncertain
+result: check the retained pane before trying again. Restoring
+Herdr's saved session never replays this one-shot command.
+
+Commands are shared settings, so the same saved text runs on each selected PC, using that PC's
+PATH and installed tools. Both the target's Ovis bridge and its running Herdr daemon must
+explicitly support atomic command creation. An older bridge, an older daemon or native Windows
+is refused before creation, with no default-agent fallback. Updating Ovis alone does not add
+this daemon capability; install a compatible Herdr separately or clear the command to use the
+normal launch path. Resuming a session is unchanged and never uses these commands.
+The pinned companion source patch and isolated build/test instructions are in
+[Companion Herdr atomic command launch](herdr-atomic-command-launch.md); this Ovis merge does not
+install it or restart an existing daemon.
+
+**Do not put API keys, tokens or other secrets in a launch command.** It is stored as plain text,
+shared with your browsers, and may appear in terminal scrollback and shell history. It is
+excluded from anonymous usage counts. Newlines, terminal control characters and commands over
+2,000 characters are refused; shell syntax is otherwise yours to choose.
+
 ## Subscription usage
 
 On a local desktop pane, the composer shows a compact read-only limit for the agent's provider:

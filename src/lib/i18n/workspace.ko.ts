@@ -89,4 +89,7 @@ export const WORKSPACE_KO: Record<string, string> = {
   "The folder could not be made.": "폴더를 만들 수 없습니다.",
   "Tab name (optional)": "탭 이름 (선택)",
   "Uses the workspace's folder": "워크스페이스의 폴더를 그대로 씁니다",
+  "Custom command": "사용자 명령",
+  "Uses the saved custom command for {agent}. Permission, model and effort settings are not added. Resume is unchanged.": "저장된 {agent} 사용자 명령을 사용합니다. 권한, 모델, 노력 수준 설정은 추가되지 않습니다. 이어하기는 바뀌지 않습니다.",
+  "This PC has not confirmed atomic custom launch support. Use a compatible Ovis bridge and running Herdr, or clear this agent's command in Settings > Chat. Nothing will start.": "이 PC는 원자적 사용자 명령 실행 지원을 확인하지 못했습니다. 호환되는 Ovis 브리지와 실행 중인 Herdr를 사용하거나 설정 > 채팅에서 이 에이전트의 명령을 지우세요. 아무것도 시작하지 않습니다.",
 };

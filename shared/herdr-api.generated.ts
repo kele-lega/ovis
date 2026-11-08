@@ -223,6 +223,15 @@ export type Subscription = {
   type: string;
 };
 
+export interface TabCreateWithCommandParams {
+  command: string;
+  cwd?: string | null;
+  env?: Record<string, unknown>;
+  focus?: boolean;
+  label?: string | null;
+  workspace_id?: string | null;
+}
+
 export interface TabInfo {
   agent_status: AgentStatus;
   focused: boolean;
@@ -231,6 +240,15 @@ export interface TabInfo {
   pane_count: number;
   tab_id: string;
   workspace_id: string;
+}
+
+export interface WorkspaceCreateWithCommandParams {
+  command: string;
+  cwd?: string | null;
+  env?: Record<string, unknown>;
+  focus?: boolean;
+  label?: string | null;
+  source_workspace_id?: string | null;
 }
 
 export interface WorkspaceInfo {
@@ -252,4 +270,27 @@ export interface WorkspaceWorktreeInfo {
   repo_key: string;
   repo_name: string;
   repo_root: string;
+}
+
+export interface WorktreeCreateWithCommandParams {
+  base?: string | null;
+  branch?: string | null;
+  command: string;
+  cwd?: string | null;
+  focus?: boolean;
+  label?: string | null;
+  path?: string | null;
+  trust_repository?: boolean;
+  workspace_id?: string | null;
+}
+
+export interface WorktreeOpenWithCommandParams {
+  branch?: string | null;
+  command: string;
+  cwd?: string | null;
+  focus?: boolean;
+  label?: string | null;
+  path?: string | null;
+  trust_repository?: boolean;
+  workspace_id?: string | null;
 }

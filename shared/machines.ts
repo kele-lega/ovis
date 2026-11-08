@@ -53,6 +53,8 @@ export interface MachineRoster { machines: Machine[]; verified_source_boot?: { m
 export interface HerdrIdentity {
   version: string;
   protocol: number;
+  /** Explicit daemon support; absence is not approval to launch commands. */
+  capabilities?: { atomic_command_launch?: boolean };
   terminal_attach?: boolean;
   /** without attach, the terminal lens shows the pane's screen repainted a few times a second (server/mirror.ts) */
   terminal_mirror?: boolean;
@@ -110,8 +112,10 @@ export type MachineEvent = { type: "machine-setups"; setups: MachineSetupSummary
   | { type: "herdr-sidebar"; agents: AgentRowTokens | null }
   /** finishes a browser of this server presented (shared/seen.ts): every record when the stream opens, then each change */
   | { type: "seen"; finishes: SeenFinish[] };
-export interface BridgeHealth { ok: true; auth: HealthAuth; bridge_protocol: number }
+export interface BridgeHealth { ok: true; auth: HealthAuth; bridge_protocol: number; launch_command?: boolean }
 export interface BridgeIdentity {
+  /** Whether this Ovis bridge accepts an exact shell command for a new agent. */
+  launch_command?: boolean;
   pid: number;
   managed_remote: boolean;
   bridge_protocol: number;

@@ -17,6 +17,7 @@ describe("GET /api/agents", () => {
   const located: string[] = [];
   const shellAgents = { executable: async (kind: string) => { located.push(kind); return kind === "gjc" ? "/opt/gjc/bin/gjc" : null; }, stop: async () => undefined } as unknown as ShellAgentLocator;
   const manifests = spyOn(herdr, "agentManifests").mockImplementation(async () => ({ manifests: [{ agent: "codex" }, { agent: "pi" }, { agent: "someagent" }, { agent: "cmd" }, { agent: "copilot" }, { agent: "letta" }] }) as unknown as Awaited<ReturnType<typeof herdr.agentManifests>>);
+  const livePing = spyOn(herdr, "ping").mockResolvedValue({ version: "fixture", protocol: 1, capabilities: { atomic_command_launch: true } });
   const url = (path: string) => `http://127.0.0.1:${server.port}${path}`;
 
   beforeAll(() => {
@@ -31,10 +32,12 @@ describe("GET /api/agents", () => {
     process.env["PATH"] = savedPath;
     located.length = 0;
     manifests.mockClear();
+    livePing.mockClear();
   });
   afterAll(() => {
     server.stop();
     manifests.mockRestore();
+    livePing.mockRestore();
     rmSync(stateDir, { recursive: true, force: true });
     rmSync(bin, { recursive: true, force: true });
   });
@@ -44,6 +47,7 @@ describe("GET /api/agents", () => {
     const response = await fetch(url("/api/agents"));
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
+      launch_command: process.platform !== "win32",
       agents: [
         { kind: "claude", label: "Claude Code", installed: false },
         { kind: "codex", label: "Codex", installed: true },
@@ -57,6 +61,17 @@ describe("GET /api/agents", () => {
       ],
     });
     expect(located.sort()).toEqual(["gjc", "omo"]);
+  });
+
+  it("requires fresh daemon support for each catalog and fails closed on old or unavailable daemons", async () => {
+    for (const identity of [{ version: "old", protocol: 1 }, { version: "old", protocol: 1, capabilities: { atomic_command_launch: false } }]) {
+      livePing.mockResolvedValueOnce(identity);
+      expect(await (await fetch(url("/api/agents"))).json()).toMatchObject({ launch_command: false });
+    }
+    livePing.mockRejectedValueOnce(new Error("private daemon diagnostic"));
+    const failed = await fetch(url("/api/agents"));
+    expect(failed.status).toBe(200); expect(await failed.json()).toMatchObject({ launch_command: false });
+    expect(await (await fetch(url("/api/agents"))).json()).toMatchObject({ launch_command: process.platform !== "win32" });
   });
 
   it("passes herdr's own error through, hides any other, and refuses anything but GET", async () => {

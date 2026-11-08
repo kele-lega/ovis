@@ -4,7 +4,8 @@ import type { SharedPreferences } from "../shared/preferences.ts";
 import type { PanePromptResponse } from "../shared/protocol.ts";
 import type { SeenFinish } from "../shared/seen.ts";
 import { BootstrapError } from "./ssh-bootstrap.ts";
-import { customCommandFault } from "./agent-launch.ts";
+import { agentFault, type AgentPayload } from "./agent-launch.ts";
+import { BRIDGE_PROTOCOL } from "../shared/machines.ts";
 import { MachineManager } from "./machines.ts";
 import { readTailnetPeers } from "./tailnet-peers.ts";
 import { canSendSecret, sameOrigin } from "./machine-security.ts";
@@ -15,10 +16,10 @@ import { parseJson, readCapped, REMOTE_LIMITS, RemoteResponseInvalid, RemoteResp
 const fail = (code: string, message: string, status: number) => jsonResponse({ error: { code, message } }, status);
 
 /**
- * A PC route whose answer can take longer than the proxy's usual 75 s: a worktree's creation waits on
- * git and then an agent's start, and a resume on the agent's start and then the check of its store.
+ * A PC route whose answer can take longer than the proxy's usual 75 s: worktree creation or opening
+ * can wait on git and command observation, and a resume on the agent's start and store check.
  */
-export const slowMachinePath = (path: string): boolean => path === "worktree/create" || path === "sessions/resume";
+export const slowMachinePath = (path: string): boolean => path === "worktree/create" || path === "worktree/open" || path === "sessions/resume";
 
 /**
  * A path no route is spelled as: an empty segment (`//`, or a trailing `/`) or an encoded separator.
@@ -233,14 +234,20 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
       // (index.ts `mutating`): it writes nothing on another PC
       if (readOnly && !["GET", "HEAD", "OPTIONS"].includes(request.method)) return fail("read_only", "this device can only watch", 403);
       let proxyBody: ReadableStream<Uint8Array> | Uint8Array<ArrayBuffer> | null = request.body;
-      if (request.method === "POST" && ["workspace/create", "tab/create", "worktree/create"].includes(path)) {
+      let commandLaunch = false;
+      if (request.method === "POST" && ["workspace/create", "tab/create", "worktree/create", "worktree/open"].includes(path)) {
         // Older runtime37 bridges ignore unknown command fields. Check before contacting them,
         // holding at most the server's existing 64 MiB request ceiling and forwarding the same bytes.
         try {
           const bytes = await readCapped(new Response(request.body, { headers: request.headers }), 64 * 1024 * 1024);
           const value = parseJson<unknown>(bytes);
-          const fault = customCommandFault(isJsonObject(value) ? value["agent"] : undefined);
-          if (fault) return fail("invalid_agent", fault, 400);
+          const agent = isJsonObject(value) ? value["agent"] : undefined;
+          commandLaunch = isJsonObject(agent) && Object.hasOwn(agent, "command");
+          if (commandLaunch) {
+            // Platform approval belongs to the selected PC, never the proxy host.
+            const fault = agentFault(agent as AgentPayload, "linux");
+            if (fault) return fail("invalid_agent", fault, 400);
+          }
           proxyBody = bytes;
         } catch (error) {
           if (error instanceof RemoteResponseTooLarge) return fail("too_large", "The create request is too large", 413);
@@ -252,6 +259,26 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
         // a chat opened while the PC waits to reconnect asks it to try now, not after its delay
         manager.retryNow(id);
         return fail("machine_offline", "This PC is disconnected", 503);
+      }
+      if (commandLaunch) {
+        // A fresh authenticated identity proves BOTH the selected Ovis implementation and its
+        // daemon. Cached rosters and a new daemon behind runtime37 cannot approve a launch.
+        try {
+          const proof = await fetch(`${endpoint.url}/api/bridge`, {
+            headers: { authorization: `Bearer ${endpoint.token}` }, redirect: "error", cache: "no-store",
+            signal: AbortSignal.any([request.signal, AbortSignal.timeout(10_000)]),
+          });
+          if (!proof.ok) { await proof.body?.cancel(); return fail("command_launch_unsupported", "This PC has not confirmed atomic custom command support", 409); }
+          const identity = parseJson<unknown>(await readCapped(proof, REMOTE_LIMITS.bridgeIdentity));
+          const herdr = isJsonObject(identity) ? identity["herdr"] : undefined;
+          const capabilities = isJsonObject(herdr) ? herdr["capabilities"] : undefined;
+          if (!isJsonObject(identity) || identity["bridge_protocol"] !== BRIDGE_PROTOCOL || identity["launch_command"] !== true
+            || !isJsonObject(capabilities) || capabilities["atomic_command_launch"] !== true) {
+            return fail("command_launch_unsupported", "This PC has not confirmed atomic custom command support", 409);
+          }
+        } catch {
+          return fail("command_launch_unsupported", "This PC has not confirmed atomic custom command support", 409);
+        }
       }
       // Explicit header allowlist: cookies, browser Authorization, forwarded headers
       // and remote Set-Cookie never cross this boundary. No arbitrary target URLs.

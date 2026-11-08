@@ -21,6 +21,7 @@ import { PALETTE_KO } from "./i18n/palette.ko.ts";
  * braces keep their English names.
  */
 const BASE: Record<string, string> = {
+  "Save": "저장",
   "Back": "뒤로",
   "Scroll pane up": "패널 위로 스크롤",
   "Scroll pane down": "패널 아래로 스크롤",
@@ -269,6 +270,7 @@ const BASE: Record<string, string> = {
 
 /** The parts KO is made of; src/lib/i18n.test.ts fails when a key is in two parts, since a spread keeps only the last. */
 export const KO_PARTS: Record<string, Record<string, string>> = {
+
   base: BASE,
   settings: SETTINGS_KO,
   terminal: TERMINAL_KO,
