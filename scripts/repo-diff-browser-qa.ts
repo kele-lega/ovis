@@ -232,6 +232,8 @@ let demoServer: ReturnType<typeof Bun.serve> | undefined;
 
 /** The route the real server gives these paths, on a stand-in that maps a pane to its folder. */
 async function api(request: Request, url: URL): Promise<Response | null> {
+  // This relay-only fixture issues no optional direct credentials.
+  if (/^\/api\/machines\/[^/]+\/direct-access$/.test(url.pathname)) return new Response(null, { status: 204 });
   const diff = /^\/api\/(?:machines\/([^/]+)\/)?workspace\/diff\/(files|file|refs)$/.exec(url.pathname);
   if (diff) {
     requests.push(url.pathname);

@@ -40,6 +40,8 @@ try {
   server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch(request) {
     const path = new URL(request.url).pathname;
     if (path === "/ws") return new Response(null, { status: 404 });
+    // This relay-only fixture issues no optional direct credentials.
+    if (/^\/api\/machines\/[^/]+\/direct-access$/.test(path)) return new Response(null, { status: 204 });
     // Product connection failures report only metadata; this fictional server consumes it locally.
     if (path === "/api/connection-diagnostics") return new Response(null, { status: 204 });
     // the terminal reads herdr's copy_on_select as it mounts

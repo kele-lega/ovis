@@ -8,6 +8,7 @@
  */
 
 import type { BunFile } from "bun";
+import { normalizeDirectOrigin } from "../shared/direct.ts";
 import { existsSync } from "node:fs";
 import { join, normalize } from "node:path";
 
@@ -121,15 +122,19 @@ export const CONTENT_SECURITY_POLICY = CSP_DIRECTIVES.join("; ");
 const FRAMEABLE_HOST = /^(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*|\[[0-9a-f:.]+\])$/i;
 
 /** The policy for a request from `origin` (requestOrigin): its host's other ports may be framed. */
-export function contentSecurityPolicy(origin?: string): string {
+export function contentSecurityPolicy(origin?: string, directOrigins: readonly string[] = []): string {
   let host: string | null = null;
   try {
     host = origin === undefined ? null : new URL(origin).hostname;
   } catch {
     host = null;
   }
-  if (host === null || !FRAMEABLE_HOST.test(host)) return CONTENT_SECURITY_POLICY;
-  return CSP_DIRECTIVES.map((directive) => directive === "frame-src 'self'" ? `frame-src 'self' http://${host}:* https://${host}:*` : directive).join("; ");
+  const connections = [...new Set(directOrigins.map((value) => normalizeDirectOrigin(value)))].flatMap((value) => [value, value.replace(/^http/, "ws")]);
+  return CSP_DIRECTIVES.map((directive) => {
+    if (directive === "connect-src 'self'" && connections.length) return `${directive} ${connections.join(" ")}`;
+    if (directive === "frame-src 'self'" && host !== null && FRAMEABLE_HOST.test(host)) return `frame-src 'self' http://${host}:* https://${host}:*`;
+    return directive;
+  }).join("; ");
 }
 
 /**
@@ -137,9 +142,9 @@ export function contentSecurityPolicy(origin?: string): string {
  *   logs what the policy would have blocked and the app keeps working. `report-only` is the
  *   measurement mode; anything else enforces.
  */
-function cspHeader(origin?: string): Record<string, string> {
+function cspHeader(origin?: string, directOrigins: readonly string[] = []): Record<string, string> {
   const mode = process.env["OVIS_CSP"];
-  const policy = contentSecurityPolicy(origin);
+  const policy = contentSecurityPolicy(origin, directOrigins);
   return mode === "report-only"
     ? { "content-security-policy-report-only": policy }
     : { "content-security-policy": policy };
@@ -219,7 +224,7 @@ function encodings(header: string | null | undefined): Array<"br" | "gzip" | "id
 }
 
 /** `origin` is what requestOrigin answers; a caller that has no request (a QA script) may leave it out. */
-export async function serveStatic(pathname: string, acceptEncoding?: string | null, origin?: string): Promise<Response> {
+export async function serveStatic(pathname: string, acceptEncoding?: string | null, origin?: string, directOrigins: readonly string[] = []): Promise<Response> {
   const indexPath = join(DIST_DIR, "index.html");
   if (!existsSync(indexPath)) {
     return new Response(
@@ -245,7 +250,7 @@ export async function serveStatic(pathname: string, acceptEncoding?: string | nu
       }
       const kind = pathname === "/manifest.webmanifest" ? "manifest" : candidate === indexPath ? "shell" : null;
       return new Response(await body(file, kind, origin), {
-        headers: { "content-type": contentTypeFor(candidate), "cache-control": cacheControlFor(pathname), ...cspHeader(origin) },
+        headers: { "content-type": contentTypeFor(candidate), "cache-control": cacheControlFor(pathname), ...cspHeader(origin, directOrigins) },
       });
     }
   }
@@ -255,6 +260,6 @@ export async function serveStatic(pathname: string, acceptEncoding?: string | nu
     return new Response(null, { status: 404, headers: { "cache-control": REVALIDATE, ...cspHeader() } });
   }
   return new Response(await body(Bun.file(indexPath), "shell"), {
-    headers: { "content-type": "text/html; charset=utf-8", "cache-control": REVALIDATE, ...cspHeader(origin) },
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": REVALIDATE, ...cspHeader(origin, directOrigins) },
   });
 }

@@ -16,7 +16,7 @@ import { paneContext, resolveAgent } from "./pane-context.ts";
 import { findProjectFavicon } from "./project-favicon.ts";
 
 /** Who asks, as the dispatcher's access gate worked it out. */
-export interface FileRequester { bridgeAuthorized: boolean; requestHost: string | null; forwarded: boolean; client: string | null; access: Access }
+export interface FileRequester { bridgeAuthorized: boolean; directAuthorized?: boolean; requestHost: string | null; forwarded: boolean; client: string | null; access: Access }
 
 /** The temp folder of the Claude Code session in a pane, or null when the pane runs none or it has none. */
 async function claudeTempFolder(paneId: string): Promise<string | null> {
@@ -29,11 +29,11 @@ async function claudeTempFolder(paneId: string): Promise<string | null> {
 }
 
 /** The answer for a file route, or null when the path is not one. */
-export async function handleFileRequest(request: Request, url: URL, pathname: string, { bridgeAuthorized, requestHost, forwarded, client, access }: FileRequester): Promise<Response | null> {
+export async function handleFileRequest(request: Request, url: URL, pathname: string, { bridgeAuthorized, directAuthorized, requestHost, forwarded, client, access }: FileRequester): Promise<Response | null> {
   if (pathname === "/api/fs/stat" || pathname === "/api/fs/file" || pathname === "/api/fs/favicon") {
     setRequestRoute(pathname);
     if (request.method !== "GET" && request.method !== "HEAD") return badRequest("method_not_allowed", "use GET");
-    if (crossSiteFileRead(request)) return jsonResponse({ error: { code: "cross_site", message: "A file is read from this app or opened in a tab, not loaded by another page" } }, 403);
+    if (!directAuthorized && crossSiteFileRead(request)) return jsonResponse({ error: { code: "cross_site", message: "A file is read from this app or opened in a tab, not loaded by another page" } }, 403);
     // a folder's project icon: every place it may be kept, in one answer that a miss is part of
     if (pathname === "/api/fs/favicon") {
       const root = url.searchParams.get("root") ?? "";

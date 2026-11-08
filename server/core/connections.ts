@@ -17,6 +17,8 @@ export interface SocketData {
   deviceId?: string;
   readOnly?: boolean;
   relay?: MachineRelay;
+  /** A direct bridge connection belongs to a manager-issued, revocable trust lease. */
+  directRevoke?: (close: () => void) => () => void;
   /** this connection's id, told to its page in the first snapshot: a create request names it as its first message's typist */
   connectionId: string;
   /** A fresh claim per attach lifetime; deleting it invalidates queued terminal keys. */
@@ -46,7 +48,7 @@ function stateOf(client: Client): ConnectionState {
 }
 
 /** The data for a connection's upgrade: it starts to interact unless its access is read-only. */
-export function connectionData(fields: { relay?: MachineRelay; deviceId: string | undefined; readOnly: boolean }): SocketData {
+export function connectionData(fields: { relay?: MachineRelay; deviceId: string | undefined; readOnly: boolean; directRevoke?: (close: () => void) => () => void }): SocketData {
   const data: SocketData = { connectionId: crypto.randomUUID(), attached: new Map<string, { keepSize: boolean }>(), conversationInterests: new Set<string>(), output: new Map(), ...fields };
   states.set(data, { closing: false, revoked: false, mode: fields.readOnly ? "observe" : "interact", roles: 0, watches: new Map<string, PaneWatch>() });
   return data;
@@ -119,7 +121,10 @@ export function createConnections({ clients, present, pending, devices, detachCl
   /** Ends the connection when its device is revoked, at once for one revoked already: then it is not admitted. */
   function admit(client: Client): boolean {
     const state = stateOf(client);
-    if (client.data.deviceId) {
+    if (client.data.directRevoke) {
+      state.unwatchDevice = client.data.directRevoke(() => end(client, "revoked"));
+      if (state.revoked) return false;
+    } else if (client.data.deviceId) {
       state.unwatchDevice = devices.onRevoke(client.data.deviceId, () => end(client, "revoked"));
       if (state.revoked) return false;
     }
