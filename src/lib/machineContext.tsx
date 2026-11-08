@@ -46,7 +46,7 @@ export function useMachineApi() {
     clearPane: (pane: string) => api.clearPane(pane, id),
     renameWorkspace: (workspace: string, label: string) => api.renameWorkspace(workspace, label, id),
     moveWorkspace: (workspace: string, index: number) => api.moveWorkspace(workspace, index, id),
-    fetchAgentKinds: () => api.fetchAgentKinds(id),
+    fetchAgentKinds: (onCapabilities?: Parameters<typeof api.fetchAgentKinds>[1], configuredKinds?: readonly string[]) => api.fetchAgentKinds(id, onCapabilities, configuredKinds),
     fetchIntegrations: () => api.fetchIntegrations(id),
     fetchDirectories: (path: string, hidden: boolean, files = false, pane: string | null = null) => api.fetchDirectories(path, hidden, id, files, pane),
     createDirectory: (path: string, name: string) => api.createDirectory(path, name, id),

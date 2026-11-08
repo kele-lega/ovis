@@ -31,8 +31,6 @@ export class PreferenceStore {
   private unsettled = true;
   /** As `unsettled`, for muted-panes.json. */
   private mutesUnsettled = true;
-  /** Deferred launch settings stay on disk for rollback, never in this release's API or launcher. */
-  private deferredCommands: { value: unknown } | undefined;
 
   constructor(stateDir: string) {
     this.path = join(stateDir, "preferences.json");
@@ -66,15 +64,13 @@ export class PreferenceStore {
   /** The document on disk: undefined when there is none, null when it is damaged. Throws when it cannot be read. */
   private readDisk(): SharedPreferences | null | undefined {
     const read = readStateDocument(this.path);
-    if (read.kind === "missing") { this.deferredCommands = undefined; return undefined; }
+    if (read.kind === "missing") return undefined;
     const parsed = read.kind === "json" ? read.value : undefined;
     const body = sharedPreferencesBody(parsed);
     if (body === null) {
       console.error(`${this.path} is ${read.kind === "malformed" ? "not JSON" : "not a preferences document"}; the next change keeps it as ${damagedCopy(this.path)}`);
       return null;
     }
-    const settings = isJsonObject(parsed) && isJsonObject(parsed["settings"]) ? parsed["settings"] : {};
-    this.deferredCommands = Object.hasOwn(settings, "agentCommands") ? { value: settings["agentCommands"] } : undefined;
     const revision = isJsonObject(parsed) && Number.isSafeInteger(parsed["revision"]) ? parsed["revision"] as number : 0;
     // the mutes are muted-panes.json's (readMutes): what this document holds of them is left out
     return { revision: Math.max(0, revision), settings: body.settings, ...(body.pins === undefined ? {} : { pins: body.pins }), muted_panes: this.current.muted_panes };
@@ -84,9 +80,7 @@ export class PreferenceStore {
 
   private diskDocument(preferences: SharedPreferences): { revision: number; settings: Record<string, unknown>; pins?: string[] } {
     const { muted_panes: _muted, ...document } = preferences;
-    return this.deferredCommands === undefined ? document : {
-      ...document, settings: { ...document.settings, agentCommands: this.deferredCommands.value },
-    };
+    return document;
   }
 
   set(change: PreferencesChange): SharedPreferences {
@@ -150,9 +144,6 @@ export async function handlePreferencesRequest(request: Request, store: Preferen
   try { raw = JSON.parse(text); } catch { return badRequest("invalid_json", "The body is not JSON"); }
   const body = sharedPreferencesBody(raw);
   if (body === null) return badRequest("invalid_body", "Send { settings: object, pins?: string[], muted_panes?: string[] }");
-  if (isJsonObject(raw) && isJsonObject(raw["settings"]) && Object.hasOwn(raw["settings"], "agentCommands")) {
-    return reply({ error: { code: "unsupported_setting", message: "Custom agent commands are read-only in this release; reload Ovis before saving settings" } }, 400);
-  }
   try { return reply(store.set(body)); }
   catch (error) {
     if (error instanceof PreferencesTooLarge) return tooLarge();

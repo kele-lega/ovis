@@ -275,6 +275,25 @@
   min-width: 0;
 }
 
+/* Full launch commands use the same stacked text-field/actions pattern as Quick replies and Voice. */
+.launch-command-field,
+.launch-command-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.launch-command-editor .input {
+  width: 100%;
+  min-width: 0;
+  font-family: var(--font-mono);
+}
+
+.launch-command-error {
+  color: var(--danger-text);
+}
+
 /* Voice input: the key field and its buttons share a row, the notes stay dim */
 .voice-key {
   display: flex;

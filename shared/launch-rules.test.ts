@@ -1,6 +1,28 @@
 import { describe, expect, it } from "bun:test";
 
-import { firstMessageFault, launchArgsFault, MODEL_NAME } from "./launch-rules.ts";
+import { firstMessageFault, launchArgsFault, launchCommandFault, MAX_LAUNCH_COMMAND_CHARS, MODEL_NAME } from "./launch-rules.ts";
+
+describe("a custom launch command", () => {
+  it("takes an entire command, preserving whitespace, shell syntax and Unicode", () => {
+    for (const command of ["claude", "  MY_CONFIG='a b' wrapper --model two words  ", "cd '/a b' && my-agent | tee /tmp/output", "echo '안녕 世界'", "x".repeat(MAX_LAUNCH_COMMAND_CHARS)]) {
+      expect(launchCommandFault(command), command).toBeNull();
+    }
+  });
+
+  it("requires nonblank text of at most 2000 characters", () => {
+    for (const command of [undefined, null, false, 42, [], {}]) expect(launchCommandFault(command)).toContain("must be a string");
+    for (const command of ["", " ", " ", "x".repeat(MAX_LAUNCH_COMMAND_CHARS + 1)]) expect(launchCommandFault(command)).toContain("must contain text");
+  });
+
+  it("refuses every C0/C1 control, DEL, and Unicode line/paragraph separators", () => {
+    const codes = [...Array.from({ length: 32 }, (_, index) => index), ...Array.from({ length: 33 }, (_, index) => index + 0x7f), 0x2028, 0x2029];
+    for (const code of codes) {
+      expect(launchCommandFault(`echo a${String.fromCodePoint(code)}echo b`), `U+${code.toString(16)}`).toContain("single line");
+    }
+    expect(launchCommandFault("claude\n")).toContain("single line");
+    expect(launchCommandFault("claude\r\n")).toContain("single line");
+  });
+});
 
 describe("an agent's launch arguments", () => {
   it("refuses a control character in any argument, a tab and a line break included", () => {

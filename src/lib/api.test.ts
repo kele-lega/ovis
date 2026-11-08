@@ -59,6 +59,23 @@ it("offers Copilot from an older remote bridge without installation metadata", a
   expect(requests).toEqual(["/api/machines/remote-pc/agents"]);
 });
 
+it("reports the target PC's explicit command capability and keeps configured executable paths available", async () => {
+  const claude = { kind: "claude", label: "Claude Code", installed: false };
+  const unknown = { kind: "unknown", label: "Unknown", installed: false };
+  const capabilities: { launch_command?: boolean }[] = [];
+  let launch_command: unknown = true;
+  globalThis.fetch = (async (url: string) => url.endsWith("/direct-access") ? Response.json({}, { status: 404 })
+    : Response.json({ agents: [claude, unknown], ...(launch_command === undefined ? {} : { launch_command }) })) as typeof fetch;
+  const report = (value: { launch_command?: boolean }) => { capabilities.push(value); };
+
+  expect(await fetchAgentKinds("suzhou", report, ["claude", "unknown"])).toEqual([claude]);
+  launch_command = undefined;
+  expect(await fetchAgentKinds("older-pc", report)).toEqual([]);
+  launch_command = "true";
+  await fetchAgentKinds("invalid-pc", report);
+  expect(capabilities).toEqual([{ launch_command: true }, { launch_command: false }, { launch_command: false }]);
+});
+
 it("refuses a file over the attachment limit before any of it is sent, and sends one at the limit", async () => {
   const requests: string[] = [];
   globalThis.fetch = (async (url: string) => {

@@ -37,6 +37,10 @@ const ROOTS: Record<string, string[]> = {
   request: [
     "AgentStartParams",
     "AgentTarget",
+    "WorkspaceCreateWithCommandParams",
+    "TabCreateWithCommandParams",
+    "WorktreeCreateWithCommandParams",
+    "WorktreeOpenWithCommandParams",
     "PaneProcessInfoParams",
     "PaneReadParams",
     "PaneSendTextParams",

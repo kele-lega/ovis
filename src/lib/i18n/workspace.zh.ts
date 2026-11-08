@@ -89,4 +89,7 @@ export const WORKSPACE_ZH: Record<string, string> = {
   "The folder could not be made.": "无法创建文件夹。",
   "Tab name (optional)": "标签页名称（可选）",
   "Uses the workspace's folder": "直接使用工作区的文件夹",
+  "Custom command": "自定义命令",
+  "Uses the saved custom command for {agent}. Permission, model and effort settings are not added. Resume is unchanged.": "使用已保存的 {agent} 自定义命令，不会附加权限、模型或推理强度设置。不影响继续会话。",
+  "This PC has not confirmed atomic custom launch support. Use a compatible Ovis bridge and running Herdr, or clear this agent's command in Settings > Chat. Nothing will start.": "这台 PC 尚未确认支持原子式自定义启动。请使用兼容的 Ovis 桥接及正在运行的 Herdr，或在设置 > 聊天中清除此代理的命令。不会启动任何内容。",
 };

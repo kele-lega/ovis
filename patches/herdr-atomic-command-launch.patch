@@ -1,0 +1,1858 @@
+diff --git a/docs/next/api/herdr-api.schema.json b/docs/next/api/herdr-api.schema.json
+index e2553f75..e17db29d 100644
+--- a/docs/next/api/herdr-api.schema.json
++++ b/docs/next/api/herdr-api.schema.json
+@@ -4303,6 +4303,46 @@
+           },
+           "type": "object"
+         },
++        "TabCreateWithCommandParams": {
++          "description": "Atomic, creation-only launch; never persisted or replayed on restore.",
++          "properties": {
++            "command": {
++              "type": "string"
++            },
++            "cwd": {
++              "type": [
++                "string",
++                "null"
++              ]
++            },
++            "env": {
++              "additionalProperties": {
++                "type": "string"
++              },
++              "type": "object"
++            },
++            "focus": {
++              "default": false,
++              "type": "boolean"
++            },
++            "label": {
++              "type": [
++                "string",
++                "null"
++              ]
++            },
++            "workspace_id": {
++              "type": [
++                "string",
++                "null"
++              ]
++            }
++          },
++          "required": [
++            "command"
++          ],
++          "type": "object"
++        },
+         "TabListParams": {
+           "properties": {
+             "workspace_id": {
+@@ -4414,6 +4454,47 @@
+           },
+           "type": "object"
+         },
++        "WorkspaceCreateWithCommandParams": {
++          "description": "Atomic, creation-only launch; never persisted or replayed on restore.",
++          "properties": {
++            "command": {
++              "type": "string"
++            },
++            "cwd": {
++              "type": [
++                "string",
++                "null"
++              ]
++            },
++            "env": {
++              "additionalProperties": {
++                "type": "string"
++              },
++              "type": "object"
++            },
++            "focus": {
++              "default": false,
++              "type": "boolean"
++            },
++            "label": {
++              "type": [
++                "string",
++                "null"
++              ]
++            },
++            "source_workspace_id": {
++              "description": "Workspace whose focused pane supplies the `follow` cwd policy.",
++              "type": [
++                "string",
++                "null"
++              ]
++            }
++          },
++          "required": [
++            "command"
++          ],
++          "type": "object"
++        },
+         "WorkspaceMoveBlockParams": {
+           "properties": {
+             "before_workspace_id": {
+@@ -4598,6 +4679,61 @@
+           },
+           "type": "object"
+         },
++        "WorktreeCreateWithCommandParams": {
++          "description": "Atomic, creation-only launch; never persisted or replayed on restore.",
++          "properties": {
++            "base": {
++              "type": [
++                "string",
++                "null"
++              ]
++            },
++            "branch": {
++              "type": [
++                "string",
++                "null"
++              ]
++            },
++            "command": {
++              "type": "string"
++            },
++            "cwd": {
++              "type": [
++                "string",
++                "null"
++              ]
++            },
++            "focus": {
++              "default": false,
++              "type": "boolean"
++            },
++            "label": {
++              "type": [
++                "string",
++                "null"
++              ]
++            },
++            "path": {
++              "type": [
++                "string",
++                "null"
++              ]
++            },
++            "trust_repository": {
++              "type": "boolean"
++            },
++            "workspace_id": {
++              "type": [
++                "string",
++                "null"
++              ]
++            }
++          },
++          "required": [
++            "command"
++          ],
++          "type": "object"
++        },
+         "WorktreeListParams": {
+           "properties": {
+             "cwd": {
+@@ -4660,6 +4796,55 @@
+           },
+           "type": "object"
+         },
++        "WorktreeOpenWithCommandParams": {
++          "description": "Atomic, creation-only launch; never persisted or replayed on restore.",
++          "properties": {
++            "branch": {
++              "type": [
++                "string",
++                "null"
++              ]
++            },
++            "command": {
++              "type": "string"
++            },
++            "cwd": {
++              "type": [
++                "string",
++                "null"
++              ]
++            },
++            "focus": {
++              "default": false,
++              "type": "boolean"
++            },
++            "label": {
++              "type": [
++                "string",
++                "null"
++              ]
++            },
++            "path": {
++              "type": [
++                "string",
++                "null"
++              ]
++            },
++            "trust_repository": {
++              "type": "boolean"
++            },
++            "workspace_id": {
++              "type": [
++                "string",
++                "null"
++              ]
++            }
++          },
++          "required": [
++            "command"
++          ],
++          "type": "object"
++        },
+         "WorktreeRemoveParams": {
+           "properties": {
+             "force": {
+@@ -6312,6 +6497,70 @@
+             "params"
+           ],
+           "type": "object"
++        },
++        {
++          "properties": {
++            "method": {
++              "const": "workspace.create_with_command",
++              "type": "string"
++            },
++            "params": {
++              "$ref": "#/schemas/request/$defs/WorkspaceCreateWithCommandParams"
++            }
++          },
++          "required": [
++            "method",
++            "params"
++          ],
++          "type": "object"
++        },
++        {
++          "properties": {
++            "method": {
++              "const": "tab.create_with_command",
++              "type": "string"
++            },
++            "params": {
++              "$ref": "#/schemas/request/$defs/TabCreateWithCommandParams"
++            }
++          },
++          "required": [
++            "method",
++            "params"
++          ],
++          "type": "object"
++        },
++        {
++          "properties": {
++            "method": {
++              "const": "worktree.create_with_command",
++              "type": "string"
++            },
++            "params": {
++              "$ref": "#/schemas/request/$defs/WorktreeCreateWithCommandParams"
++            }
++          },
++          "required": [
++            "method",
++            "params"
++          ],
++          "type": "object"
++        },
++        {
++          "properties": {
++            "method": {
++              "const": "worktree.open_with_command",
++              "type": "string"
++            },
++            "params": {
++              "$ref": "#/schemas/request/$defs/WorktreeOpenWithCommandParams"
++            }
++          },
++          "required": [
++            "method",
++            "params"
++          ],
++          "type": "object"
+         }
+       ],
+       "properties": {
+diff --git a/src/api/schema.rs b/src/api/schema.rs
+index 8077377e..4220fdb9 100644
+--- a/src/api/schema.rs
++++ b/src/api/schema.rs
+@@ -145,6 +145,42 @@ operations::define_operations! {
+     PluginPaneOpen(PluginPaneOpenParams) => "plugin.pane.open", true, false;
+     PluginPaneFocus(PluginPaneFocusParams) => "plugin.pane.focus", true, false;
+     PluginPaneClose(PluginPaneCloseParams) => "plugin.pane.close", true, false;
++    WorkspaceCreateWithCommand(WorkspaceCreateWithCommandParams) => "workspace.create_with_command", true, true;
++    TabCreateWithCommand(TabCreateWithCommandParams) => "tab.create_with_command", true, true;
++    WorktreeCreateWithCommand(WorktreeCreateWithCommandParams) => "worktree.create_with_command", true, true;
++    WorktreeOpenWithCommand(WorktreeOpenWithCommandParams) => "worktree.open_with_command", true, true;
++}
++
++/// Atomic, creation-only launch; never persisted or replayed on restore.
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
++pub struct WorkspaceCreateWithCommandParams {
++    #[serde(flatten)]
++    pub create: WorkspaceCreateParams,
++    pub command: String,
++}
++
++/// Atomic, creation-only launch; never persisted or replayed on restore.
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
++pub struct TabCreateWithCommandParams {
++    #[serde(flatten)]
++    pub create: TabCreateParams,
++    pub command: String,
++}
++
++/// Atomic, creation-only launch; never persisted or replayed on restore.
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
++pub struct WorktreeCreateWithCommandParams {
++    #[serde(flatten)]
++    pub create: WorktreeCreateParams,
++    pub command: String,
++}
++
++/// Atomic, creation-only launch; never persisted or replayed on restore.
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
++pub struct WorktreeOpenWithCommandParams {
++    #[serde(flatten)]
++    pub create: WorktreeOpenParams,
++    pub command: String,
+ }
+ 
+ #[cfg(test)]
+diff --git a/src/api/schema/operations.rs b/src/api/schema/operations.rs
+index a25de9ab..88ea41cf 100644
+--- a/src/api/schema/operations.rs
++++ b/src/api/schema/operations.rs
+@@ -47,6 +47,9 @@ pub(crate) fn client_shell_method_names() -> &'static [&'static str] {
+         let mut names: Vec<_> = super::Method::OPERATIONS
+             .iter()
+             .filter(|operation| operation.client_shell)
++            .filter(|operation| {
++                !operation.name.ends_with("_with_command") || crate::pane::launch_command::SUPPORTED
++            })
+             .map(|operation| operation.name)
+             .collect();
+         names.sort_unstable();
+@@ -139,10 +142,12 @@ mod tests {
+             assert_eq!(
+                 crate::server::client_commands::supports_client_shell_method(&request.method),
+                 operation.client_shell
++                    && (!name.ends_with("_with_command") || crate::pane::launch_command::SUPPORTED)
+             );
+             assert_eq!(
+                 crate::server::client_commands::supports_client_shell_method_name(name),
+                 operation.client_shell
++                    && (!name.ends_with("_with_command") || crate::pane::launch_command::SUPPORTED)
+             );
+         }
+     }
+@@ -157,6 +162,10 @@ mod tests {
+             "release_notes.dismiss",
+             "command.invoke",
+             "workspace.create",
++            "workspace.create_with_command",
++            "tab.create_with_command",
++            "worktree.create_with_command",
++            "worktree.open_with_command",
+             "workspace.focus",
+             "workspace.rename",
+             "workspace.move",
+diff --git a/src/api/schema/tests.rs b/src/api/schema/tests.rs
+index 7ad3cbd4..be8f2dd0 100644
+--- a/src/api/schema/tests.rs
++++ b/src/api/schema/tests.rs
+@@ -1465,3 +1465,25 @@ fn read_choices_cover_every_api_value() {
+     crate::cli::projection::assert_choices_cover_api_enum(READ_SOURCES);
+     crate::cli::projection::assert_choices_cover_api_enum(READ_FORMATS);
+ }
++
++#[test]
++fn atomic_command_launch_methods_require_command_and_preserve_exact_text() {
++    for method in [
++        "workspace.create_with_command",
++        "tab.create_with_command",
++        "worktree.create_with_command",
++        "worktree.open_with_command",
++    ] {
++        assert!(serde_json::from_value::<Request>(
++            serde_json::json!({"id":"launch","method":method,"params":{}})
++        )
++        .is_err());
++        let command = "  SOME_VAR='literal spaces' env ; echo done  ";
++        let value = serde_json::json!({"id":"launch","method":method,"params":{"command":command,"focus":false}});
++        let request: Request = serde_json::from_value(value).unwrap();
++        assert_eq!(
++            serde_json::to_value(request).unwrap()["params"]["command"],
++            command
++        );
++    }
++}
+diff --git a/src/api/server.rs b/src/api/server.rs
+index f59ba0eb..99be964d 100644
+--- a/src/api/server.rs
++++ b/src/api/server.rs
+@@ -557,7 +557,7 @@ fn handle_request(
+     response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
+ ) -> String {
+     if matches!(&request.method, Method::Ping(_)) {
+-        return serde_json::to_string(&SuccessResponse {
++        return serde_json::to_value(&SuccessResponse {
+             id: request.id,
+             result: ResponseResult::Pong {
+                 version: crate::build_info::version(),
+@@ -565,6 +565,16 @@ fn handle_request(
+                 capabilities,
+             },
+         })
++        .and_then(|mut value| {
++            // JSON-only additive discovery: ServerCapabilities is also reachable
++            // from frozen binary codecs, whose field layout must not change.
++            if value["result"]["capabilities"].is_null() {
++                value["result"]["capabilities"] = serde_json::json!({});
++            }
++            value["result"]["capabilities"]["atomic_command_launch"] =
++                serde_json::json!(crate::pane::launch_command::SUPPORTED);
++            serde_json::to_string(&value)
++        })
+         .unwrap_or_else(|_| {
+             r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
+                 .to_string()
+@@ -1406,6 +1416,32 @@ mod tests {
+         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
+         assert_eq!(parsed.id, "req_1");
+         assert!(matches!(parsed.result, ResponseResult::Pong { .. }));
++        let json: serde_json::Value = serde_json::from_str(&response).unwrap();
++        assert_eq!(
++            json["result"]["capabilities"]["atomic_command_launch"],
++            crate::pane::launch_command::SUPPORTED
++        );
++    }
++
++    #[test]
++    fn atomic_command_launch_ping_advertises_without_legacy_capabilities() {
++        let (tx, _rx) = mpsc::unbounded_channel();
++        let response = handle_request(
++            Request {
++                id: "launch-discovery".into(),
++                method: Method::Ping(Default::default()),
++            },
++            &tx,
++            None,
++            None,
++            None,
++            None,
++        );
++        let json: serde_json::Value = serde_json::from_str(&response).unwrap();
++        assert_eq!(
++            json["result"]["capabilities"]["atomic_command_launch"],
++            crate::pane::launch_command::SUPPORTED
++        );
+     }
+ 
+     #[test]
+diff --git a/src/app/api.rs b/src/app/api.rs
+index 067ec2fa..b616b103 100644
+--- a/src/app/api.rs
++++ b/src/app/api.rs
+@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
+ 
+ mod agent_view;
+ mod agents;
++mod command_launch;
+ mod env;
+ mod integrations;
+ mod layouts;
+@@ -22,6 +23,7 @@ const WINDOWS_POWERSHELL_AGENT_EXIT_RESPAWN_GRACE: Duration = Duration::from_sec
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ enum RuntimeExitAction {
++    RetainPane,
+     RespawnShell,
+     ClosePane,
+ }
+@@ -42,6 +44,7 @@ impl App {
+                 let changes_workspace = matches!(
+                     &result.request.method,
+                     crate::api::schema::Method::WorktreeOpen(_)
++                        | crate::api::schema::Method::WorktreeOpenWithCommand(_)
+                 );
+                 self.handle_api_worktree_read_finished(*result);
+                 changes_workspace
+@@ -256,6 +259,24 @@ impl App {
+                     self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
+                     self.emit_pane_state_update(&update);
+                 }
++                if self.runtime_exit_action(*pane_id) == RuntimeExitAction::RetainPane {
++                    // Keep the completed command's screen/runtime readable. Do not
++                    // respawn any process or pass PaneDied to the close-pane path.
++                    if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
++                        if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
++                            self.emit_event(crate::api::schema::EventEnvelope {
++                                event: crate::api::schema::EventKind::PaneExited,
++                                data: crate::api::schema::EventData::PaneExited {
++                                    pane_id: public_pane_id,
++                                    workspace_id: self.public_workspace_id(ws_idx),
++                                },
++                            });
++                        }
++                    }
++                    self.render_dirty.request_generic();
++                    self.render_notify.notify_one();
++                    return worktree_restore_updates;
++                }
+                 if self.runtime_exit_action(*pane_id) == RuntimeExitAction::RespawnShell
+                     && self.respawn_shell_for_launch_pane(*pane_id, true)
+                 {
+@@ -546,7 +567,11 @@ impl App {
+             return RuntimeExitAction::ClosePane;
+         };
+ 
+-        if terminal.respawn_shell_on_exit || self.should_respawn_shell_after_agent_exit(terminal) {
++        if terminal.retain_on_exit {
++            RuntimeExitAction::RetainPane
++        } else if terminal.respawn_shell_on_exit
++            || self.should_respawn_shell_after_agent_exit(terminal)
++        {
+             RuntimeExitAction::RespawnShell
+         } else {
+             RuntimeExitAction::ClosePane
+@@ -1067,6 +1092,19 @@ impl App {
+             Method::WorkspaceCreate(params) => {
+                 return self.handle_workspace_create(request.id, params);
+             }
++            Method::WorkspaceCreateWithCommand(params) => {
++                let command = match command_launch::validate(params.command) {
++                    Ok(command) => command,
++                    Err((code, message)) => {
++                        return responses::encode_error(request.id, code, message)
++                    }
++                };
++                return self.handle_workspace_create_command(
++                    request.id,
++                    params.create,
++                    Some(command),
++                );
++            }
+             Method::WorkspaceFocus(target) => {
+                 return self.handle_workspace_focus(request.id, target);
+             }
+@@ -1111,6 +1149,22 @@ impl App {
+             Method::TabList(params) => return self.handle_tab_list(request.id, params),
+             Method::TabGet(target) => return self.handle_tab_get(request.id, target),
+             Method::TabCreate(params) => return self.handle_tab_create(request.id, params),
++            Method::TabCreateWithCommand(params) => {
++                let command = match command_launch::validate(params.command) {
++                    Ok(command) => command,
++                    Err((code, message)) => {
++                        return responses::encode_error(request.id, code, message)
++                    }
++                };
++                return self.handle_tab_create_command(request.id, params.create, Some(command));
++            }
++            Method::WorktreeCreateWithCommand(_) | Method::WorktreeOpenWithCommand(_) => {
++                return responses::encode_error(
++                    request.id,
++                    "invalid_request",
++                    "command worktree operations require asynchronous app dispatch",
++                );
++            }
+             Method::TabFocus(target) => return self.handle_tab_focus(request.id, target),
+             Method::TabRename(params) => return self.handle_tab_rename(request.id, params),
+             Method::TabMove(params) => return self.handle_tab_move(request.id, params),
+diff --git a/src/app/api/command_launch.rs b/src/app/api/command_launch.rs
+new file mode 100644
+index 00000000..dda955fe
+--- /dev/null
++++ b/src/app/api/command_launch.rs
+@@ -0,0 +1,251 @@
++use crate::pane::launch_command::LaunchCommand;
++
++pub(super) fn validate(command: String) -> Result<LaunchCommand, (&'static str, String)> {
++    LaunchCommand::new(command).map_err(|err| {
++        let code = if err.kind() == std::io::ErrorKind::Unsupported {
++            "unsupported_platform"
++        } else {
++            "invalid_command"
++        };
++        (code, err.to_string())
++    })
++}
++
++#[cfg(all(test, unix))]
++mod tests {
++    use crate::api::schema::Request;
++    use crate::app::App;
++
++    fn app() -> App {
++        let (_, api_rx) = tokio::sync::mpsc::unbounded_channel();
++        let mut app = App::new(
++            &crate::config::Config::default(),
++            crate::app::AppPolicy::TEST,
++            None,
++            api_rx,
++            crate::api::EventHub::default(),
++        );
++        // A command launch must bypass this deliberately invalid default shell.
++        app.state.default_shell = "/missing-herdr-default-shell".into();
++        app
++    }
++
++    fn request(method: &str, params: serde_json::Value) -> Request {
++        serde_json::from_value(serde_json::json!({"id":"atomic","method":method,"params":params}))
++            .unwrap()
++    }
++
++    async fn wait_file(path: &std::path::Path) -> String {
++        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
++        loop {
++            if let Ok(text) = std::fs::read_to_string(path) {
++                if !text.is_empty() {
++                    return text;
++                }
++            }
++            assert!(std::time::Instant::now() < deadline, "command did not run");
++            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
++        }
++    }
++
++    #[tokio::test]
++    async fn atomic_command_launch_workspace_tab_spawn_and_restore_do_not_replay() {
++        let root = std::env::temp_dir().join(format!(
++            "herdr-atomic-{}-{}",
++            std::process::id(),
++            std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .unwrap()
++                .as_nanos()
++        ));
++        std::fs::create_dir_all(&root).unwrap();
++        let mut app = app();
++        for (method, file) in [
++            ("workspace.create_with_command", "workspace"),
++            ("tab.create_with_command", "tab"),
++        ] {
++            let command = format!("  test -t 0 && printf '%s|%s|%s' \"$LAUNCH_TEST\" \"$PWD\" \"$HERDR_PANE_ID\" > '{file}' ; sleep 30  ");
++            let response = app.handle_api_request(request(method, serde_json::json!({"cwd":root,"focus":true,"env":{"LAUNCH_TEST":"quoted value; literal"},"command":command})));
++            let value: serde_json::Value = serde_json::from_str(&response).unwrap();
++            assert!(value["error"].is_null(), "{response}");
++            assert!(app
++                .terminal_runtimes
++                .values()
++                .all(|runtime| runtime.child_pid().is_some()));
++            let text = wait_file(&root.join(file)).await;
++            assert!(
++                text.starts_with(&format!("quoted value; literal|{}|", root.display())),
++                "{text}"
++            );
++            assert!(!text.ends_with('|'));
++        }
++        assert!(app
++            .state
++            .terminals
++            .values()
++            .all(|terminal| terminal.launch_argv.is_none()));
++        let snapshot = crate::persist::capture(
++            &app.state.workspaces,
++            &app.state.terminals,
++            &app.terminal_runtimes,
++            app.state.active,
++            app.state.selected,
++        );
++        let json = serde_json::to_string(&snapshot).unwrap();
++        assert!(!json.contains("LAUNCH_TEST") && !json.contains("sleep 30"));
++        super::super::test_support::shutdown_test_runtimes(&mut app);
++        std::fs::remove_file(root.join("workspace")).unwrap();
++        std::fs::remove_file(root.join("tab")).unwrap();
++        let (tx, _rx) = tokio::sync::mpsc::channel(32);
++        let (_, _, runtimes) = crate::persist::restore(
++            &snapshot,
++            None,
++            24,
++            80,
++            1024 * 1024,
++            "/usr/bin/true",
++            crate::config::ShellModeConfig::NonLogin,
++            false,
++            tx,
++            std::sync::Arc::new(tokio::sync::Notify::new()),
++            std::sync::Arc::new(crate::render_signal::RenderSignal::default()),
++        );
++        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
++        assert!(!root.join("workspace").exists() && !root.join("tab").exists());
++        for (_, runtime) in runtimes {
++            runtime.shutdown();
++        }
++        std::fs::remove_dir_all(root).unwrap();
++    }
++
++    #[tokio::test]
++    async fn atomic_command_launch_completed_panes_keep_output_without_replay() {
++        let root = std::env::temp_dir().join(format!(
++            "herdr-completed-{}-{}",
++            std::process::id(),
++            std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .unwrap()
++                .as_nanos()
++        ));
++        std::fs::create_dir_all(&root).unwrap();
++        let mut app = app();
++        for (method, ending) in [
++            ("workspace.create_with_command", "true"),
++            ("tab.create_with_command", "false"),
++            (
++                "tab.create_with_command",
++                "herdr_missing_executable_for_launch_test",
++            ),
++        ] {
++            let command = format!("printf x >> executions ; printf retained-output ; {ending}");
++            let response = app.handle_api_request_after_internal_events_drained(request(
++                method,
++                serde_json::json!({"cwd":root,"command":command}),
++            ));
++            assert!(
++                serde_json::from_str::<serde_json::Value>(&response).unwrap()["error"].is_null(),
++                "{response}"
++            );
++        }
++        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
++        let mut exits = 0;
++        while exits < 3 {
++            while let Ok(event) = app.event_rx.try_recv() {
++                if matches!(&event, crate::events::AppEvent::PaneDied { .. }) {
++                    exits += 1;
++                }
++                app.handle_internal_event(event);
++            }
++            assert!(std::time::Instant::now() < deadline);
++            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
++        }
++        assert_eq!(app.state.workspaces.len(), 1);
++        assert_eq!(app.state.workspaces[0].tabs.len(), 3);
++        assert_eq!(app.terminal_runtimes.len(), 3);
++        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
++        while !app.terminal_runtimes.values().all(|runtime| {
++            runtime
++                .recent_text_snapshot(40)
++                .text
++                .contains("retained-output")
++        }) {
++            assert!(std::time::Instant::now() < deadline);
++            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
++        }
++        assert!(app.terminal_runtimes.values().any(|runtime| runtime
++            .recent_text_snapshot(40)
++            .text
++            .contains("herdr_missing_executable_for_launch_test")));
++        assert_eq!(
++            std::fs::read_to_string(root.join("executions")).unwrap(),
++            "xxx"
++        );
++        assert!(app
++            .state
++            .terminals
++            .values()
++            .all(|terminal| terminal.retain_on_exit && terminal.launch_argv.is_none()));
++        let snapshot = crate::persist::capture(
++            &app.state.workspaces,
++            &app.state.terminals,
++            &app.terminal_runtimes,
++            app.state.active,
++            app.state.selected,
++        );
++        let json = serde_json::to_string(&snapshot).unwrap();
++        assert!(!json.contains("retain_on_exit") && !json.contains("printf x >> executions"));
++        super::super::test_support::shutdown_test_runtimes(&mut app);
++        let (tx, _rx) = tokio::sync::mpsc::channel(32);
++        let (_, terminals, runtimes) = crate::persist::restore(
++            &snapshot,
++            None,
++            24,
++            80,
++            1024 * 1024,
++            "/usr/bin/true",
++            crate::config::ShellModeConfig::NonLogin,
++            false,
++            tx,
++            std::sync::Arc::new(tokio::sync::Notify::new()),
++            std::sync::Arc::new(crate::render_signal::RenderSignal::default()),
++        );
++        assert!(terminals.values().all(|terminal| !terminal.retain_on_exit));
++        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
++        assert_eq!(
++            std::fs::read_to_string(root.join("executions")).unwrap(),
++            "xxx"
++        );
++        for (_, runtime) in runtimes {
++            runtime.shutdown();
++        }
++        std::fs::remove_dir_all(root).unwrap();
++    }
++
++    #[tokio::test]
++    async fn atomic_command_launch_invalid_requests_publish_nothing() {
++        let mut app = app();
++        for method in ["workspace.create_with_command", "tab.create_with_command"] {
++            for command in ["", "  ", "printf x\nexit", "x\u{2028}y"] {
++                let response =
++                    app.handle_api_request(request(method, serde_json::json!({"command":command})));
++                let value: serde_json::Value = serde_json::from_str(&response).unwrap();
++                assert_eq!(value["error"]["code"], "invalid_command");
++                assert!(app.state.workspaces.is_empty());
++                assert_eq!(app.terminal_runtimes.len(), 0);
++            }
++        }
++        let response = app.handle_api_request(request(
++            "workspace.create_with_command",
++            // portable-pty falls back to HOME for a nonexistent cwd. Make both
++            // paths nonexistent to force chdir failure without global overrides.
++            serde_json::json!({"command":"printf secret","cwd":"/missing-herdr-command-cwd","env":{"HOME":"/missing-herdr-command-home"}}),
++        ));
++        assert!(
++            serde_json::from_str::<serde_json::Value>(&response).unwrap()["error"].is_object(),
++            "{response}"
++        );
++        assert!(!response.contains("printf secret"));
++        assert!(app.state.workspaces.is_empty());
++    }
++}
+diff --git a/src/app/api/tabs.rs b/src/app/api/tabs.rs
+index 7c7fb76a..1230d033 100644
+--- a/src/app/api/tabs.rs
++++ b/src/app/api/tabs.rs
+@@ -45,6 +45,15 @@ impl App {
+     }
+ 
+     pub(super) fn handle_tab_create(&mut self, id: String, params: TabCreateParams) -> String {
++        self.handle_tab_create_command(id, params, None)
++    }
++
++    pub(super) fn handle_tab_create_command(
++        &mut self,
++        id: String,
++        params: TabCreateParams,
++        command: Option<crate::pane::launch_command::LaunchCommand>,
++    ) -> String {
+         let TabCreateParams {
+             workspace_id,
+             cwd,
+@@ -88,7 +97,7 @@ impl App {
+                     host_terminal_theme,
+                     host_terminal_appearance,
+                     crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
+-                    extra_env,
++                    crate::pane::PaneLaunchEnv::from_extra(extra_env).with_command(command),
+                 )
+             });
+         match result {
+diff --git a/src/app/api/workspaces.rs b/src/app/api/workspaces.rs
+index 10544bae..598f7890 100644
+--- a/src/app/api/workspaces.rs
++++ b/src/app/api/workspaces.rs
+@@ -40,6 +40,15 @@ impl App {
+         &mut self,
+         id: String,
+         params: WorkspaceCreateParams,
++    ) -> String {
++        self.handle_workspace_create_command(id, params, None)
++    }
++
++    pub(super) fn handle_workspace_create_command(
++        &mut self,
++        id: String,
++        params: WorkspaceCreateParams,
++        command: Option<crate::pane::launch_command::LaunchCommand>,
+     ) -> String {
+         let source_workspace_index = if params.cwd.is_some() {
+             None
+@@ -65,7 +74,8 @@ impl App {
+             Ok(env) => env,
+             Err((code, message)) => return encode_error(id, &code, message),
+         };
+-        match self.create_workspace_with_launch_env(cwd, params.focus, extra_env) {
++        let launch_env = crate::pane::PaneLaunchEnv::from_extra(extra_env).with_command(command);
++        match self.create_workspace_with_launch_env(cwd, params.focus, launch_env) {
+             Ok(index) => {
+                 if let Some(label) = params.label {
+                     if let Some(workspace) = self.state.workspaces.get_mut(index) {
+diff --git a/src/app/api/worktrees.rs b/src/app/api/worktrees.rs
+index be282c1c..991da75d 100644
+--- a/src/app/api/worktrees.rs
++++ b/src/app/api/worktrees.rs
+@@ -70,6 +70,7 @@ impl App {
+         &mut self,
+         id: String,
+         params: WorktreeOpenParams,
++        command: Option<crate::pane::launch_command::LaunchCommand>,
+         mut source: WorktreeSource,
+         entry: crate::worktree::ExistingWorktree,
+     ) -> String {
+@@ -92,9 +93,43 @@ impl App {
+         let canonical_source = crate::worktree::canonical_or_original(&source.source_checkout_path);
+         let target_is_source = canonical_path == canonical_source;
+         let already_open = self.open_workspace_idx_for_checkout(&canonical_path);
++        if command.is_some() && already_open.is_some() {
++            return encode_error(
++                id,
++                "command_target_already_open",
++                "worktree is already open; command was not launched",
++            );
++        }
+         let defer_source_created_event = target_is_source && already_open.is_none();
+-        let created_source_workspace =
+-            match self.ensure_source_parent_membership(&mut source, !defer_source_created_event) {
++        let command_for_target = if target_is_source {
++            None
++        } else {
++            command.clone()
++        };
++        let command_source_created = if target_is_source && command.is_some() {
++            let launch_env = crate::pane::PaneLaunchEnv::default().with_command(command);
++            match self.create_workspace_with_launch_env(
++                entry.path.clone(),
++                params.focus,
++                launch_env,
++            ) {
++                Ok(ws_idx) => {
++                    source.workspace_idx = Some(ws_idx);
++                    true
++                }
++                Err(_) => {
++                    return encode_error(
++                        id,
++                        "worktree_open_failed",
++                        "failed to spawn initial command",
++                    )
++                }
++            }
++        } else {
++            false
++        };
++        let created_source_workspace = command_source_created
++            | match self.ensure_source_parent_membership(&mut source, !defer_source_created_event) {
+                 Ok(created) => created,
+                 Err(err) => return encode_error(id, err.code, err.message),
+             };
+@@ -112,7 +147,11 @@ impl App {
+             }
+             (ws_idx, created_source_workspace)
+         } else {
+-            match self.create_workspace_with_options(entry.path.clone(), params.focus) {
++            match self.create_workspace_with_launch_env(
++                entry.path.clone(),
++                params.focus,
++                crate::pane::PaneLaunchEnv::default().with_command(command_for_target),
++            ) {
+                 Ok(ws_idx) => (ws_idx, true),
+                 Err(err) => return encode_error(id, "worktree_open_failed", err.to_string()),
+             }
+@@ -586,6 +625,9 @@ fn worktree_membership(
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++
++    #[cfg(unix)]
++    include!("worktrees/command_launch_tests.rs");
+     use std::time::{SystemTime, UNIX_EPOCH};
+ 
+     use crate::api::schema::{
+@@ -1149,6 +1191,7 @@ mod tests {
+                 repo_name: "herdr".into(),
+                 label: None,
+                 focus: false,
++                command: None,
+                 respond_to,
+             }),
+             result: Ok(()),
+diff --git a/src/app/api/worktrees/command_launch_tests.rs b/src/app/api/worktrees/command_launch_tests.rs
+new file mode 100644
+index 00000000..6ffb9255
+--- /dev/null
++++ b/src/app/api/worktrees/command_launch_tests.rs
+@@ -0,0 +1,141 @@
++fn run_command_request(app: &mut App, request: Request) -> String {
++    let (respond_to, response_rx) = response_channel();
++    assert!(app.handle_deferred_worktree_api_request(request, respond_to, false));
++    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
++    loop {
++        if let Ok(response) = response_rx.try_recv() {
++            return response;
++        }
++        if let Ok(event) = app.event_rx.try_recv() {
++            app.handle_internal_event(event);
++        }
++        assert!(
++            std::time::Instant::now() < deadline,
++            "command request timed out"
++        );
++        std::thread::sleep(std::time::Duration::from_millis(10));
++    }
++}
++
++#[tokio::test]
++#[cfg(unix)]
++async fn atomic_command_launch_worktree_create_and_open_use_initial_pty() {
++    let repo = create_committed_repo("atomic-worktree-repo");
++    let checkout = unique_temp_path("atomic-worktree-checkout");
++    let mut app = app_with_parent(&repo);
++    let command =
++        r#"test -t 0 && printf '%s|%s' "$PWD" "$HERDR_PANE_ID" > atomic-marker ; sleep 30"#;
++    let request: Request = serde_json::from_value(serde_json::json!({
++        "id":"command-create", "method":"worktree.create_with_command",
++        "params":{"cwd":repo,"branch":"atomic-command","path":checkout,"command":command}
++    }))
++    .unwrap();
++    let response = run_command_request(&mut app, request);
++    let success: SuccessResponse =
++        serde_json::from_str(&response).unwrap_or_else(|err| panic!("{err}: {response}"));
++    assert!(matches!(
++        success.result,
++        ResponseResult::WorktreeCreated { .. }
++    ));
++    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
++    while !std::fs::read_to_string(checkout.join("atomic-marker"))
++        .is_ok_and(|text| !text.is_empty())
++    {
++        assert!(std::time::Instant::now() < deadline);
++        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
++    }
++    let text = std::fs::read_to_string(checkout.join("atomic-marker")).unwrap();
++    assert!(
++        text.starts_with(&format!("{}|", checkout.display())),
++        "{text}"
++    );
++    assert!(!text.ends_with('|'));
++    super::super::test_support::shutdown_test_runtimes(&mut app);
++    drop(app);
++    std::fs::remove_file(checkout.join("atomic-marker")).unwrap();
++    let mut app = app_with_parent(&repo);
++    let open = || {
++        serde_json::from_value::<Request>(serde_json::json!({
++            "id":"command-open", "method":"worktree.open_with_command",
++            "params":{"cwd":repo,"path":checkout,"command":command}
++        }))
++        .unwrap()
++    };
++    let response = run_command_request(&mut app, open());
++    let success: SuccessResponse = serde_json::from_str(&response).unwrap();
++    assert!(matches!(
++        success.result,
++        ResponseResult::WorktreeOpened {
++            already_open: false,
++            ..
++        }
++    ));
++    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
++    while !std::fs::read_to_string(checkout.join("atomic-marker"))
++        .is_ok_and(|text| !text.is_empty())
++    {
++        assert!(std::time::Instant::now() < deadline);
++        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
++    }
++    let count = app.state.workspaces.len();
++    let active = app.state.active;
++    let response = run_command_request(&mut app, open());
++    let value: serde_json::Value = serde_json::from_str(&response).unwrap();
++    assert_eq!(value["error"]["code"], "command_target_already_open");
++    assert_eq!(app.state.workspaces.len(), count);
++    assert_eq!(app.state.active, active);
++    super::super::test_support::shutdown_test_runtimes(&mut app);
++    drop(app);
++    let _ = std::fs::remove_dir_all(checkout);
++    let _ = std::fs::remove_dir_all(repo);
++}
++
++#[tokio::test]
++#[cfg(unix)]
++async fn atomic_command_launch_worktree_invalid_is_precreate() {
++    let repo = create_committed_repo("atomic-invalid-repo");
++    let checkout = unique_temp_path("atomic-invalid-checkout");
++    let mut app = app_with_parent(&repo);
++    for method in ["worktree.create_with_command", "worktree.open_with_command"] {
++        let request: Request = serde_json::from_value(serde_json::json!({"id":"bad","method":method,"params":{"cwd":repo,"path":checkout,"command":"printf x\nexit"}})).unwrap();
++        let response = run_command_request(&mut app, request);
++        assert_eq!(
++            serde_json::from_str::<serde_json::Value>(&response).unwrap()["error"]["code"],
++            "invalid_command"
++        );
++        assert!(!checkout.exists());
++        assert_eq!(app.state.workspaces.len(), 1);
++        assert_eq!(app.terminal_runtimes.len(), 0);
++    }
++    let _ = std::fs::remove_dir_all(repo);
++}
++
++#[tokio::test]
++async fn atomic_command_launch_worktree_open_source_uses_command() {
++    let repo = create_committed_repo("atomic-source-open");
++    let mut app = test_app();
++    app.state.default_shell = "/missing-herdr-default-shell".into();
++    let request = serde_json::from_value(serde_json::json!({
++        "id":"source-command", "method":"worktree.open_with_command",
++        "params":{"cwd":repo,"path":repo,"command":"test -t 0 && printf launched > atomic-marker ; sleep 30"}
++    })).unwrap();
++    let response = run_command_request(&mut app, request);
++    assert!(
++        serde_json::from_str::<serde_json::Value>(&response).unwrap()["error"].is_null(),
++        "{response}"
++    );
++    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
++    while std::fs::read_to_string(repo.join("atomic-marker"))
++        .ok()
++        .as_deref()
++        != Some("launched")
++    {
++        assert!(std::time::Instant::now() < deadline);
++        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
++    }
++    assert_eq!(app.state.workspaces.len(), 1);
++    assert_eq!(app.terminal_runtimes.len(), 1);
++    super::super::test_support::shutdown_test_runtimes(&mut app);
++    drop(app);
++    let _ = std::fs::remove_dir_all(repo);
++}
+diff --git a/src/app/api/worktrees/deferred.rs b/src/app/api/worktrees/deferred.rs
+index c20aaec4..4aebf7b4 100644
+--- a/src/app/api/worktrees/deferred.rs
++++ b/src/app/api/worktrees/deferred.rs
+@@ -20,12 +20,39 @@ impl App {
+     ) -> bool {
+         match request.method {
+             crate::api::schema::Method::WorktreeList(_)
+-            | crate::api::schema::Method::WorktreeOpen(_) => {
++            | crate::api::schema::Method::WorktreeOpen(_)
++            | crate::api::schema::Method::WorktreeOpenWithCommand(_) => {
++                if let crate::api::schema::Method::WorktreeOpenWithCommand(params) = &request.method
++                {
++                    if let Err((code, message)) =
++                        super::super::command_launch::validate(params.command.clone())
++                    {
++                        Self::send_api_response(
++                            respond_to,
++                            encode_error(request.id, code, message),
++                        );
++                        return true;
++                    }
++                }
+                 self.start_api_worktree_read(request, respond_to, client_local);
+                 true
+             }
+             crate::api::schema::Method::WorktreeCreate(params) => {
+-                self.start_api_worktree_create(request.id, params, respond_to);
++                self.start_api_worktree_create(request.id, params, None, respond_to);
++                true
++            }
++            crate::api::schema::Method::WorktreeCreateWithCommand(params) => {
++                match super::super::command_launch::validate(params.command) {
++                    Ok(command) => self.start_api_worktree_create(
++                        request.id,
++                        params.create,
++                        Some(command),
++                        respond_to,
++                    ),
++                    Err((code, message)) => {
++                        Self::send_api_response(respond_to, encode_error(request.id, code, message))
++                    }
++                }
+                 true
+             }
+             crate::api::schema::Method::WorktreeRemove(params) => {
+@@ -101,6 +128,7 @@ impl App {
+         &mut self,
+         id: String,
+         params: WorktreeCreateParams,
++        command: Option<crate::pane::launch_command::LaunchCommand>,
+         respond_to: std::sync::mpsc::Sender<String>,
+     ) {
+         let branch = params
+@@ -188,6 +216,7 @@ impl App {
+             repo_name: source.repo_name,
+             label: params.label,
+             focus: params.focus,
++            command,
+             respond_to,
+         };
+         let source_checkout_path = api_request.source_checkout_path.clone();
+@@ -449,28 +478,42 @@ impl App {
+             return;
+         }
+ 
+-        let (ws_idx, created_workspace) =
+-            if let Some(ws_idx) = self.open_workspace_idx_for_checkout(&result.path) {
+-                if api.focus {
+-                    self.state.switch_workspace(ws_idx);
+-                }
+-                (ws_idx, false)
+-            } else {
+-                match self.create_workspace_with_options(result.path.clone(), api.focus) {
+-                    Ok(ws_idx) => (ws_idx, true),
+-                    Err(err) => {
+-                        Self::send_api_response(
+-                            api.respond_to,
+-                            encode_error(
+-                                api.id,
+-                                "worktree_open_failed",
+-                                format!("created worktree but failed to open workspace: {err}"),
+-                            ),
+-                        );
+-                        return;
+-                    }
++        let (ws_idx, created_workspace) = if let Some(ws_idx) =
++            self.open_workspace_idx_for_checkout(&result.path)
++        {
++            if api.command.is_some() {
++                Self::send_api_response(
++                    api.respond_to,
++                    encode_error(
++                        api.id,
++                        "command_target_already_open",
++                        "created worktree is already open; command was not launched",
++                    ),
++                );
++                return;
++            }
++            if api.focus {
++                self.state.switch_workspace(ws_idx);
++            }
++            (ws_idx, false)
++        } else {
++            let launch_env = crate::pane::PaneLaunchEnv::default().with_command(api.command);
++            match self.create_workspace_with_launch_env(result.path.clone(), api.focus, launch_env)
++            {
++                Ok(ws_idx) => (ws_idx, true),
++                Err(err) => {
++                    Self::send_api_response(
++                        api.respond_to,
++                        encode_error(
++                            api.id,
++                            "worktree_open_failed",
++                            format!("created worktree but failed to open workspace: {err}"),
++                        ),
++                    );
++                    return;
+                 }
+-            };
++            }
++        };
+ 
+         self.mark_worktree_membership(
+             &source,
+diff --git a/src/app/api/worktrees/reads.rs b/src/app/api/worktrees/reads.rs
+index aa032645..3fe348cb 100644
+--- a/src/app/api/worktrees/reads.rs
++++ b/src/app/api/worktrees/reads.rs
+@@ -147,7 +147,10 @@ impl App {
+                 true,
+                 params.trust_repository,
+             ),
+-            Method::WorktreeOpen(params) => {
++            Method::WorktreeOpen(params)
++            | Method::WorktreeOpenWithCommand(
++                crate::api::schema::WorktreeOpenWithCommandParams { create: params, .. },
++            ) => {
+                 if params.path.is_some() == params.branch.is_some() {
+                     let _ = respond_to.send(encode_error(
+                         request.id,
+@@ -197,7 +200,14 @@ impl App {
+                             trust_repository,
+                         )
+                         .map_err(|err| ApiFailure::new("worktree_list_failed", err))?;
+-                        if let Method::WorktreeOpen(params) = &request.method {
++                        if let Method::WorktreeOpen(params)
++                        | Method::WorktreeOpenWithCommand(
++                            crate::api::schema::WorktreeOpenWithCommandParams {
++                                create: params,
++                                ..
++                            },
++                        ) = &request.method
++                        {
+                             entries = vec![find_worktree_entry(
+                                 entries,
+                                 params.path.clone(),
+@@ -283,12 +293,28 @@ impl App {
+                     Method::WorktreeOpen(params) => self.finish_worktree_open(
+                         result.request.id,
+                         params,
++                        None,
+                         source,
+                         data.entries
+                             .into_iter()
+                             .next()
+                             .expect("open discovery selects one worktree"),
+                     ),
++                    Method::WorktreeOpenWithCommand(params) => {
++                        match super::super::command_launch::validate(params.command) {
++                            Ok(command) => self.finish_worktree_open(
++                                result.request.id,
++                                params.create,
++                                Some(command),
++                                source,
++                                data.entries
++                                    .into_iter()
++                                    .next()
++                                    .expect("open discovery selects one worktree"),
++                            ),
++                            Err((code, message)) => encode_error(result.request.id, code, message),
++                        }
++                    }
+                     _ => unreachable!("only worktree list/open use background discovery"),
+                 }
+             }
+diff --git a/src/app/creation.rs b/src/app/creation.rs
+index dde970cb..5ff15c8d 100644
+--- a/src/app/creation.rs
++++ b/src/app/creation.rs
+@@ -127,7 +127,7 @@ impl App {
+         &mut self,
+         initial_cwd: PathBuf,
+         focus: bool,
+-        extra_env: Vec<(String, String)>,
++        launch_env: impl Into<crate::pane::PaneLaunchEnv>,
+     ) -> std::io::Result<usize> {
+         let (rows, cols) = self.state.new_pane_size(crate::ui::NewPanePlacement::Alone);
+         let (ws, terminal, runtime) = Workspace::new_with_extra_env(
+@@ -141,7 +141,7 @@ impl App {
+             self.event_tx.clone(),
+             self.render_notify.clone(),
+             self.render_dirty.clone(),
+-            extra_env,
++            launch_env,
+         )?;
+         self.terminal_runtimes.insert(terminal.id.clone(), runtime);
+         self.state.terminals.insert(terminal.id.clone(), terminal);
+diff --git a/src/events.rs b/src/events.rs
+index 3faf8989..0ee60d73 100644
+--- a/src/events.rs
++++ b/src/events.rs
+@@ -22,6 +22,7 @@ pub struct ApiWorktreeAddRequest {
+     pub repo_name: String,
+     pub label: Option<String>,
+     pub focus: bool,
++    pub(crate) command: Option<crate::pane::launch_command::LaunchCommand>,
+     pub respond_to: std::sync::mpsc::Sender<String>,
+ }
+ 
+diff --git a/src/pane.rs b/src/pane.rs
+index dd53d846..3aececa9 100644
+--- a/src/pane.rs
++++ b/src/pane.rs
+@@ -29,6 +29,7 @@ mod background_agent;
+ mod cursor;
+ mod input;
+ mod kitty_keyboard;
++pub(crate) mod launch_command;
+ mod osc;
+ mod state;
+ mod terminal;
+@@ -139,6 +140,8 @@ fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
+ pub(crate) struct PaneLaunchEnv {
+     extra: Vec<(String, String)>,
+     identity: PaneLaunchIdentity,
++    // Used only by the initial spawn; never retained by the runtime or session.
++    command: Option<launch_command::LaunchCommand>,
+ }
+ 
+ #[derive(Debug, Clone, Default, PartialEq, Eq)]
+@@ -153,14 +156,30 @@ enum PaneLaunchIdentity {
+     OmitPane,
+ }
+ 
++impl From<Vec<(String, String)>> for PaneLaunchEnv {
++    fn from(extra: Vec<(String, String)>) -> Self {
++        Self::from_extra(extra)
++    }
++}
++
+ impl PaneLaunchEnv {
+     pub(crate) fn from_extra(extra: Vec<(String, String)>) -> Self {
+         Self {
+             extra,
+             identity: PaneLaunchIdentity::Inherit,
++            command: None,
+         }
+     }
+ 
++    pub(crate) fn with_command(mut self, command: Option<launch_command::LaunchCommand>) -> Self {
++        self.command = command;
++        self
++    }
++
++    pub(crate) fn is_initial_command(&self) -> bool {
++        self.command.is_some()
++    }
++
+     pub(crate) fn with_identity(
+         mut self,
+         workspace_id: String,
+@@ -230,6 +249,7 @@ struct SpawnInitialState<'a> {
+     detected_agent: Option<Agent>,
+     history_ansi: Option<&'a str>,
+     windows_powershell_prompt_cwd_reporting: bool,
++    redact_spawn_error: bool,
+ }
+ 
+ #[derive(Clone, Copy, PartialEq, Eq)]
+@@ -2386,6 +2406,23 @@ impl PaneRuntime {
+         render_notify: Arc<Notify>,
+         render_dirty: Arc<RenderSignal>,
+     ) -> std::io::Result<Self> {
++        if let Some(command) = &launch_env.command {
++            return Self::spawn_shell_command(
++                pane_id,
++                rows,
++                cols,
++                cwd,
++                command.as_str(),
++                launch_env,
++                AgentDetection::Enabled,
++                scrollback_limit_bytes,
++                host_terminal_theme,
++                host_terminal_appearance,
++                events,
++                render_notify,
++                render_dirty,
++            );
++        }
+         let windows_powershell_prompt_cwd_reporting =
+             uses_windows_powershell_pane_shell(shell_config);
+         let mut cmd = pane_shell_command_builder(shell_config)?;
+@@ -2408,6 +2445,7 @@ impl PaneRuntime {
+                 detected_agent: None,
+                 history_ansi: initial_history_ansi,
+                 windows_powershell_prompt_cwd_reporting,
++                redact_spawn_error: false,
+             },
+             AgentDetection::Enabled,
+         )
+@@ -2446,7 +2484,10 @@ impl PaneRuntime {
+             render_dirty,
+             cmd,
+             "failed to spawn command pane",
+-            SpawnInitialState::default(),
++            SpawnInitialState {
++                redact_spawn_error: launch_env.command.is_some(),
++                ..SpawnInitialState::default()
++            },
+             agent_detection,
+         )
+     }
+@@ -2724,6 +2765,15 @@ impl PaneRuntime {
+         let content_write_lock = Arc::new(Mutex::new(()));
+ 
+         let spawned = crate::pty::backend::spawn_with_portable_pty(rows, cols, cmd)
++            .map_err(|err| {
++                // portable-pty errors can include the complete argv. Initial
++                // commands may contain credentials; do not log or return them.
++                if initial_state.redact_spawn_error {
++                    std::io::Error::new(err.kind(), "failed to spawn initial command")
++                } else {
++                    err
++                }
++            })
+             .inspect_err(|err| error!(pane = pane_id.raw(), err = %err, "{spawn_error_message}"))?;
+ 
+         // --- Child watcher task ---
+diff --git a/src/pane/launch_command.rs b/src/pane/launch_command.rs
+new file mode 100644
+index 00000000..f50abb46
+--- /dev/null
++++ b/src/pane/launch_command.rs
+@@ -0,0 +1,85 @@
++//! Validated, ephemeral creation policy. Never serialize into session state.
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct LaunchCommand(String);
++
++pub(crate) const SUPPORTED: bool = cfg!(unix);
++
++impl LaunchCommand {
++    pub(crate) fn new(command: String) -> std::io::Result<Self> {
++        if !SUPPORTED {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::Unsupported,
++                "atomic command launch is supported only on Unix",
++            ));
++        }
++        if command.trim().is_empty()
++            || command.encode_utf16().count() > 2000
++            || command
++                .chars()
++                .any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}'))
++        {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::InvalidInput,
++                "command must be a nonblank single line of at most 2000 UTF-16 code units without control characters",
++            ));
++        }
++        Ok(Self(command))
++    }
++
++    pub(crate) fn as_str(&self) -> &str {
++        &self.0
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn atomic_command_launch_rejects_blank_controls_and_line_separators() {
++        for command in [
++            "",
++            "   ",
++            "\t",
++            "echo\nhi",
++            "echo\rhi",
++            "echo\0hi",
++            "echo\u{7f}",
++            "echo\u{85}",
++            "echo\u{2028}hi",
++            "echo\u{2029}hi",
++        ] {
++            assert!(LaunchCommand::new(command.into()).is_err(), "{command:?}");
++        }
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn atomic_command_launch_preserves_text_and_matches_js_length() {
++        let command = "  A='two words' printf '%s' \"$A\" | cat ; echo \u{1f600}  ";
++        let validated = LaunchCommand::new(command.into()).unwrap();
++        assert_eq!(validated.as_str(), command);
++        assert_eq!(
++            crate::platform::pane_custom_command_pty_builder(validated.as_str()).get_argv(),
++            &[
++                std::ffi::OsString::from("/bin/sh"),
++                "-c".into(),
++                command.into()
++            ]
++        );
++        assert!(LaunchCommand::new("a".repeat(2000)).is_ok());
++        assert!(LaunchCommand::new("a".repeat(2001)).is_err());
++        assert!(LaunchCommand::new("\u{1f600}".repeat(1000)).is_ok());
++        assert!(LaunchCommand::new("\u{1f600}".repeat(1001)).is_err());
++    }
++
++    #[cfg(not(unix))]
++    #[test]
++    fn atomic_command_launch_fails_closed_on_unsupported_platform() {
++        assert_eq!(
++            LaunchCommand::new("echo hello".into()).unwrap_err().kind(),
++            std::io::ErrorKind::Unsupported
++        );
++    }
++}
+diff --git a/src/server/client_commands.rs b/src/server/client_commands.rs
+index 97092b45..a68a5c79 100644
+--- a/src/server/client_commands.rs
++++ b/src/server/client_commands.rs
+@@ -21,7 +21,7 @@ pub(crate) fn supports_client_shell_method_name(method: &str) -> bool {
+ }
+ 
+ pub(crate) fn supports_client_shell_method(method: &Method) -> bool {
+-    method.operation().client_shell
++    supports_client_shell_method_name(method.operation().name)
+ }
+ 
+ pub(crate) fn error_response(id: String, code: &str, message: impl Into<String>) -> String {
+@@ -255,6 +255,31 @@ mod tests {
+             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
+         );
+ 
++        for (method, digest) in [
++            (
++                "workspace.create_with_command",
++                "b7d225b7c8b9376f90e0a1ab771b9c94124439f1a6e93f660edc139ae9ae19e7",
++            ),
++            (
++                "tab.create_with_command",
++                "d5946f2fcf1187b0383f45183d3036acd9afb9cf433afcdf8441423ce09a246e",
++            ),
++            (
++                "worktree.create_with_command",
++                "3936da58bfa7e2db9448b3efb1cdd3207e52b3081b8e04438af655119bbdb5b3",
++            ),
++            (
++                "worktree.open_with_command",
++                "365d146cd3ba15f9f874d21983f26e230648d68a78bf962143ae656490690928",
++            ),
++        ] {
++            if crate::pane::launch_command::SUPPORTED {
++                assert_eq!(actual.remove(method).as_deref(), Some(digest));
++            } else {
++                assert!(!actual.contains_key(method));
++            }
++        }
++
+         assert_eq!(
+             actual, expected,
+             "an existing endpoint method changed shape; add load-bearing behavior as a new advertised method or explicitly gate new fields"
+diff --git a/src/server/headless.rs b/src/server/headless.rs
+index 60b383c4..d63e96cc 100644
+--- a/src/server/headless.rs
++++ b/src/server/headless.rs
+@@ -3044,9 +3044,11 @@ impl HeadlessServer {
+         if matches!(
+             &msg.request.method,
+             api::schema::Method::WorktreeCreate(_)
++                | api::schema::Method::WorktreeCreateWithCommand(_)
+                 | api::schema::Method::WorktreeRemove(_)
+                 | api::schema::Method::WorktreeList(_)
+                 | api::schema::Method::WorktreeOpen(_)
++                | api::schema::Method::WorktreeOpenWithCommand(_)
+         ) {
+             let read_only = matches!(&msg.request.method, api::schema::Method::WorktreeList(_));
+             let deferred_changed = self.app.handle_deferred_worktree_api_request(
+diff --git a/src/server/headless/client_views.rs b/src/server/headless/client_views.rs
+index 31b39be2..180f1588 100644
+--- a/src/server/headless/client_views.rs
++++ b/src/server/headless/client_views.rs
+@@ -234,10 +234,14 @@ impl HeadlessServer {
+                 | Method::PaneSplit(_)
+                 | Method::TabClose(_)
+                 | Method::TabCreate(_)
++                | Method::TabCreateWithCommand(_)
+                 | Method::WorkspaceClose(_)
+                 | Method::WorkspaceCreate(_)
++                | Method::WorkspaceCreateWithCommand(_)
+                 | Method::WorktreeCreate(_)
++                | Method::WorktreeCreateWithCommand(_)
+                 | Method::WorktreeOpen(_)
++                | Method::WorktreeOpenWithCommand(_)
+                 | Method::WorktreeRemove(_)
+         )
+     }
+@@ -268,17 +272,21 @@ impl HeadlessServer {
+                 | Method::PaneZoom(_)
+                 | Method::TabClose(_)
+                 | Method::TabCreate(_)
++                | Method::TabCreateWithCommand(_)
+                 | Method::TabFocus(_)
+                 | Method::TabMove(_)
+                 | Method::TabRename(_)
+                 | Method::WorkspaceClose(_)
+                 | Method::WorkspaceCreate(_)
++                | Method::WorkspaceCreateWithCommand(_)
+                 | Method::WorkspaceFocus(_)
+                 | Method::WorkspaceMove(_)
+                 | Method::WorkspaceMoveBlock(_)
+                 | Method::WorkspaceRename(_)
+                 | Method::WorktreeCreate(_)
++                | Method::WorktreeCreateWithCommand(_)
+                 | Method::WorktreeOpen(_)
++                | Method::WorktreeOpenWithCommand(_)
+                 | Method::WorktreeRemove(_)
+         )
+     }
+@@ -301,12 +309,16 @@ impl HeadlessServer {
+                 | Method::PaneZoom(_)
+                 | Method::TabClose(_)
+                 | Method::TabCreate(_)
++                | Method::TabCreateWithCommand(_)
+                 | Method::TabFocus(_)
+                 | Method::WorkspaceClose(_)
+                 | Method::WorkspaceCreate(_)
++                | Method::WorkspaceCreateWithCommand(_)
+                 | Method::WorkspaceFocus(_)
+                 | Method::WorktreeCreate(_)
++                | Method::WorktreeCreateWithCommand(_)
+                 | Method::WorktreeOpen(_)
++                | Method::WorktreeOpenWithCommand(_)
+                 | Method::WorktreeRemove(_)
+         )
+     }
+@@ -852,6 +864,8 @@ impl HeadlessServer {
+         let create_focus_requested = match &msg.request.method {
+             api::schema::Method::WorkspaceCreate(params) => params.focus,
+             api::schema::Method::TabCreate(params) => params.focus,
++            api::schema::Method::WorkspaceCreateWithCommand(params) => params.create.focus,
++            api::schema::Method::TabCreateWithCommand(params) => params.create.focus,
+             _ => false,
+         };
+         let inspect_pane_move = matches!(
+diff --git a/src/server/headless/endpoint_requests.rs b/src/server/headless/endpoint_requests.rs
+index 6d2dd6ba..8a43b56d 100644
+--- a/src/server/headless/endpoint_requests.rs
++++ b/src/server/headless/endpoint_requests.rs
+@@ -106,13 +106,17 @@ impl HeadlessServer {
+             let deferred_worktree = matches!(
+                 &request.method,
+                 api::schema::Method::WorktreeCreate(_)
++                    | api::schema::Method::WorktreeCreateWithCommand(_)
+                     | api::schema::Method::WorktreeRemove(_)
+                     | api::schema::Method::WorktreeList(_)
+                     | api::schema::Method::WorktreeOpen(_)
++                    | api::schema::Method::WorktreeOpenWithCommand(_)
+             );
+             let deferred_navigation = match &request.method {
+                 api::schema::Method::WorktreeCreate(params) => params.focus,
+                 api::schema::Method::WorktreeOpen(params) => params.focus,
++                api::schema::Method::WorktreeCreateWithCommand(params) => params.create.focus,
++                api::schema::Method::WorktreeOpenWithCommand(params) => params.create.focus,
+                 _ => false,
+             };
+             client.shell_deferred_navigation_request_id =
+diff --git a/src/server/headless/notifications.rs b/src/server/headless/notifications.rs
+index 1025acb7..a4f313b3 100644
+--- a/src/server/headless/notifications.rs
++++ b/src/server/headless/notifications.rs
+@@ -310,7 +310,9 @@ impl HeadlessServer {
+                 .map(|request| &mut request.respond_to),
+             AppEvent::WorktreeReadFinished(result)
+                 if matches!(&result.request.method,
+-                api::schema::Method::WorktreeOpen(params) if params.focus) =>
++                api::schema::Method::WorktreeOpen(params) if params.focus)
++                    || matches!(&result.request.method,
++                        api::schema::Method::WorktreeOpenWithCommand(params) if params.create.focus) =>
+             {
+                 Some(&mut result.respond_to)
+             }
+diff --git a/src/terminal/state.rs b/src/terminal/state.rs
+index 11d540b1..43d38875 100644
+--- a/src/terminal/state.rs
++++ b/src/terminal/state.rs
+@@ -158,6 +158,8 @@ pub struct TerminalState {
+     pub revision: u64,
+     pub launch_argv: Option<Vec<String>>,
+     pub respawn_shell_on_exit: bool,
++    /// Ephemeral initial-command policy; never captured in session snapshots.
++    pub retain_on_exit: bool,
+     recent_agent_process_exit: Option<RecentAgentProcessExit>,
+     agent_process_acquisition_pending: bool,
+     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
+@@ -198,6 +200,7 @@ impl TerminalState {
+             revision: 0,
+             launch_argv: None,
+             respawn_shell_on_exit: false,
++            retain_on_exit: false,
+             recent_agent_process_exit: None,
+             agent_process_acquisition_pending: false,
+             pending_agent_resume_plan: None,
+diff --git a/src/workspace.rs b/src/workspace.rs
+index 8944b884..cc7c5bca 100644
+--- a/src/workspace.rs
++++ b/src/workspace.rs
+@@ -296,7 +296,7 @@ impl Workspace {
+             render_notify,
+             render_dirty,
+             None,
+-            Vec::new(),
++            PaneLaunchEnv::default(),
+         )
+     }
+ 
+@@ -312,9 +312,10 @@ impl Workspace {
+         events: mpsc::Sender<AppEvent>,
+         render_notify: Arc<Notify>,
+         render_dirty: Arc<RenderSignal>,
+-        extra_env: Vec<(String, String)>,
++        launch_env: impl Into<PaneLaunchEnv>,
+     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
+-        if extra_env.is_empty() {
++        let launch_env = launch_env.into();
++        if launch_env == PaneLaunchEnv::default() {
+             return Self::new(
+                 initial_cwd,
+                 rows,
+@@ -340,7 +341,7 @@ impl Workspace {
+             render_notify,
+             render_dirty,
+             None,
+-            extra_env,
++            launch_env,
+         )
+     }
+ 
+@@ -357,10 +358,10 @@ impl Workspace {
+         render_notify: Arc<Notify>,
+         render_dirty: Arc<RenderSignal>,
+         argv: Option<&[String]>,
+-        extra_env: Vec<(String, String)>,
++        launch_env: PaneLaunchEnv,
+     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
+         let id = generate_workspace_id();
+-        let launch_env = PaneLaunchEnv::from_extra(extra_env).with_identity(
++        let launch_env = launch_env.with_identity(
+             id.clone(),
+             public_tab_id_for_number(&id, 1),
+             public_pane_id_for_number(&id, 1),
+@@ -468,7 +469,7 @@ impl Workspace {
+         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
+         shell_config: crate::pane::PaneShellConfig<'_>,
+-        extra_env: Vec<(String, String)>,
++        launch_env: impl Into<PaneLaunchEnv>,
+     ) -> std::io::Result<(usize, TerminalState, TerminalRuntime)> {
+         self.create_tab_with_runtime(
+             rows,
+@@ -479,7 +480,7 @@ impl Workspace {
+             host_terminal_appearance,
+             shell_config,
+             None,
+-            extra_env,
++            launch_env.into(),
+         )
+     }
+ 
+@@ -503,7 +504,7 @@ impl Workspace {
+             host_terminal_appearance,
+             crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
+             Some(argv),
+-            extra_env,
++            extra_env.into(),
+         )
+     }
+ 
+@@ -517,12 +518,16 @@ impl Workspace {
+         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
+         shell_config: crate::pane::PaneShellConfig<'_>,
+         argv: Option<&[String]>,
+-        extra_env: Vec<(String, String)>,
++        launch_env: PaneLaunchEnv,
+     ) -> std::io::Result<(usize, TerminalState, TerminalRuntime)> {
+         let number = self.next_public_tab_number;
+         self.next_public_tab_number += 1;
+         let pane_number = self.next_public_pane_number;
+-        let launch_env = self.launch_env_for_new_pane(number, pane_number, extra_env);
++        let launch_env = launch_env.with_identity(
++            self.id.clone(),
++            public_tab_id_for_number(&self.id, number),
++            public_pane_id_for_number(&self.id, pane_number),
++        );
+         let events = self
+             .active_tab()
+             .map(|tab| tab.events.clone())
+diff --git a/src/workspace/tab.rs b/src/workspace/tab.rs
+index 79d7f94d..f504f955 100644
+--- a/src/workspace/tab.rs
++++ b/src/workspace/tab.rs
+@@ -169,12 +169,13 @@ impl Tab {
+         };
+ 
+         let terminal_id = TerminalId::alloc();
+-        let terminal = match argv {
++        let mut terminal = match argv {
+             Some(argv) => {
+                 TerminalState::new(terminal_id.clone(), initial_cwd).with_launch_argv(argv.to_vec())
+             }
+             None => TerminalState::new(terminal_id.clone(), initial_cwd),
+         };
++        terminal.retain_on_exit = launch_env.is_initial_command();
+         let mut panes = HashMap::new();
+         panes.insert(root_id, PaneState::new(terminal_id));
+ 

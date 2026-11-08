@@ -130,21 +130,25 @@ existing `bootstrap-v1` tag/release instead of overwriting assets. Publishing is
 operation, not a side effect of development or command generation. A changed script requires new
 pins and a new immutable release version; do not replace the published asset under an old hash.
 
-### Standalone bootstrap release and existing settings
+### Bootstrap compatibility and optional features
 
-This release does not include custom Agent launch commands or browser-direct transport. SSH
-setup uses the ordinary connection-server relay and never invokes a custom launcher. Existing
-`preferences.json` → `settings.agentCommands` values are retained opaquely on disk for a future
-fixed release or rollback, but are not exposed as active preferences or executed. The separate
-browser `ovis:agent-commands` record is left untouched. An already-open feature tab must reload:
-explicit writes to the deferred setting and command-bearing workspace/tab/worktree creation
-requests are refused, including requests relayed to older remote bridges, instead of silently
-saving nothing or launching a default agent. Existing preset launch modes remain available.
+SSH bootstrap continues to use the connection-server relay and never invokes a custom agent
+launcher. Browser-direct transport is a separate opt-in configuration; see [LAN-direct
+transport](lan-direct.md). Discovery and bootstrap do not enable it automatically.
 
-Bootstrap authorization runs on the connection server and does not require a new remote bridge
-protocol or runtime version. New installations use the existing checksum-verified runtime37
-release. Operators must check runtime source overrides and existing bridge provenance: an equal
-version number alone does not prove that an older development build excludes deferred features.
+**Settings → Chat → New agents** activates saved `settings.agentCommands` values as shared
+preferences. The separate browser `ovis:agent-commands` record protects them from older tabs
+rewriting unrelated settings. Commands run only for an explicit new-agent creation request.
+Both the selected PC's Ovis bridge and its live Herdr daemon must support atomic command
+creation. Missing capability, an older bridge or native Windows is refused before creating
+a pane or forwarding a command-bearing request. Standard preset launches remain available
+after clearing that agent's command. See [Custom agent launch commands](guide.md#custom-agent-launch-commands).
+
+Bootstrap authorization needs no new bridge protocol. Existing checksum-verified runtime37
+bundles can still serve standard sessions, but their version number does not establish custom
+command support. Capability is checked against the selected bridge and its running daemon;
+installing this Ovis source does not update or restart Herdr. A compatible daemon must be
+installed separately before custom commands become available.
 
 **Machines already saved in herdr appear automatically.** The connection server reads its account's
 `herdr machine list --json` at startup and every five seconds after the previous read finishes. Failed reads back off up to five minutes and

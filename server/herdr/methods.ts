@@ -1,4 +1,4 @@
-import type { AgentInfo, AgentTarget, PaneProcessInfo, PaneProcessInfoParams, PaneSendKeysParams, PaneSendTextParams } from "../../shared/herdr-api.generated.ts";
+import type { AgentInfo, AgentTarget, PaneProcessInfo, PaneProcessInfoParams, PaneSendKeysParams, PaneSendTextParams, TabCreateWithCommandParams, WorkspaceCreateWithCommandParams, WorktreeCreateWithCommandParams, WorktreeOpenWithCommandParams } from "../../shared/herdr-api.generated.ts";
 
 /**
  * The herdr methods `herdrRpc` knows the shape of: each method's params and its raw answer
@@ -12,6 +12,10 @@ import type { AgentInfo, AgentTarget, PaneProcessInfo, PaneProcessInfoParams, Pa
  * (scripts/generate-protocol-types.ts ROOTS).
  */
 export interface HerdrMethods {
+  "workspace.create_with_command": { params: WorkspaceCreateWithCommandParams; result: import("./client.ts").WorkspaceCreateResult };
+  "tab.create_with_command": { params: TabCreateWithCommandParams; result: import("./client.ts").TabCreateResult };
+  "worktree.create_with_command": { params: WorktreeCreateWithCommandParams; result: import("./client.ts").WorktreeOpenResult };
+  "worktree.open_with_command": { params: WorktreeOpenWithCommandParams; result: import("./client.ts").WorktreeOpenResult };
   /** `pane_id`, never `target`: given `target`, herdr silently answers for the focused pane. */
   "pane.process_info": { params: PaneProcessInfoParams & { pane_id: string }; result: { type?: "pane_process_info"; process_info?: PaneProcessInfo } };
   "agent.get": { params: AgentTarget; result: { type?: "agent_info"; agent: AgentInfo } };

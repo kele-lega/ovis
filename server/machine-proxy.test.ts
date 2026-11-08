@@ -1,6 +1,6 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it, spyOn } from "bun:test";
 
-import { handleMachineRequest } from "./machine-api.ts";
+import { handleMachineRequest, slowMachinePath } from "./machine-api.ts";
 import type { MachineManager } from "./machines.ts";
 
 // A remote bridge that answers like the local conversation route: an ETag, then 304 while unchanged.
@@ -11,11 +11,17 @@ const historyAsked: (string | null)[] = [];
 const faviconAsked: { search: string; authorization: string | null; cookie: string | null }[] = [];
 const diffAsked: { path: string; search: string; authorization: string | null; cookie: string | null; forwarded: string | null }[] = [];
 const createAsked: { path: string; body: string; authorization: string | null; cookie: string | null }[] = [];
+let atomicProof: unknown = { bridge_protocol: 1, launch_command: true, herdr: { capabilities: { atomic_command_launch: true } } };
+const proofAsked: { authorization: string | null; cookie: string | null; forwarded: string | null }[] = [];
 const remote = Bun.serve({
   port: 0,
   async fetch(request) {
     const path = new URL(request.url).pathname;
-    if (["/api/workspace/create", "/api/tab/create", "/api/worktree/create"].includes(path)) {
+    if (path === "/api/bridge") {
+      proofAsked.push({ authorization: request.headers.get("authorization"), cookie: request.headers.get("cookie"), forwarded: request.headers.get("x-forwarded-for") });
+      return Response.json(atomicProof);
+    }
+    if (["/api/workspace/create", "/api/tab/create", "/api/worktree/create", "/api/worktree/open"].includes(path)) {
       createAsked.push({ path, body: await request.text(), authorization: request.headers.get("authorization"), cookie: request.headers.get("cookie") });
       return Response.json({ created: true });
     }
@@ -57,19 +63,62 @@ const manager = {
 } as unknown as MachineManager;
 
 describe("PC proxy", () => {
-  it("refuses stale custom commands before contacting any remote runtime", async () => {
+  it("gives command worktree open the same slow proxy deadline as creation", async () => {
+    expect(["worktree/create", "worktree/open", "sessions/resume", "worktree/list", "workspace/create"].map(slowMachinePath)).toEqual([true, true, true, false, false]);
+    const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const timeout = spyOn(AbortSignal, "timeout").mockImplementation(nativeTimeout);
+    try {
+      const response = await handleMachineRequest(new Request("http://127.0.0.1/api/machines/pc1/worktree/open", {
+        method: "POST", headers: { "x-herdr-machine": "1" },
+        body: JSON.stringify({ workspace_id: "source", branch: "fixture", agent: { kind: "claude", command: "wrapper" } }),
+      }), manager);
+      expect(response.status).toBe(200);
+      expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([10_000, 165_000]);
+    } finally { timeout.mockRestore(); }
+  });
+
+  it("refuses invalid custom commands before contacting any remote runtime", async () => {
+    const before = createAsked.length;
     const noContact = { endpoint() { throw new Error("Must not contact a PC"); } } as unknown as MachineManager;
-    for (const path of ["workspace/create", "tab/create", "worktree/create"]) {
-      for (const command of ["fixture-custom", "", null, false, 42]) {
+    for (const path of ["workspace/create", "tab/create", "worktree/create", "worktree/open"]) {
+      for (const command of ["", null, false, 42, "a\nb"]) {
         const response = await handleMachineRequest(new Request(`http://127.0.0.1/api/machines/pc1/${path}`, {
           method: "POST", headers: { "x-herdr-machine": "1" },
           body: JSON.stringify({ agent: { kind: "claude", command } }),
         }), noContact);
         expect(response.status).toBe(400);
-        expect(await response.json()).toMatchObject({ error: { code: "invalid_agent", message: expect.stringContaining("Custom agent commands are unavailable") } });
+        expect(await response.json()).toMatchObject({ error: { code: "invalid_agent" } });
       }
     }
-    expect(createAsked).toEqual([]);
+    expect(createAsked).toHaveLength(before);
+  });
+
+  it("requires the selected bridge AND its live daemon, not a stale roster or old runtime37", async () => {
+    const before = createAsked.length;
+    const capable = { bridge_protocol: 1, launch_command: true, herdr: { capabilities: { atomic_command_launch: true } } };
+    const body = ' { "agent": { "kind": "claude", "command": "  ENV=fixture wrapper --model \'two words\'  " } } ';
+    const post = () => handleMachineRequest(new Request("http://127.0.0.1/api/machines/pc1/workspace/create", {
+      method: "POST", headers: { "x-herdr-machine": "1", "content-type": "application/json", authorization: "Bearer browser-secret", cookie: "browser=secret", "x-forwarded-for": "203.0.113.1" }, body,
+    }), manager);
+    for (const proof of [
+      { ...capable, launch_command: undefined }, // old Ovis plus new daemon is still unsafe
+      { ...capable, launch_command: false }, // unsupported selected platform
+      { ...capable, herdr: {} },
+      { ...capable, herdr: { capabilities: { atomic_command_launch: false } } },
+      { ...capable, herdr: { capabilities: { atomic_command_launch: "true" } } },
+    ]) {
+      atomicProof = proof;
+      expect((await post()).status).toBe(409);
+    }
+    expect(createAsked.length).toBe(before);
+    atomicProof = capable;
+    expect((await post()).status).toBe(200);
+    expect(createAsked.at(-1)).toEqual({ path: "/api/workspace/create", body, authorization: "Bearer remote-token", cookie: null });
+    expect(proofAsked.at(-1)).toEqual({ authorization: "Bearer remote-token", cookie: null, forwarded: null });
+    atomicProof = { ...capable, herdr: {} };
+    expect((await post()).status).toBe(409); // previous successful proof must not be cached
+    expect(createAsked.length).toBe(before + 1);
+    atomicProof = capable;
   });
 
   it("forwards ordinary create payloads byte-for-byte with only the PC credential", async () => {

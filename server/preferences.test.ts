@@ -79,49 +79,43 @@ describe("shared preferences", () => {
     expect(new PreferenceStore(dir).get()).toEqual({ revision: 4, settings: { showThinking: false, theme: "dark", agentOrder: "activity" }, pins: [], muted_panes: [] });
   });
 
-  it("preserves deferred custom commands on disk without exposing or accepting them", async () => {
+  it("restores saved custom commands and persists edits, clears and cross-client events", async () => {
     const dir = root();
     const path = join(dir, "preferences.json");
     const commands = { claude: "  /opt/fixture/launch --model custom  " };
     writeFileSync(path, JSON.stringify({ revision: 7, settings: { theme: "dark", agentCommands: commands } }));
     const store = new PreferenceStore(dir);
-    const publicDocument = { revision: 7, settings: { theme: "dark" }, muted_panes: [] };
-    expect(store.get()).toEqual(publicDocument);
-    expect(await (await handlePreferencesRequest(new Request("http://x/api/preferences"), store)).json()).toEqual(publicDocument);
+    expect(store.get().settings).toEqual({ theme: "dark", agentCommands: commands });
+    const response = await handlePreferencesRequest(new Request("http://x/api/preferences"), store);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect((await response.json()).settings.agentCommands).toEqual(commands);
     const heard: unknown[] = [];
     store.subscribe((preferences) => heard.push(preferences));
-    const before = readFileSync(path, "utf8");
-    for (const agentCommands of [{ claude: "replacement" }, {}, null]) {
-      const refused = await put(store, JSON.stringify({ settings: { language: "ja", agentCommands } }));
-      expect(refused.status).toBe(400);
-      expect(await refused.json()).toMatchObject({ error: { code: "unsupported_setting" } });
-      expect(readFileSync(path, "utf8")).toBe(before);
-      expect(store.get()).toEqual(publicDocument);
-      expect(heard).toEqual([]);
-    }
-    const changed = await put(store, JSON.stringify({ settings: { language: "zh" } }));
-    expect(changed.status).toBe(200);
-    expect(await changed.json()).toEqual({ revision: 8, settings: { theme: "dark", language: "zh" }, muted_panes: [] });
-    expect(heard).toEqual([store.get()]);
-    expect(JSON.stringify(heard)).not.toContain("agentCommands");
-    expect(JSON.parse(readFileSync(path, "utf8")).settings.agentCommands).toEqual(commands);
-    const back = new PreferenceStore(dir);
-    await put(back, JSON.stringify({ settings: { showThinking: false } }));
-    expect(back.get().settings).toEqual({ theme: "dark", language: "zh", showThinking: false });
-    expect(JSON.parse(readFileSync(path, "utf8")).settings.agentCommands).toEqual(commands);
+    await put(store, JSON.stringify({ settings: { language: "zh" } }));
+    expect(new PreferenceStore(dir).get().settings.agentCommands).toEqual(commands);
+    const replacement = { codex: "fixture-wrapper --profile alternate" };
+    expect((await put(store, JSON.stringify({ settings: { agentCommands: replacement } }))).status).toBe(200);
+    expect(store.get().settings.agentCommands).toEqual(replacement);
+    expect(JSON.parse(readFileSync(path, "utf8")).settings.agentCommands).toEqual(replacement);
+    expect(heard).toHaveLength(2);
+    expect(heard.at(-1)).toEqual(store.get());
+    expect((await put(store, JSON.stringify({ settings: { agentCommands: {} } }))).status).toBe(200);
+    expect(new PreferenceStore(dir).get().settings.agentCommands).toEqual({});
   });
 
-  it.each([null, false, "future-shape", ["opaque", { future: true }]])("preserves unread deferred command shape %j without interpreting it", async (agentCommands) => {
+  it.each([null, false, "future-shape", ["opaque", { future: true }]])("preserves command shape %j on unrelated saves until an explicit replacement", async (agentCommands) => {
     const dir = root();
     const path = join(dir, "preferences.json");
     writeFileSync(path, JSON.stringify({ revision: 1, settings: { agentCommands } }));
     const store = new PreferenceStore(dir);
     expect((await put(store, JSON.stringify({ settings: { language: "zh" } }))).status).toBe(200);
-    expect(store.get().settings).toEqual({ language: "zh" });
+    expect(store.get().settings).toEqual({ language: "zh", agentCommands });
     expect(JSON.parse(readFileSync(path, "utf8")).settings.agentCommands).toEqual(agentCommands);
+    expect((await put(store, JSON.stringify({ settings: { agentCommands: {} } }))).status).toBe(200);
+    expect(JSON.parse(readFileSync(path, "utf8")).settings.agentCommands).toEqual({});
   });
 
-  it("preserves repaired deferred commands when an unrelated mute save is rolled back", async () => {
+  it("preserves repaired custom commands when an unrelated mute save is rolled back", async () => {
     const dir = root();
     const path = join(dir, "preferences.json");
     const store = new PreferenceStore(dir);

@@ -26,6 +26,17 @@ export const MODEL_NAME = /^[A-Za-z0-9][\w.:/-]*(?:\[[A-Za-z0-9]+\])?$/;
 /** the most a first message (and a queued chat message, server/core/composer.ts pendingText) may hold */
 export const MAX_FIRST_MESSAGE_CHARS = 20_000;
 
+/** The most a custom launch command may hold, sent verbatim to the new pane's shell. */
+export const MAX_LAUNCH_COMMAND_CHARS = 2000;
+
+/** A custom command is one nonblank line, not terminal input or a script pasted over several lines. */
+export function launchCommandFault(value: unknown): string | null {
+  if (typeof value !== "string") return "agent.command must be a string";
+  if (value.trim() === "" || value.length > MAX_LAUNCH_COMMAND_CHARS) return `agent.command must contain text and be at most ${MAX_LAUNCH_COMMAND_CHARS} characters`;
+  if (ARGUMENT_CONTROLS.test(value) || value.includes(String.fromCodePoint(0x2028)) || value.includes(String.fromCodePoint(0x2029))) return "agent.command must be a single line without control characters";
+  return null;
+}
+
 /** terminal control characters a queued message may not carry; TAB, LF and CR are text there */
 const MESSAGE_CONTROLS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u;
 /** every control character, TAB and line breaks included: one argument on a command line is one line */
