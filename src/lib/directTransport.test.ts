@@ -1,5 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, jest } from "bun:test";
 import { DirectTransport } from "./directTransport.ts";
+import type { SocketEndpoint } from "./ws.ts";
 
 const NOW = 1_800_000_000_000;
 const ORIGIN = "https://manager.example";
@@ -23,6 +24,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 const signal = () => new AbortController().signal;
+const settle = async () => { for (let turn = 0; turn < 20; turn++) await Promise.resolve(); };
 
 describe("memory-only per-PC direct transport", () => {
   it("isolates two PCs with the same pane and coalesces HTTP credentials without leaking headers", async () => {
@@ -129,6 +131,92 @@ describe("memory-only per-PC direct transport", () => {
     await expect(socket).rejects.toMatchObject({ name: "AbortError" });
     socketLate.resolve(Response.json(credential("a")));
     expect(next.calls).toHaveLength(1);
+  });
+
+  it("times out socket authorization into relay cooldown and ignores late fetch or body credentials", async () => {
+    jest.useFakeTimers();
+    try {
+      for (const stalled of ["fetch", "body"]) {
+        const late = deferred<Response>();
+        const body = deferred<unknown>();
+        let issued = 0;
+        const { transport, calls, advance } = harness(({ url }) => {
+          if (!url.endsWith("direct-access")) return new Response("relay");
+          if (++issued > 1) return Response.json({ ...credential("a", "fresh"), expires_at: NOW + 120_000 });
+          return stalled === "fetch" ? late.promise : { ok: true, json: () => body.promise } as Response;
+        });
+        try {
+          let endpoint: SocketEndpoint | undefined;
+          const resolved = transport.resolveMachineSocket("a")(signal()).then((value) => { endpoint = value; return value; });
+          void resolved.catch(() => {}); // Cleanup also settles this promise if a deadline regression fails an assertion.
+          await settle();
+          jest.advanceTimersByTime(4_999);
+          await settle();
+          expect(endpoint).toBeUndefined();
+          jest.advanceTimersByTime(1);
+          await settle();
+          // Shorter than the WebSocket's initial 8s budget: the relay can still open on this attempt.
+          expect(endpoint?.url).toBe("wss://manager.example/ws?machine_id=a");
+          await resolved;
+          expect(calls[0]?.init?.signal?.aborted).toBe(true);
+          expect((await transport.resolveMachineSocket("a")(signal())).url).toBe("wss://manager.example/ws?machine_id=a");
+          await transport.directFetch("/api/machines/a/session");
+          expect(issued).toBe(1);
+          advance(60_000);
+          late.resolve(Response.json({ ...credential("a", "stale"), expires_at: NOW + 120_000 }));
+          body.resolve({ ...credential("a", "stale"), expires_at: NOW + 120_000 });
+          await settle();
+          await transport.directFetch("/api/machines/a/session");
+          // If a fetch/body ignores abort, its late token must not repopulate the HTTP cache.
+          expect(issued).toBe(2);
+          expect(calls.at(-1)?.url).toBe("https://a.example/api/session");
+        } finally { transport.clear(); }
+      }
+    } finally { jest.useRealTimers(); }
+  });
+
+  it("propagates socket abort and sign-out without timeout cooldown or late credential caching", async () => {
+    jest.useFakeTimers();
+    try {
+      for (const cancel of ["caller", "clear"]) {
+        const late = deferred<Response>();
+        let issued = 0;
+        const { transport, calls } = harness(({ url }) => {
+          if (!url.endsWith("direct-access")) return new Response("ok");
+          return ++issued === 1 ? late.promise : Response.json(credential("a", "fresh"));
+        });
+        try {
+          const controller = new AbortController();
+          const resolved = transport.resolveMachineSocket("a")(controller.signal);
+          if (cancel === "caller") controller.abort(new DOMException("Explicit cancellation", "TimeoutError"));
+          else transport.clear();
+          await expect(resolved).rejects.toMatchObject({ name: cancel === "caller" ? "TimeoutError" : "AbortError" });
+          expect(calls[0]?.init?.signal?.aborted).toBe(true);
+          late.resolve(Response.json(credential("a", "stale")));
+          await settle();
+          jest.advanceTimersByTime(5_000);
+          await transport.directFetch("/api/machines/a/session");
+          expect(issued).toBe(2);
+          expect(calls.at(-1)?.url).toBe("https://a.example/api/session");
+        } finally { transport.clear(); }
+      }
+    } finally { jest.useRealTimers(); }
+  });
+
+  it("ignores endpoint bookkeeping callbacks after transport clear", async () => {
+    let issued = 0;
+    const { transport } = harness(({ url }) => url.endsWith("direct-access")
+      ? Response.json(credential("a", String(++issued))) : new Response("ok"));
+    const stale = await transport.resolveMachineSocket("a")(signal());
+    transport.clear();
+    const current = await transport.resolveMachineSocket("a")(signal());
+    current.failed?.();
+    stale.opened?.();
+    expect((await transport.resolveMachineSocket("a")(signal())).url).toBe("wss://manager.example/ws?machine_id=a");
+    transport.clear();
+    await transport.resolveMachineSocket("a")(signal());
+    stale.failed?.();
+    expect((await transport.resolveMachineSocket("a")(signal())).url).toBe("wss://a.example/ws");
   });
 
   it("falls back for safe network failures and 401, but never replays a write", async () => {

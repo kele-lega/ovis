@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, expect, it, jest } from "bun:test";
 import { HerdrSocket, type SocketEndpoint } from "./ws.ts";
+import { DirectTransport } from "./directTransport.ts";
 import type { ClientConnectionTrace, PendingMessage } from "../../shared/protocol.ts";
 import { OUTPUT_STALLED_CLOSE_CODE } from "../../shared/terminal-flow.ts";
 
@@ -49,7 +50,7 @@ function endpointRequest() {
   return { promise, resolve, reject };
 }
 
-it("resolves fresh endpoint URLs and protocols on every retry, reporting only unopened failures", async () => {
+it("resolves fresh endpoint URLs and protocols on every retry, reporting each failed attempt once", async () => {
   jest.useFakeTimers();
   let resolutions = 0;
   const opened: number[] = [];
@@ -80,8 +81,151 @@ it("resolves fresh endpoint URLs and protocols on every retry, reporting only un
     expect(second.sent).toEqual([{ type: "role", mode: "observe" },
       { type: "attach", pane_id: "w1:p1", cols: 100, rows: 30, flow_control: "ack", keep_size: true }]);
     second.disconnect();
-    expect(failed).toEqual([1]);
+    second.closeEvent(1006);
+    expect(failed).toEqual([1, 2]);
   } finally { client.close(); jest.useRealTimers(); }
+});
+
+it("starts relay within the same WebSocket deadline when direct authorization stalls", async () => {
+  jest.useFakeTimers();
+  let authorizationSignal: AbortSignal | undefined;
+  const late = new Promise<Response>(() => {});
+  let authorizations = 0;
+  const transport = new DirectTransport({ origin: () => "https://manager.example", fetch: async (_url, init) => {
+    authorizations++;
+    authorizationSignal = init?.signal ?? undefined;
+    return late;
+  } });
+  const client = new HerdrSocket(transport.resolveMachineSocket("a"));
+  try {
+    const before = FakeSocket.last;
+    client.connect();
+    jest.advanceTimersByTime(4_999);
+    await settle();
+    expect(FakeSocket.last).toBe(before);
+    jest.advanceTimersByTime(1);
+    await settle();
+    const relay = FakeSocket.last;
+    expect(relay.url).toBe("wss://manager.example/ws?machine_id=a");
+    expect(authorizationSignal?.aborted).toBe(true);
+    // Discovery used 5s, leaving 3s of this same attempt's initial 8s handshake budget.
+    jest.advanceTimersByTime(2_999);
+    expect(relay.readyState).toBe(FakeSocket.CONNECTING);
+    relay.open();
+    relay.disconnect();
+    jest.advanceTimersByTime(250);
+    await settle();
+    expect(FakeSocket.last.url).toBe(relay.url);
+    expect(authorizations).toBe(1);
+  } finally { client.close(); transport.clear(); jest.useRealTimers(); }
+});
+
+it("cools down opened direct sockets after close, error or probe drop and never replays user requests", async () => {
+  jest.useFakeTimers();
+  try {
+    for (const failure of ["close", "error", "probe"]) {
+      const calls: string[] = [];
+      let failed = 0;
+      let opened = 0;
+      const transport = new DirectTransport({ origin: () => "https://manager.example", fetch: async (url) => {
+        calls.push(url);
+        return url.endsWith("direct-access") ? Response.json({ origin: "https://direct.example", ticket: "single-use",
+          access_token: "http-token", expires_at: Date.now() + 60_000 }) : new Response("relay");
+      } });
+      const resolve = transport.resolveMachineSocket("a");
+      const client = new HerdrSocket(async (signal) => {
+        const endpoint = await resolve(signal);
+        if (!endpoint.failed) return endpoint;
+        return { ...endpoint, opened: () => { opened++; endpoint.opened?.(); }, failed: () => { failed++; endpoint.failed?.(); } };
+      });
+      try {
+        client.attach("w1:p1", 100, 30);
+        client.connect(); await settle();
+        const direct = FakeSocket.last;
+        expect(direct.url).toBe("wss://direct.example/ws");
+        direct.open(); direct.receive(snapshot(["input-ready", "submit", "pending-input", "secret-input", "ping"]));
+        direct.receive({ type: "input-ready", pane_id: "w1:p1" });
+        expect(client.sendInput("w1:p1", "send-once")).toBe(true);
+        expect(client.sendKeys("w1:p1", ["Enter"])).toBe(true);
+        const sent = client.submit("w1:p1", "do not replay", "do not replay", false, "queue");
+        const action = client.pendingAction("w1:p1", "pending-1", "discard");
+        const secret = client.sendSecret("w1:p1", "Password:", "send-once");
+        await settle();
+        expect(direct.sent.filter((frame) => ["input", "keys", "submit", "pending-action", "secret"].includes(frame.type))).toHaveLength(5);
+        client.wake();
+        const unsent = client.submit("w1:p1", "keep draft", "keep draft");
+        await settle();
+        if (failure === "close") direct.disconnect();
+        else if (failure === "error") (direct as unknown as { emit(type: string, event: unknown): void }).emit("error", {});
+        else jest.advanceTimersByTime(6_000);
+        await settle();
+        expect(failed).toBe(1);
+        expect(await sent).toMatchObject({ ok: false, code: "disconnected" });
+        expect(await action).toMatchObject({ ok: false, code: "disconnected" });
+        expect(await secret).toMatchObject({ ok: false, code: "disconnected" });
+        expect(await unsent).toMatchObject({ ok: false, code: "not_transmitted" });
+        if (failure !== "probe") { jest.advanceTimersByTime(250); await settle(); }
+        const relay = FakeSocket.last;
+        expect(relay).not.toBe(direct);
+        expect(relay.url).toBe("wss://manager.example/ws?machine_id=a");
+        relay.open(); relay.receive(snapshot(["input-ready", "submit", "pending-input", "secret-input", "ping"]));
+        await transport.directFetch("/api/machines/a/session");
+        expect(calls).toEqual(["/api/machines/a/direct-access", "/api/machines/a/session"]);
+        const replayed = [...relay.sent];
+        // No obsolete socket callback may clear cooldown, report another failure, emit or replay.
+        direct.open();
+        direct.receive({ type: "input-ready", pane_id: "w1:p1" });
+        direct.receive({ type: "submit-result", id: 1, pane_id: "w1:p1", ok: true });
+        (direct as unknown as { emit(type: string, event: unknown): void }).emit("error", {});
+        if (failure === "close") direct.closeEvent(1006);
+        expect(opened).toBe(1);
+        expect(failed).toBe(1);
+        expect(relay.sent).toEqual(replayed);
+        expect(relay.sent.map((frame) => frame.type)).toEqual(["role", "attach"]);
+        expect((await resolve(new AbortController().signal)).url).toBe(relay.url);
+        if (failure !== "close") {
+          direct.closeEvent(OUTPUT_STALLED_CLOSE_CODE);
+          expect(client.state).toBe("stopped");
+          expect(relay.readyState).toBe(3);
+        }
+      } finally { client.close(); transport.clear(); }
+    }
+  } finally { jest.useRealTimers(); }
+});
+
+it("does not report normal close, output stall or deliberate lifecycle replacements as endpoint failures", async () => {
+  jest.useFakeTimers();
+  try {
+    for (const ending of ["normal", "going-away", "stalled", "reconnect", "pagehide", "dispose", "wake-closed", "replace-closing"]) {
+      let failures = 0;
+      const client = new HerdrSocket(async () => ({ url: "ws://direct", failed: () => { failures++; } }));
+      try {
+        client.connect(); await settle();
+        const socket = FakeSocket.last;
+        socket.open();
+        client.wake();
+        expect(failures).toBe(0);
+        if (ending === "normal") socket.closeEvent(1000);
+        else if (ending === "going-away") socket.closeEvent(1001);
+        else if (ending === "stalled") socket.closeEvent(OUTPUT_STALLED_CLOSE_CODE);
+        else if (ending === "reconnect") client.reconnect();
+        else if (ending === "pagehide") globalThis.dispatchEvent(new Event("pagehide"));
+        else if (ending === "dispose") client.close();
+        else if (ending === "wake-closed") { socket.close(); client.wake(); }
+        else { socket.closing(); client.connect(); }
+        await settle();
+        socket.open();
+        (socket as unknown as { emit(type: string, event: unknown): void }).emit("error", {});
+        socket.closeEvent(1000);
+        expect(failures).toBe(0);
+        if (ending === "stalled") {
+          jest.advanceTimersByTime(60_000);
+          expect(client.state).toBe("stopped");
+          expect(FakeSocket.last).toBe(socket);
+        }
+      } finally { client.close(); }
+    }
+  } finally { jest.useRealTimers(); }
 });
 
 it("ignores late resolver results and rejections after close or explicit replacement", async () => {

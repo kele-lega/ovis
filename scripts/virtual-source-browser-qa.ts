@@ -228,6 +228,8 @@ try {
   assert.ok(policy, "build the app before its enforcing CSP regression");
   server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
     const url = new URL(request.url);
+    // This relay-only fixture issues no optional direct credentials.
+    if (/^\/api\/machines\/[^/]+\/direct-access$/.test(url.pathname)) return new Response(null, { status: 204 });
     const api = /^\/api\/(?:machines\/([^/]+)\/)?fs\/(stat|file)$/.exec(url.pathname);
     if (api) {
       requests.push(url.pathname);
