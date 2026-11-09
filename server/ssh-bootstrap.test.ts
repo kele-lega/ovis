@@ -107,8 +107,8 @@ describe("isolated pending credentials", () => {
 });
 
 describe("normal setup integration with a reserved bootstrap identity", () => {
-  function fixture() {
-    const dir = root(); const manager = new MachineManager(dir, {} as PushService, new CompletionTracker(null), async () => { throw new Error("fixture offline"); }, { bootstrap: dependencies() }); cleanup.push(() => manager.stop());
+  function fixture(extra: BootstrapDependencies = {}) {
+    const dir = root(); const manager = new MachineManager(dir, {} as PushService, new CompletionTracker(null), async () => { throw new Error("fixture offline"); }, { bootstrap: dependencies(extra) }); cleanup.push(() => manager.stop());
     const start = spyOn(SshConnection.prototype, "start").mockResolvedValue(); cleanup.push(() => start.mockRestore());
     const internals = manager as unknown as { prepare(runtime: unknown, job: unknown): Promise<void>; observe(runtime: unknown): Promise<void>; jobs: Map<string, { finished: Promise<void> }>; machines: Map<string, { ssh: SshConnection }> };
     const prepare = spyOn(internals, "prepare").mockResolvedValue(); cleanup.push(() => prepare.mockRestore());
@@ -242,6 +242,69 @@ describe("normal setup integration with a reserved bootstrap identity", () => {
     expect(events.at(-1)).toEqual({ type: "machine-setups", setups: [] });
     expect(f.manager.bootstrapAttempt(attempt.id).machine_id).toBe(attempt.machine_id);
     unsubscribe();
+  });
+  it("recovers a failed guided job then explicitly retries its same literal dedicated identity", async () => {
+    const f = fixture();
+    const attempt = await f.manager.createBootstrap({ ...request, name: "Retained fixture" });
+    const internal = f.manager as unknown as { stage(job: unknown, phase: string, step: string): void };
+    f.prepare.mockImplementationOnce(async (_runtime, job) => { internal.stage(job, "installing", "Installing fixture bundle…"); throw new Error("fixture install failed"); });
+    const failed = f.manager.connectBootstrap(attempt.id); await f.internals.jobs.get(failed.id)!.finished;
+    const originalSsh = f.start.mock.contexts[0] as SshConnection;
+    const keyPath = originalSsh.keyPath!;
+    const starts = f.start.mock.calls.length;
+    expect(f.manager.job(failed.id)).toMatchObject({ name: "Retained fixture", bootstrap_attempt_id: attempt.id, phase: "failed", target: attempt.target });
+    expect(f.manager.bootstrapAttempt(failed.bootstrap_attempt_id!)).toEqual(attempt);
+    expect(f.start.mock.calls).toHaveLength(starts); expect(f.manager.list()).toHaveLength(1);
+    expect(readFileSync(keyPath, "utf8")).toBe("FIXTURE_PRIVATE");
+    const summary = JSON.stringify(f.manager.setupSummaries());
+    for (const hidden of [attempt.id, "bootstrap_attempt_id", "target", "identity_file", "public_key", "source_ip", "command", "challenge", "ssh_output", "FIXTURE_PRIVATE"]) expect(summary).not.toContain(hidden);
+    const ready = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
+    f.prepare.mockImplementationOnce(async () => { ready.resolve(); await finish.promise; });
+    const retry = f.manager.connectBootstrap(failed.bootstrap_attempt_id!, true); await ready.promise;
+    try {
+      expect(retry.machine_id).toBe(attempt.machine_id); expect(retry.bootstrap_attempt_id).toBe(attempt.id); expect(retry.name).toBe("Retained fixture");
+      const ssh = f.start.mock.contexts.at(-1) as SshConnection;
+      expect(ssh.keyPath).toBe(keyPath); expect(ssh.exclusiveIdentity).toBe(true); expect(ssh.keyOnly).toBe(true);
+      expect(sshAddress(retry.target)).toBe(literalAddress(attempt.target));
+      const options = (ssh as unknown as { options(): string[] }).options(); expect(options).toContain("IdentityAgent=none"); expect(options).toContain("PasswordAuthentication=no");
+      expect(() => f.manager.connectBootstrap(attempt.id)).toThrow("already running");
+      expect(() => f.manager.setup({ ...attempt.target })).toThrow("already connecting");
+      expect(f.start.mock.calls).toHaveLength(starts + 1);
+    } finally { finish.resolve(); await f.internals.jobs.get(retry.id)!.finished; }
+    expect(retry.phase).toBe("connected"); expect(f.manager.list()[1]?.id).toBe(attempt.machine_id);
+  });
+  it("retains the guided marker after expiry or explicit discard, but cannot retry the missing credential", async () => {
+    for (const expire of [false, true]) {
+      let now = Date.now(); const f = fixture({ now: () => now });
+      const attempt = await f.manager.createBootstrap(request);
+      f.prepare.mockRejectedValueOnce(new Error("fixture install failed"));
+      const failed = f.manager.connectBootstrap(attempt.id); await f.internals.jobs.get(failed.id)!.finished;
+      if (expire) now += BOOTSTRAP_TTL_MS + 1; else await f.manager.cancelBootstrap(attempt.id);
+      expect(f.manager.job(failed.id)?.bootstrap_attempt_id).toBe(attempt.id);
+      const starts = f.start.mock.calls.length;
+      expect(() => f.manager.bootstrapAttempt(attempt.id)).toThrow("expired or was cancelled");
+      expect(() => f.manager.connectBootstrap(attempt.id)).toThrow("expired or was cancelled");
+      expect(f.start.mock.calls).toHaveLength(starts); expect(f.manager.list()).toHaveLength(1);
+    }
+  });
+  it("derives registration on failed ordinary job reads so recovery reuses an existing PC, never duplicates it", async () => {
+    const f = fixture();
+    const target = { destination: "fixture-alias", port: 2222, identity_file: "~/.ssh/fixture", session: "fixture-session" };
+    f.observe.mockRejectedValueOnce(new Error("fixture observation failed"));
+    const failed = f.manager.setup({ ...target, name: "Retained ordinary PC" }); await f.internals.jobs.get(failed.id)!.finished;
+    const recovered = f.manager.job(failed.id)!;
+    expect(recovered).toMatchObject({ phase: "failed", registered: true, target, name: "Retained ordinary PC" });
+    expect(f.manager.list()).toHaveLength(2);
+    const retry = f.manager.setup({ ...recovered.target, name: recovered.name, machine_id: recovered.machine_id });
+    await f.internals.jobs.get(retry.id)!.finished;
+    expect(retry.phase).toBe("connected"); expect(retry.machine_id).toBe(failed.machine_id); expect(f.manager.list()).toHaveLength(2);
+    f.manager.remove(failed.machine_id);
+    expect(f.manager.job(failed.id)?.registered).toBe(false);
+    const starts = f.start.mock.calls.length;
+    // Removing the PC after it was read invalidates the stale retry; it does not silently add it again.
+    expect(() => f.manager.setup({ ...recovered.target, machine_id: recovered.machine_id })).toThrow("PC not found");
+    expect(f.start.mock.calls).toHaveLength(starts); expect(f.manager.list()).toHaveLength(1);
+    const summary = JSON.stringify(f.manager.setupSummaries()); expect(summary).not.toContain("registered");
   });
   it("shows manual first-install tasks too, then removes them on cancellation", async () => {
     const f = fixture();

@@ -37,7 +37,10 @@ export async function handleMachineBootstrapRequest(request: Request, manager: M
         }
         if (parts.length === 2) {
           setRequestRoute("/api/machines/bootstrap/:attempt_id");
-          if (request.method === "GET") return respond(manager.bootstrapAttempt(parts[1]!));
+          if (request.method === "GET") {
+            if (!owner) return refuse("forbidden", "Only the owner can read this PC's SSH bootstrap attempt.", 403);
+            return respond(manager.bootstrapAttempt(parts[1]!));
+          }
           if (request.method === "DELETE") { await manager.cancelBootstrap(parts[1]!); return respond({ ok: true }); }
           return refuse("method_not_allowed", "Use GET or DELETE", 405);
         }

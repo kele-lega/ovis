@@ -350,16 +350,22 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
       }
       if (parts.length === 2) {
         setRequestRoute("/api/machines/setup/:job_id");
+        // Watchers recover progress through summaries, never SSH challenges or guided controls.
+        const refused = (code: string, message: string) => jsonResponse({ error: { code, message } }, 403, { "cache-control": "no-store" });
+        if (readOnly) return refused("read_only", "this device can only watch");
         const action = request.method === "POST" ? await request.json().catch(() => null) as SetupAction | null : null;
         const job = manager.job(parts[1]!);
         if (!job) return fail("job_not_found", "Setup job not found", 404);
+        if (job.bootstrap_attempt_id && !owner) return refused("forbidden", OWNER_ONLY);
         if (request.method === "POST") {
           if (!isJsonObject(action)) return fail("invalid_body", "Expected a setup action", 400);
           if (action.action === "answer" && job.challenge?.kind === "secret" && !canSendSecret(request)) return fail("https_required", "Passwords and key passphrases require HTTPS or localhost", 403);
           manager.action(parts[1]!, action);
         } else if (request.method === "DELETE") manager.action(parts[1]!, { action: "cancel" });
         else if (request.method !== "GET") return fail("method_not_allowed", "Use GET, POST or DELETE", 405);
-        return jsonResponse(manager.job(parts[1]!));
+        const snapshot = manager.job(parts[1]!)!;
+        const { name: _name, registered: _registered, ...legacy } = snapshot;
+        return jsonResponse(owner ? snapshot : legacy, 200, { "cache-control": "no-store" });
       }
     }
     if (parts[0] === "settings" && parts.length === 1) {

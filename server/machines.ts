@@ -910,7 +910,10 @@ export class MachineManager {
       this.relayWritten = relayText;
     }
   }
-  job(id: string): SetupJob | undefined { return this.jobs.get(id)?.public; }
+  job(id: string): SetupJob | undefined {
+    const job = this.jobs.get(id)?.public;
+    return job ? { ...job, registered: this.machines.has(job.machine_id) } : undefined;
+  }
   settings(): MachineSettings { return { ...this.preferences, ...(this.setAside.length > 0 ? { set_aside: [...this.setAside] } : {}) }; }
   updateSettings(patch: Record<string, unknown>): MachineSettings {
     if (patch["auto_update_bridges"] !== undefined) {
@@ -1318,6 +1321,8 @@ export class MachineManager {
     const moving = !!existing && !sameSshSession(target, existing.machine.target!);
     const resumeRetry = existing?.machine.state === "reconnecting";
     const job: JobState = { update: request.update_remote === true, auto, public: { id, machine_id: machineId, target, phase: "connecting", step: "Connecting with SSH keys and ssh-agent…", challenge: null, installations: [], error: null, ssh_output: null, progress: null }, abort: new AbortController(), timer: setTimeout(() => this.cancelJob(id, true), 600_000), stageStartedAt: Date.now(), finished: Promise.resolve() };
+    if (name !== undefined) job.public.name = name;
+    if (options.bootstrap) job.public.bootstrap_attempt_id = options.bootstrap.id;
     if (options.expectedRevision) job.expectedRevision = options.expectedRevision;
     if (job.update && existing) { job.runtime = existing; existing.machine.update_error = null; }
     if (job.update && existing && !auto) existing.updateCancelled = false;

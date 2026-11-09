@@ -324,6 +324,12 @@ export interface SetupChallenge { id: string; kind: "host_key" | "secret"; promp
 export interface SetupJob {
   id: string;
   machine_id: string;
+  /** Original requested name for restoring an unsaved PC's form (owner controls only). */
+  name?: string;
+  /** Whether this job's PC is registered now, derived on full-job reads for recovery only. */
+  registered?: boolean;
+  /** Retained guided attempt; retry through bootstrap/connect, never ambient SSH setup. */
+  bootstrap_attempt_id?: string;
   phase: SetupPhase;
   step: string;
   challenge: SetupChallenge | null;

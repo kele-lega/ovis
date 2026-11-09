@@ -8,6 +8,8 @@ import { buildDemoApp } from "./demo-build.ts";
 import { chromePath } from "./chrome-path.ts";
 import { openSettingsPage } from "./settings-page.ts";
 import { ZH } from "../src/lib/i18n.zh.ts";
+import type { BootstrapAttempt } from "../shared/bootstrap.ts";
+import type { MachineSetupSummary, SetupJob } from "../shared/machines.ts";
 
 const root = mkdtempSync(join(tmpdir(), "ovis-tailnet-demo-"));
 const app = join(root, "app");
@@ -43,7 +45,8 @@ const probe = `(() => {
   };
   const guidedRoster = (machines) => machines.map((machine) => machine.id === 'laptop' ? { ...machine, can_revoke_bootstrap: window.tailnetProbe.guided } : machine);
   const backgroundJob = { id: 'fixture-background-job', machine_id: 'fixture-new-pc', phase: 'installing', step: 'Installing fictional bridge…', error: null, challenge: null, installations: [], ssh_output: null, target: { destination: 'fixture.invalid' }, progress: { stage: 'download', done: 50, total: 100, rate: null, elapsed_ms: 0 } };
-  if (new URLSearchParams(location.search).has('tailnet_resume')) window.tailnetProbe.summaries = [{ ...backgroundJob, name: 'Background fixture PC' }];
+  window.tailnetProbe.backgroundJob = backgroundJob;
+  if (new URLSearchParams(location.search).has('tailnet_resume')) window.tailnetProbe.summaries = [{ id: backgroundJob.id, machine_id: backgroundJob.machine_id, name: 'Background fixture PC', phase: backgroundJob.phase, step: backgroundJob.step, error: null, progress: backgroundJob.progress }];
   const peers = [
     { id: 'build-peer', name: 'build-box', hostname: 'BUILD', dns_name: 'build-box.example.ts.net', destination: '100.64.0.2', addresses: ['100.64.0.2'], os: 'linux', online: true, registrations: [{ user: 'root', port: 22, session: 'default', name: 'Build account' }] },
     { id: 'windows-peer', name: 'windows-pc', hostname: 'WINDOWS', dns_name: null, destination: '100.64.0.3', addresses: ['100.64.0.3'], os: 'windows', online: false, registrations: [] },
@@ -56,7 +59,7 @@ const probe = `(() => {
     if (path === '/api/machines/setups') return Response.json({ setups: p.summaries });
     if (path === '/api/machines/setup/fixture-background-job') {
       if (init?.method === 'POST') { p.backgroundActions = (p.backgroundActions || 0) + 1; p.emitSetups([]); return Response.json({ ...backgroundJob, phase: 'cancelled' }); }
-      p.backgroundReads++; return Response.json(backgroundJob);
+      p.backgroundReads++; return Response.json(p.backgroundJob);
     }
     if (path === '/api/machines/ssh-candidates') return Response.json({ pcs: [] });
     if (path === '/api/machines/laptop/revoke-bootstrap') {
@@ -80,19 +83,25 @@ const probe = `(() => {
         const body = JSON.parse(init.body); p.bootstraps.push(body);
         if (p.bootstrapMode === 'unavailable') return Response.json({ error: { code: 'bootstrap_unavailable', message: 'No verified fixture asset' } }, { status: 503 });
         if (p.bootstrapMode === 'held') await new Promise((resolve) => { p.releaseBootstrap = resolve; });
-        return Response.json({ id: 'fixture-bootstrap', machine_id: 'fixture-guided-pc', target: { destination: body.username + '@100.64.0.3', port: 22 }, os: 'windows', expires_at: Date.now() + (p.bootstrapMode === 'expired' ? -1 : 900000), command: "Write-Output 'DEMO ONLY - no installation'", cleanup_command: "Write-Output 'DEMO ONLY - cleanup'", public_key: 'DEMO-NOT-A-KEY', source_ip: '100.64.0.1' }, { status: 201, headers: { 'cache-control': 'no-store' } });
+        p.bootstrapAttempt = { id: 'fixture-bootstrap', machine_id: 'fixture-guided-pc', target: { destination: body.username + '@100.64.0.3', port: 22 }, os: 'windows', expires_at: Date.now() + (p.bootstrapMode === 'expired' ? -1 : 900000), command: "Write-Output 'DEMO ONLY - no installation'", cleanup_command: "Write-Output 'DEMO ONLY - cleanup'", public_key: 'DEMO-NOT-A-KEY', source_ip: '100.64.0.1' };
+        return Response.json(p.bootstrapAttempt, { status: 201, headers: { 'cache-control': 'no-store' } });
+      }
+      if (path === '/api/machines/bootstrap/fixture-bootstrap' && (!init?.method || init.method === 'GET')) {
+        p.bootstrapReads = (p.bootstrapReads || 0) + 1;
+        return p.bootstrapMode === 'discarded' ? Response.json({ error: { code: 'bootstrap_expired', message: 'Fixture attempt was discarded' } }, { status: 410 }) : Response.json(p.bootstrapAttempt);
       }
       if (init?.method === 'DELETE') { p.bootstrapCancels++; return Response.json({ ok: true }); }
       if (path.endsWith('/connect')) {
         p.bootstrapConnects++;
-        p.bootstrapJob = { id: 'fixture-bootstrap-job', machine_id: 'fixture-guided-pc', phase: 'authentication', step: 'Verify the server fingerprint', challenge: { id: 'fixture-host-key', kind: 'host_key', prompt: 'ED25519 key fingerprint is SHA256:FICTIONALabcdefghijklmnopqrstuvw1234567890123' }, target: { destination: 'alice@100.64.0.3', port: 22 }, installations: [], error: null, ssh_output: null };
+        p.bootstrapUpdates = [...(p.bootstrapUpdates || []), JSON.parse(init.body)];
+        p.bootstrapJob = { id: 'fixture-bootstrap-job', machine_id: 'fixture-guided-pc', bootstrap_attempt_id: 'fixture-bootstrap', name: 'fixture-pc', phase: 'authentication', step: 'Verify the server fingerprint', challenge: { id: 'fixture-host-key', kind: 'host_key', prompt: 'ED25519 key fingerprint is SHA256:FICTIONALabcdefghijklmnopqrstuvw1234567890123' }, target: { destination: 'alice@100.64.0.3', port: 22 }, installations: [], error: null, ssh_output: null };
         return Response.json(p.bootstrapJob);
       }
     }
     if (path === '/api/machines/setup/fixture-bootstrap-job') {
       if (init?.method === 'POST') {
         const action = JSON.parse(init.body);
-        if (action.action === 'cancel') p.bootstrapJob = { ...p.bootstrapJob, phase: 'cancelled', challenge: null };
+        if (action.action === 'cancel') { p.bootstrapJob = { ...p.bootstrapJob, phase: 'cancelled', challenge: null }; p.emitSetups(p.summaries.filter((setup) => setup.id !== p.bootstrapJob.id)); }
         else if (action.action === 'answer') p.bootstrapJob = { ...p.bootstrapJob, phase: 'approval', challenge: null, installations: ['Install fictional bridge - nothing executes'] };
         else if (action.action === 'approve') p.bootstrapJob = { ...p.bootstrapJob, phase: 'connected', challenge: null };
       }
@@ -114,7 +123,7 @@ const probe = `(() => {
     return response;
   };
 })();`;
-type Probe = { reads: number; setups: { destination: string; name: string; port?: number }[]; bootstraps: { peer_id: string; username: string; name?: string; session?: string }[]; bootstrapConnects: number; bootstrapCancels: number; bootstrapMode: string; releaseBootstrap?: () => void; revokes: { remove_firewall: boolean }[]; revokeFails: boolean; forgotten: number; copied: string; state: string; fixture: { os: string; address: string } | null; failure: string | null; backgroundReads: number; watch: boolean };
+type Probe = { backgroundJob: SetupJob; bootstrapAttempt: BootstrapAttempt; bootstrapJob: SetupJob; bootstrapReads: number; bootstrapUpdates: { update_remote: boolean }[]; emitSetups(setups: MachineSetupSummary[]): void; reads: number; setups: { destination: string; name: string; port?: number }[]; bootstraps: { peer_id: string; username: string; name?: string; session?: string }[]; bootstrapConnects: number; bootstrapCancels: number; bootstrapMode: string; releaseBootstrap?: () => void; revokes: { remove_firewall: boolean }[]; revokeFails: boolean; forgotten: number; copied: string; state: string; fixture: { os: string; address: string } | null; failure: string | null; backgroundReads: number; watch: boolean };
 const readProbe = (page: Page) => page.evaluate(() => (window as unknown as { tailnetProbe: Probe }).tailnetProbe);
 
 try {
@@ -319,8 +328,79 @@ try {
           if (width < 640 && !await task.isVisible()) await page.getByRole("button", { name: label("Open workspace list"), exact: true }).click();
           await task.getByRole("button", { name: label("Cancel install"), exact: true }).click();
           await task.waitFor({ state: "detached" });
-          await page.evaluate(() => (window as unknown as { tailnetProbe: { emitSetups(setups: unknown[]): void } }).tailnetProbe.emitSetups([{ id: "fixture-background-job", machine_id: "fixture-new-pc", name: "Background fixture PC", phase: "failed", step: "Connection failed", error: "Fictional background install failed", progress: null }]));
+          await page.evaluate(() => {
+            const p = (window as unknown as { tailnetProbe: Probe }).tailnetProbe;
+            p.backgroundJob = { ...p.backgroundJob, phase: "failed", registered: true, name: "Retained manual PC", target: { destination: "bob@manual-fixture.invalid", port: 2222, identity_file: "~/.ssh/fixture", session: "fixture-session" }, step: "Connection failed", error: "Fictional background install failed", progress: null };
+            p.emitSetups([{ id: p.backgroundJob.id, machine_id: p.backgroundJob.machine_id, name: "Background fixture PC", phase: "failed", step: "Connection failed", error: p.backgroundJob.error, progress: null }]);
+          });
           await task.getByText("Fictional background install failed", { exact: true }).waitFor();
+          const beforeManualRetry = (await readProbe(page)).setups.length;
+          await task.getByRole("button", { name: label("Show setup"), exact: true }).click();
+          await dialog.getByRole("button", { name: label("Retry connection"), exact: true }).waitFor();
+          assert.equal(await destination.inputValue(), "bob@manual-fixture.invalid", "resumed failure restores its SSH destination");
+          assert.equal(await dialog.getByLabel(label("PC name"), { exact: true }).inputValue(), "Retained manual PC");
+          await dialog.getByText(label("Advanced settings"), { exact: true }).click();
+          assert.equal(await sshPort.inputValue(), "2222");
+          assert.equal(await privateKey.inputValue(), "~/.ssh/fixture");
+          assert.equal(await dialog.getByLabel(label("herdr session name"), { exact: true }).inputValue(), "fixture-session");
+          assert.equal((await readProbe(page)).setups.length, beforeManualRetry, "reading failed setup never retries");
+          await dialog.getByRole("button", { name: label("Retry connection"), exact: true }).click();
+          await page.waitForFunction((before) => (window as unknown as { tailnetProbe: Probe }).tailnetProbe.setups.length === before + 1, beforeManualRetry);
+          assert.deepEqual((await readProbe(page)).setups.at(-1), { destination: "bob@manual-fixture.invalid", name: "Retained manual PC", port: 2222, identity_file: "~/.ssh/fixture", session: "fixture-session", machine_id: "fixture-new-pc" });
+          await dialog.getByRole("button", { name: label("Close PC setup"), exact: true }).click();
+          if (width < 640 && !await task.isVisible()) await page.getByRole("button", { name: label("Open workspace list"), exact: true }).click();
+          await task.getByRole("button", { name: label("Dismiss"), exact: true }).click();
+          await task.waitFor({ state: "detached" });
+          // A failed guided install retains its dedicated attempt, not an ordinary SSH retry.
+          const failedGuided = async (mode = "ready") => page.evaluate((mode) => {
+            const p = (window as unknown as { tailnetProbe: Probe }).tailnetProbe;
+            p.bootstrapMode = mode;
+            p.bootstrapAttempt = { ...p.bootstrapAttempt, expires_at: Date.now() + (mode === "expired" ? -1 : 900000) };
+            p.bootstrapJob = { ...p.bootstrapJob, phase: "failed", step: "Connection failed", error: "Fictional guided install failed", challenge: null, action_required: "update_bridge", progress: null };
+            p.emitSetups([{ id: p.bootstrapJob.id, machine_id: p.bootstrapJob.machine_id, name: "Retained guided PC", phase: "failed", step: "Connection failed", error: p.bootstrapJob.error, progress: null }]);
+          }, mode);
+          await failedGuided();
+          const beforeGuidedRetry = await readProbe(page);
+          await task.getByRole("button", { name: label("Show setup"), exact: true }).click();
+          await dialog.getByRole("heading", { name: label("First-time SSH setup"), exact: true }).waitFor();
+          const updateGuided = dialog.getByRole("button", { name: label("Update bridge and connect"), exact: true });
+          assert.equal(await updateGuided.isDisabled(), true, "recovered commands need fresh acknowledgement");
+          assert.equal(await dialog.locator("#machine-connect-form").count(), 0, "guided failure never offers ambient SSH");
+          assert.equal((await readProbe(page)).setups.length, beforeGuidedRetry.setups.length);
+          assert.equal((await readProbe(page)).bootstrapConnects, beforeGuidedRetry.bootstrapConnects, "opening a failed guided task only reads");
+          await dialog.getByRole("button", { name: label("Close PC setup"), exact: true }).click();
+          assert.equal((await readProbe(page)).bootstrapCancels, beforeGuidedRetry.bootstrapCancels, "inspecting a failure preserves its pending key");
+          if (width < 640 && !await task.isVisible()) await page.getByRole("button", { name: label("Open workspace list"), exact: true }).click();
+          await task.getByRole("button", { name: label("Show setup"), exact: true }).click();
+          await dialog.getByRole("heading", { name: label("First-time SSH setup"), exact: true }).waitFor();
+          await dialog.getByLabel(label("I ran the command successfully on the selected PC and kept its SSH fingerprints for comparison."), { exact: true }).check();
+          await updateGuided.click();
+          await dialog.getByRole("button", { name: label("Trust fingerprint"), exact: true }).waitFor();
+          assert.equal((await readProbe(page)).bootstrapConnects, beforeGuidedRetry.bootstrapConnects + 1, "only explicit retry connects the retained attempt");
+          assert.deepEqual((await readProbe(page)).bootstrapUpdates.at(-1), { update_remote: true });
+          assert.equal((await readProbe(page)).bootstraps.length, beforeGuidedRetry.bootstraps.length, "retry never creates a new credential");
+          assert.equal((await readProbe(page)).setups.length, beforeGuidedRetry.setups.length);
+          assert.equal(await dialog.getByRole("button", { name: label("Install and connect"), exact: true }).count(), 0, "retry still waits for fingerprint trust and install approval");
+          await dialog.getByRole("button", { name: label("Close PC setup"), exact: true }).click();
+          // A retained marker remains fail-closed when its attempt expired or was discarded.
+          for (const mode of ["expired", "discarded"]) {
+            await failedGuided(mode);
+            if (width < 640 && !await task.isVisible()) await page.getByRole("button", { name: label("Open workspace list"), exact: true }).click();
+            const beforeUnavailable = await readProbe(page);
+            await task.getByRole("button", { name: label("Show setup"), exact: true }).click();
+            await dialog.getByText(label("This setup attempt expired. Go back and generate a new command; do not run the old command."), { exact: true }).waitFor();
+            assert.equal(await updateGuided.isDisabled(), true);
+            assert.equal(await dialog.locator("#machine-connect-form").count(), 0);
+            assert.equal(await dialog.getByLabel(label("SSH setup command"), { exact: true }).count(), 0);
+            assert.equal((await readProbe(page)).bootstrapConnects, beforeUnavailable.bootstrapConnects);
+            await dialog.getByRole("button", { name: label("Discard setup and go back"), exact: true }).click();
+            await destination.waitFor();
+            assert.equal(await destination.inputValue(), "alice@100.64.0.3");
+            assert.equal((await readProbe(page)).bootstrapCancels, beforeUnavailable.bootstrapCancels + 1);
+            assert.equal((await readProbe(page)).setups.length, beforeUnavailable.setups.length, "discard returns to manual entry without connecting");
+            await dialog.getByRole("button", { name: label("Close PC setup"), exact: true }).click();
+          }
+          if (width < 640 && !await task.isVisible()) await page.getByRole("button", { name: label("Open workspace list"), exact: true }).click();
           await task.getByRole("button", { name: label("Dismiss"), exact: true }).click();
           await task.waitFor({ state: "detached" });
           // A completed background install keeps its next actions, without auto-opening anything.

@@ -8,7 +8,7 @@ import { copyText } from "../lib/clipboard.ts";
 import { useT } from "../lib/i18n.ts";
 
 /** Public setup material only. Copying never executes a command or trusts a host key. */
-export function MachineBootstrap({ attempt, name, acknowledged, pending, onAcknowledge, onExpired }: { attempt: BootstrapAttempt; name: string; acknowledged: boolean; pending: boolean; onAcknowledge(value: boolean): void; onExpired(): void }) {
+export function MachineBootstrap({ attempt, name, acknowledged, pending, retained = false, onAcknowledge, onExpired }: { attempt: BootstrapAttempt; name: string; acknowledged: boolean; pending: boolean; retained?: boolean; onAcknowledge(value: boolean): void; onExpired(): void }) {
   const t = useT();
   const title = useRef<HTMLHeadingElement>(null);
   useEffect(() => { title.current?.focus(); }, [attempt.id]);
@@ -29,7 +29,7 @@ export function MachineBootstrap({ attempt, name, acknowledged, pending, onAckno
       <p className="field-hint">{t("Windows administrator accounts share an SSH key file. The script warns and asks before granting access to that shared file; the key is not restricted to one administrator username.")}</p>
     </> : <p className="field-hint">{t("First enable and review SSH manually: Linux needs a running OpenSSH service; macOS needs Remote Login in System Settings. This command does not start SSH on these systems. sudo may ask for the PC’s administrator password.")}</p>}
     {expired ? <p className="machine-error" role="alert">{t("This setup attempt expired. Go back and generate a new command; do not run the old command.")}</p> : <>
-      <p className="field-hint">{t("Connect before {time}. Closing or cancelling discards the pending server key; it does not undo changes already made on the PC.", { time: new Date(attempt.expires_at).toLocaleTimeString() })}</p>
+      {!retained && <p className="field-hint">{t("Connect before {time}. Closing or cancelling discards the pending server key; it does not undo changes already made on the PC.", { time: new Date(attempt.expires_at).toLocaleTimeString() })}</p>}
       <BootstrapCommand command={attempt.command} label={t("SSH setup command")} />
       <label className="machine-bootstrap-check"><input type="checkbox" checked={acknowledged} disabled={pending} onChange={(event) => onAcknowledge(event.target.checked)} /><span>{t("I ran the command successfully on the selected PC and kept its SSH fingerprints for comparison.")}</span></label>
     </>}

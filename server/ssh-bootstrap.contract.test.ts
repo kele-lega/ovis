@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleMachineBootstrapRequest } from "./machine-bootstrap-api.ts";
+import { handleMachineRequest as handleSetupRequest } from "./machine-api.ts";
+import type { SetupJob } from "../shared/machines.ts";
 import { MachineManager } from "./machines.ts";
 import { CompletionTracker } from "./completion.ts";
 import type { PushService } from "./push.ts";
@@ -81,6 +83,30 @@ describe("bootstrap HTTP contract", () => {
     const snapshot = await handleMachineRequest(f.request("bootstrap/" + attempt.id), f.manager); expect(await snapshot.json()).toEqual(attempt);
     for (let i = 0; i < 2; i++) expect((await handleMachineRequest(f.request("bootstrap/" + attempt.id, "DELETE"), f.manager)).status).toBe(200);
     expect((await handleMachineRequest(f.request("bootstrap/" + attempt.id), f.manager)).status).toBe(410);
+  });
+  it("recovers guided controls only for the owner; watching devices read summaries, never jobs", async () => {
+    const f = fixture();
+    const attempt = await f.manager.createBootstrap(valid);
+    const job: SetupJob = { id: "retained", machine_id: attempt.machine_id, name: "Retained fixture", bootstrap_attempt_id: attempt.id, registered: false, phase: "failed", step: "Connection failed", challenge: null, installations: [], error: "fixture failure", ssh_output: null, target: attempt.target };
+    const read = spyOn(f.manager, "job").mockReturnValue(job); cleanups.push(() => read.mockRestore());
+    const ask = (watch: boolean, owner: boolean, headers: Record<string, string> = {}) => handleSetupRequest(f.request("setup/retained", "GET", undefined, headers), f.manager, undefined, undefined, watch, undefined, undefined, undefined, undefined, owner);
+    for (const [watch, owner] of [[true, true], [true, false], [false, false]] as const) {
+      const denied = await ask(watch, owner);
+      expect(denied.status).toBe(403); expect(denied.headers.get("cache-control")).toBe("no-store");
+      expect(await denied.text()).not.toContain(attempt.id);
+    }
+    const deniedOrigin = await ask(false, true, { origin: "https://other.example" }); expect(deniedOrigin.status).toBe(403);
+    const recovered = await ask(false, true); expect(recovered.status).toBe(200); expect(recovered.headers.get("cache-control")).toBe("no-store"); expect(await recovered.json()).toEqual(job);
+    const snapshotDenied = await handleMachineBootstrapRequest(f.request("bootstrap/" + attempt.id), f.manager, false, false);
+    expect(snapshotDenied?.status).toBe(403); expect(snapshotDenied?.headers.get("cache-control")).toBe("no-store");
+    const snapshot = await handleMachineBootstrapRequest(f.request("bootstrap/" + attempt.id), f.manager, false, true); expect(await snapshot?.json()).toEqual(attempt);
+    // Ordinary driving reads remain compatible; only the new recovery-only name is omitted.
+    const { bootstrap_attempt_id: _attempt, ...ordinary } = job; read.mockReturnValue(ordinary);
+    const { name: _name, registered: _registered, ...legacy } = ordinary;
+    const driver = await ask(false, false); expect(driver.status).toBe(200); expect(await driver.json()).toEqual(legacy);
+    expect((await ask(true, false)).status).toBe(403);
+    await f.manager.cancelBootstrap(attempt.id);
+    expect((await handleMachineBootstrapRequest(f.request("bootstrap/" + attempt.id), f.manager, false, true))?.status).toBe(410);
   });
   it("connect accepts only explicit optional update approval and revoke only firewall boolean", async () => {
     const f = fixture();
