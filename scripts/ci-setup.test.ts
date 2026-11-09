@@ -174,6 +174,17 @@ describe("CI cache contract", () => {
     expect(dockerfile.match(/^ARG PLAYWRIGHT_VERSION=(.+)$/m)?.[1]).toBe(playwright);
   });
 
+  it("prepares a checksum-pinned native PowerShell for bootstrap CI tests", () => {
+    const dockerfile = readFileSync(join(root, "scripts/self-hosted-runner/Dockerfile"), "utf8");
+    expect(dockerfile).toMatch(/^ARG POWERSHELL_VERSION=\d+\.\d+\.\d+$/m);
+    expect(dockerfile).toMatch(/^ARG POWERSHELL_SHA256=[a-f0-9]{64}$/m);
+    expect(dockerfile).toContain('"https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/powershell-${POWERSHELL_VERSION}-linux-x64.tar.gz"');
+    expect(dockerfile).toContain('"${POWERSHELL_SHA256}  /tmp/powershell.tar.gz" | sha256sum -c -');
+    expect(dockerfile).toContain("ln -s /opt/powershell/pwsh /usr/local/bin/pwsh");
+    expect(dockerfile).toContain("pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'");
+    expect(dockerfile.indexOf("ARG POWERSHELL_VERSION=")).toBeLessThan(dockerfile.indexOf("\nUSER runner"));
+  });
+
   it("saves the dependency cache only when a job allows it", () => {
     const save = action.runs.steps.find((step) => step.name === "Cache Bun dependencies")!;
     const restore = action.runs.steps.find((step) => step.name === "Restore Bun dependencies (read-only)")!;

@@ -72,6 +72,22 @@ RUN bunx playwright-core@${PLAYWRIGHT_VERSION} install-deps chromium \
  && chmod -R a+rX "${PLAYWRIGHT_BROWSERS_PATH}" \
  && rm -rf /root/.bun /root/.cache /var/lib/apt/lists/*
 
+# Bootstrap tests parse and exercise the Windows script with native PowerShell even on Linux.
+# Keep its release immutable and checksum-verified, just like the other prepared tools.
+ARG POWERSHELL_VERSION=7.6.9
+ARG POWERSHELL_SHA256=1da6d6d6035d651f20e70ddee7c4c15ac6ab8b9fb40ee92240d91263f28a884b
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libicu74 libgssapi-krb5-2 \
+ && mkdir -p /opt/powershell \
+ && curl -fsSL -o /tmp/powershell.tar.gz \
+      "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/powershell-${POWERSHELL_VERSION}-linux-x64.tar.gz" \
+ && echo "${POWERSHELL_SHA256}  /tmp/powershell.tar.gz" | sha256sum -c - \
+ && tar xzf /tmp/powershell.tar.gz -C /opt/powershell \
+ && chmod 0755 /opt/powershell/pwsh \
+ && ln -s /opt/powershell/pwsh /usr/local/bin/pwsh \
+ && pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' \
+ && rm -rf /tmp/powershell.tar.gz /var/lib/apt/lists/*
+
 # Jobs check out under /w: check.ts puts herdr's socket under the workspace's .ci/, and a unix
 # socket path is limited to about 100 bytes (the default _work under actions-runner is too long).
 RUN mkdir /w && chown runner:runner /w
