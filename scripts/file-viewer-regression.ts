@@ -456,7 +456,8 @@ try {
   // Add PC from Settings over a preview: Settings closes, the preview stays mounted beneath, and
   // the native modal Add PC opens is on top. Tab walks Add PC's own controls; the preview's trap
   // must not take it back to its own, now inert, controls.
-  await page.setViewportSize({ width: 1280, height: 800 });
+  for (const width of [390, 1280]) {
+  await page.setViewportSize({ width, height: 800 });
   await videoLink.click();
   await preview.waitFor();
   await page.keyboard.press("ControlOrMeta+Shift+Comma");
@@ -492,7 +493,9 @@ try {
   assert.deepEqual(await page.evaluate(() => history.state["ovis:file-preview"]), previewUnderAddPc, "Escape over Add PC preserves the preview entry");
   await preview.getByRole("button", { name: "Close file", exact: true }).click();
   await preview.waitFor({ state: "hidden" });
-  console.log("PASS Add PC opened from Settings over a preview keeps Tab inside Add PC, and its Escape closes Add PC alone");
+  assert.equal(await page.evaluate(() => history.state?.["ovis:file-preview"]), undefined, "one close consumes the original preview, with no copied overlay entry");
+  console.log(`PASS Add PC opened from Settings over a preview at ${width}px keeps Tab inside Add PC, and its Escape closes Add PC alone`);
+  }
 
   // With no preview beneath it, Settings stays on the layer every dialog shares, so the palette
   // its shortcut opens is drawn above Settings instead of taking focus and Escape unseen.

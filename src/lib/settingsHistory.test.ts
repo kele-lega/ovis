@@ -349,6 +349,126 @@ async function delayedHistory(initial: unknown[] = [null]) {
   };
 }
 
+describe("dialog handoff after Settings", () => {
+  it("runs immediately without Settings and writes no replacement overlay entry", async () => {
+    const preview = { path: "fixture.md", machineId: "local" };
+    const browser = await delayedHistory([{ "ovis:file-preview": preview, "ovis:web-panel": { url: "https://example.invalid" } }]);
+    let opened = 0;
+    const before = browser.history.state;
+    browser.afterSettingsExit(() => { opened++; });
+    expect(opened).toBe(1);
+    expect(browser.history.state).toBe(before);
+    expect(browser.requests).toEqual([]);
+  });
+
+  it("waits for the actual delayed exit and preserves the original preview/web panel entry", async () => {
+    const preview = { path: "fixture.md", machineId: "local" };
+    const webPanel = { url: "https://example.invalid" };
+    const browser = await delayedHistory([null, { "ovis:file-preview": preview, "ovis:web-panel": webPanel }]);
+    browser.recordSettings(browser.settingsLevels(true, "devices", false));
+    let opened = 0;
+    let dispatchFinished = false;
+    browser.afterSettingsExit(() => { expect(dispatchFinished).toBe(true); opened++; });
+    window.addEventListener("popstate", () => { dispatchFinished = true; });
+    browser.recordSettings([]);
+    browser.advance(10_000);
+    expect(opened).toBe(0);
+    expect(browser.requests).toEqual([1]);
+    await browser.land();
+    expect(opened).toBe(1);
+    expect(browser.index).toBe(1);
+    expect(browser.history.state).toMatchObject({ "ovis:file-preview": preview, "ovis:web-panel": webPanel });
+    browser.history.go(-1);
+    await browser.land();
+    expect(browser.history.state).toBeNull();
+    expect(opened).toBe(1);
+  });
+
+  it("keeps waiting when an earlier width traversal must land before the closing one", async () => {
+    const browser = await delayedHistory();
+    browser.recordSettings(browser.settingsLevels(true, "devices", true));
+    browser.recordSettings(browser.settingsLevels(false, "devices", true));
+    let opened = 0;
+    browser.afterSettingsExit(() => { opened++; });
+    browser.recordSettings([]);
+    await browser.land();
+    expect(opened).toBe(0);
+    await browser.land();
+    expect(opened).toBe(1);
+    expect(browser.index).toBe(0);
+  });
+
+  it("recognizes the original anchor when Settings took over a phone sheet", async () => {
+    const preview = { "ovis:file-preview": { path: "fixture.md" }, "ovis:sheet-under": "palette" };
+    const browser = await delayedHistory([null, preview, { ...preview, "ovis:sheet": "palette" }]);
+    const push = browser.history.pushState;
+    browser.history.pushState = (state: unknown) => { browser.history.pushState = push; browser.history.replaceState(withoutSheet(state)); };
+    browser.recordSettings(browser.settingsLevels(true, "devices", false));
+    let opened = 0;
+    browser.afterSettingsExit(() => { opened++; });
+    browser.recordSettings([]);
+    await browser.land();
+    expect(opened).toBe(1);
+    expect(browser.history.state).toEqual(preview);
+  });
+
+  it("exits past a closing phone sheet inside Settings without duplicating the preview", async () => {
+    const preview = { "ovis:file-preview": { path: "fixture.md" } };
+    const browser = await delayedHistory([null, preview]);
+    browser.recordSettings(browser.settingsLevels(true, "devices", false));
+    openSheet(browser.history, "connect");
+    let opened = 0;
+    browser.afterSettingsExit(() => { opened++; });
+    const take = sheetStep.takeLeaving;
+    sheetStep.takeLeaving = (state) => (state as Record<string, unknown>)["ovis:sheet"] === "connect";
+    try {
+      browser.recordSettings([]);
+      expect(browser.requests).toEqual([1]);
+      await browser.land();
+      expect(opened).toBe(1);
+      expect(browser.history.state).toMatchObject(preview);
+      expect(browser.index).toBe(1);
+    } finally { sheetStep.takeLeaving = take; }
+  });
+
+  it("cancels a superseded or unmounted handoff before its exit lands", async () => {
+    const browser = await delayedHistory();
+    browser.recordSettings(browser.settingsLevels(false, "devices", false));
+    let opened = 0;
+    const cancel = browser.afterSettingsExit(() => { opened++; });
+    browser.recordSettings([]);
+    cancel();
+    await browser.land();
+    expect(opened).toBe(0);
+  });
+
+  it("does not open after an unrelated navigation even if its null-Settings state lands", async () => {
+    const browser = await delayedHistory([{ "ovis:nav": "other" }, { "ovis:nav": "current" }]);
+    browser.recordSettings(browser.settingsLevels(false, "devices", false));
+    let opened = 0;
+    browser.afterSettingsExit(() => { opened++; });
+    browser.recordSettings([]);
+    await browser.move(-2);
+    await settled();
+    expect(opened).toBe(0);
+  });
+
+  it("cancels after another entry is pushed or Settings is reopened while exit is pending", async () => {
+    for (const supersede of ["entry", "settings"] as const) {
+      const browser = await delayedHistory();
+      browser.recordSettings(browser.settingsLevels(false, "devices", false));
+      let opened = 0;
+      browser.afterSettingsExit(() => { opened++; });
+      browser.recordSettings([]);
+      if (supersede === "entry") browser.history.pushState({ "ovis:nav": "new" });
+      else browser.recordSettings(browser.settingsLevels(false, "chat", false));
+      await browser.land();
+      await settled();
+      expect(opened).toBe(0);
+    }
+  });
+});
+
 describe("history traversal races", () => {
   it("keeps a late width-change traversal its own after the landing deadline", async () => {
     const browser = await delayedHistory();

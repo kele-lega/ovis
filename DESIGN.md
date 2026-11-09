@@ -3743,8 +3743,11 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   passwords and passphrases stay only in the DOM input and are cleared on submit or a changed
   challenge. A completed setup offers explicit next steps, not an automatic agent launch. A phone
   leaves Settings before opening the setup sheet so its Back traversal cannot immediately close
-  the new sheet. Bootstrap revoke and local forgetting remain separate confirmed actions; neither
-  can implicitly authorize the other.
+  the new sheet. The handoff waits for that opening's normal history rewind, rather than copying
+  the file preview or web panel beneath it into another entry. Unrelated navigation or a newer
+  setup request cancels the deferred opening. This preserves Ovis's existing layered-sheet model;
+  none of the reference coding-agent apps defines this browser-history contract. Bootstrap revoke
+  and local forgetting remain separate confirmed actions; neither can implicitly authorize the other.
 - The Ovis relay's own group in More settings: its state as the row's sentence with the switch,
   then **Reset relay identity** (confirmed in the shared `ConfirmDialog`; none for a serve-only
   install, which refuses it). Not shown in the hosted shell or to a read-only device.

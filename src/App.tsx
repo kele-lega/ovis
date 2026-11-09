@@ -86,7 +86,7 @@ import { useAccessState, useLockedRef, usePairFromAddress } from "./lib/useAcces
 import { useLocalHealth } from "./lib/useLocalHealth.ts";
 import { useMachinesRef, useRecentFolderMemory, useRefetchTimer, useRosterError, useRosterEvents, useRosterLoader, useRosterState } from "./lib/useMachineRoster.ts";
 import { useMachineSetups } from "./lib/useMachineSetups.ts";
-import { leaveSettingsForMachineSetup, useMachineDialog } from "./lib/useMachineDialog.ts";
+import { useMachineDialog } from "./lib/useMachineDialog.ts";
 import { useNewSessionMachine, useNewSessionState, useSessionHistoryList } from "./lib/useNewSessionDialog.ts";
 import { useCommandPalette } from "./lib/useCommandPalette.ts";
 import { useRenameRequest } from "./lib/useRenameRequest.ts";
@@ -214,7 +214,7 @@ export function App() {
   const { selectedMachineId, setSelectedMachineId, selectedMachine, snapshot } = useSelectedMachine({ initialLink, machines });
   const { machinesRef } = useMachinesRef({ machines });
   const [updateRemote, setUpdateRemote] = useState(false);
-  const { resumeSetupId, setResumeSetupId, machineDialog, setMachineDialog, addPcPreset, setAddPcPreset, addPcFocusReturn, closeMachineDialog } = useMachineDialog();
+  const { resumeSetupId, setResumeSetupId, machineDialog, setMachineDialog, addPcPreset, setAddPcPreset, addPcFocusReturn, closeMachineDialog, openAfterSettings } = useMachineDialog();
   const { newSessionMachineId, setNewSessionMachineId } = useNewSessionMachine();
   const { health, localFreshness, shownHealth, readLocalHealth } = useLocalHealth();
   const exposure = health?.lan_exposure ?? health?.direct_exposure;
@@ -634,22 +634,24 @@ export function App() {
         setSettingsOpen(true);
       },
       openAddPc: (preset) => {
-        leaveSettingsForMachineSetup();
-        setResumeSetupId(undefined);
-        // the new PC reports its progress in the sidebar: nothing should sit over it
+        openAfterSettings(() => {
+          setResumeSetupId(undefined);
+          setUpdateRemote(false);
+          addPcFocusReturn.current = true;
+          setAddPcPreset(preset ?? null);
+          setMachineDialog("new");
+        });
+        // Its ordinary rewind preserves the preview/web panel under Settings. Only then mount setup.
         setSettingsOpen(false);
-        setUpdateRemote(false);
-        addPcFocusReturn.current = true;
-        setAddPcPreset(preset ?? null);
-        setMachineDialog("new");
       },
       connectPc: (machine) => {
-        leaveSettingsForMachineSetup();
-        setResumeSetupId(undefined);
+        openAfterSettings(() => {
+          setResumeSetupId(undefined);
+          setUpdateRemote(false);
+          addPcFocusReturn.current = true;
+          setMachineDialog(machine);
+        });
         setSettingsOpen(false);
-        setUpdateRemote(false);
-        addPcFocusReturn.current = true;
-        setMachineDialog(machine);
       },
       toggleSidebar: () => {
         if (window.matchMedia("(max-width: 768px)").matches) setDrawerOpen((open) => !open);
@@ -668,7 +670,7 @@ export function App() {
       // herdr's layout calls on the selected pane (lib/layoutActions.ts): only those the PC's herdr answers
       ...layoutActions({ selectedPaneId, offer: appLayout, paneSplits: !selectedPane?.own_tab, selection: selectionRef, roster: snapshotRef, load, selectPane, layoutRefused }),
     }),
-    [revealFiles, selectPane, selectedPaneId, selectedPane?.own_tab, selectedMachineId, appLayout, reorderCoordinator, tabStripMounted, setView, view, terminalPeek, endPeek, updateSettings, resolvedTheme, canSignOut, lock, bell.run, enableNotifications, load, layoutRefused, moveRefused, lenses, openSidebarFilter, selectedSearchable, requestSearch, split, soloSlot, settings.webLinks, settings.sidebarBackgroundWorkspaces, openWebPage],
+    [revealFiles, selectPane, selectedPaneId, selectedPane?.own_tab, selectedMachineId, appLayout, reorderCoordinator, tabStripMounted, setView, view, terminalPeek, endPeek, updateSettings, resolvedTheme, canSignOut, lock, bell.run, enableNotifications, load, layoutRefused, moveRefused, lenses, openSidebarFilter, selectedSearchable, requestSearch, split, soloSlot, settings.webLinks, settings.sidebarBackgroundWorkspaces, openWebPage, openAfterSettings],
   );
 
   useShortcuts(actions, locked === false);

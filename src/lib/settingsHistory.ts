@@ -96,6 +96,8 @@ let landing: ReturnType<typeof setTimeout> | undefined;
 let pending: { from: unknown; depth: number; level: SettingsLevel | null; expired: boolean; reopened: boolean; claim: boolean } | null = null;
 let observed: unknown = typeof window === "undefined" ? undefined : window.history.state;
 let writing = false;
+/** External entry changes or a new Settings opening supersede a deferred handoff. */
+let navigationRevision = 0;
 let loadedOnSettings = false;
 /** the opening of Settings the entries held belong to, as written into its base entry */
 let opening: unknown;
@@ -200,6 +202,7 @@ function reconcile(): void {
 /** Makes the history hold these steps into Settings, in order; none when the dialog is closed. */
 export function recordSettings(levels: readonly SettingsLevel[]): void {
   const reopening = wanted.length === 0 && levels.length > 0;
+  if (reopening) navigationRevision++;
   wanted = levels;
   if (reopening && pending !== null) { pending.reopened = true; if (pending.expired) pending.claim = false; }
   if (typeof window !== "undefined") reconcile();
@@ -222,6 +225,41 @@ export function onSettingsHistory(listener: Listener): () => void {
   return () => { listeners.delete(listener); };
 }
 
+/**
+ * Runs a dialog handoff after this opening's normal exit lands, never by copying its base
+ * overlay into another entry. The caller closes Settings and cancels on supersession/unmount.
+ */
+export function afterSettingsExit(run: () => void): () => void {
+  const from = window.history.state;
+  if (settingsEntry(from) === null) { run(); return () => {}; }
+  const opening = fieldOf(from, BASE_KEY);
+  const lost = fieldOf(from, LOST_KEY) === true;
+  const anchor = fieldOf(from, ANCHOR_KEY);
+  const revision = navigationRevision;
+  let cancelled = false;
+  const atBase = (): boolean => {
+    const state = window.history.state;
+    return settingsEntry(state) === null && (lost
+      ? typeof anchor === "string" && fieldOf(state, SHEET_UNDER_KEY) === anchor
+      : typeof opening === "string" && fieldOf(state, BASE_KEY) === opening);
+  };
+  const stop = onSettingsHistory((entry, own) => {
+    if (cancelled) return;
+    if (navigationRevision !== revision || !own) { cancel(); return; }
+    if (entry !== null) return; // an earlier width traversal may still precede the closing one
+    if (!atBase()) { cancel(); return; }
+    stop();
+    // Let every popstate listener finish before a newly mounted phone sheet claims its entry.
+    queueMicrotask(() => {
+      if (cancelled || navigationRevision !== revision || wanted.length !== 0 || !atBase()) return;
+      cancelled = true;
+      run();
+    });
+  });
+  const cancel = (): void => { cancelled = true; stop(); };
+  return cancel;
+}
+
 if (typeof window !== "undefined") {
   for (const method of ["pushState", "replaceState"] as const) {
     const history = window.history;
@@ -232,7 +270,10 @@ if (typeof window !== "undefined") {
       observed = history.state;
       // the address written on the same entry (the app's address bar, as Settings closes) moves
       // nothing: a step back under way still lands where it was asked to, and is still this module's
-      if (!writing && (method === "pushState" || !sameEntry(before, history.state))) releasePending();
+      if (!writing && (method === "pushState" || !sameEntry(before, history.state))) {
+        navigationRevision++;
+        releasePending();
+      }
     }) as History["pushState"];
   }
   window.addEventListener("popstate", (event) => {
