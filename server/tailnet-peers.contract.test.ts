@@ -14,7 +14,7 @@ it("gates tailnet discovery behind authentication, drive access and same-origin 
   const watch = store.pair(store.startPairing().code, "Watch", "watch")!;
   store.match(watch.token);
   const server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, token: "tailnet-test-token", tailscaleOwner: null, herdrProfiles: async () => [] });
-  const url = `http://127.0.0.1:${server.port}/api/machines/tailnet`;
+  const url = `http://127.0.0.1:${server.port}/api/machines/tailnet?ssh_bootstrap=1`;
   const remote = { "x-forwarded-for": "100.64.0.99", "x-herdr-machine": "1" };
   try {
     expect((await fetch(url, { headers: remote })).status).toBe(401);
@@ -66,7 +66,7 @@ process.stdout.write(readFileSync(${JSON.stringify(statusPath)}, "utf8"));
   const server = createServer({ port: 0, hostname: "127.0.0.1", stateDir, token: "tailnet-test-token", tailscaleOwner: null, herdrProfiles: async () => [], sidecar: false });
   const binary = spyOn(tailscale, "tailscaleBinary").mockReturnValue(binaryPath);
   const home = spyOn(os, "homedir").mockReturnValue(stateDir);
-  const url = `http://127.0.0.1:${server.port}/api/machines/tailnet`;
+  const url = `http://127.0.0.1:${server.port}/api/machines/tailnet?ssh_bootstrap=1`;
   const headers = { "x-forwarded-for": "100.64.0.99", "x-herdr-machine": "1", authorization: "Bearer tailnet-test-token" };
   try {
     for (const enabled of [true, false]) {

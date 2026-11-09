@@ -129,7 +129,7 @@ describe("workerProblems", () => {
 
 describe("check", () => {
   /** a repository released as 1.0.0 with remote bundle 1 and a recorded Worker, then changed by `edit` */
-  function released(edit: Record<string, string>): string {
+  function released(edit: Record<string, string>, version = "1.0.0"): string {
     const dir = mkdtempSync(join(tmpdir(), "hwc-release-"));
     made.push(dir);
     const git = (...args: string[]) => run(dir, ...args);
@@ -143,24 +143,24 @@ describe("check", () => {
       "release-summaries.json": JSON.stringify({ [version]: Object.fromEntries(["en", "ko", "ja", "zh"].map((language) => [language, { fixed: ["Fixed."] }])) }),
     });
     const worker = { "telemetry/worker.ts": "worker", "shared/telemetry.ts": "schema" };
-    write({ ...metadata("1.0.0"), ...worker, "shared/machines.ts": 'export const REMOTE_BUNDLE_VERSION = "1";\n', "server/index.ts": "a", "src/App.tsx": "a",
+    write({ ...metadata(version), ...worker, "shared/machines.ts": 'export const REMOTE_BUNDLE_VERSION = "1";\n', "server/index.ts": "a", "src/App.tsx": "a",
       [DEPLOYED_FILE]: JSON.stringify({ sha256: workerFingerprint(WORKER_SOURCES.map((path) => worker[path as keyof typeof worker])) }) });
     git("init", "-q");
     git("add", "-A");
-    git("commit", "-qm", "1.0.0");
-    git("tag", "v1.0.0");
+    git("commit", "-qm", version);
+    git("tag", `v${version}`);
     git("tag", "remote-v1");
     write(edit);
     git("add", "-A");
     git("commit", "-qm", "next");
     return dir;
   }
-  const releasePr = (dir: string) => {
+  const releasePr = (dir: string, previous = "1.0.0") => {
     const files = { "package.json": JSON.stringify({ version: "1.1.0", dependencies: { a: "1" } }), "herdr-plugin.toml": 'version = "1.1.0"\n' };
     for (const [path, text] of Object.entries(files)) writeFileSync(join(dir, path), text);
-    writeFileSync(join(dir, "CHANGELOG.md"), "## [Unreleased]\n\n## [1.1.0]\n\n- New.\n\n## [1.0.0]\n\n- Fixed.\n");
+    writeFileSync(join(dir, "CHANGELOG.md"), `## [Unreleased]\n\n## [1.1.0]\n\n- New.\n\n## [${previous}]\n\n- Fixed.\n`);
     const summaries = JSON.parse(readFileSync(join(dir, "release-summaries.json"), "utf8")) as Record<string, unknown>;
-    writeFileSync(join(dir, "release-summaries.json"), JSON.stringify({ ...summaries, "1.1.0": summaries["1.0.0"] }));
+    writeFileSync(join(dir, "release-summaries.json"), JSON.stringify({ ...summaries, "1.1.0": summaries[previous] }));
     run(dir, "commit", "-qam", "release");
   };
 
@@ -208,7 +208,7 @@ describe("check", () => {
     expect(missing.status).not.toBe(0);
   });
 
-  it("imports only an ancestral already-released upstream version when the fork has no app tags", () => {
+  it("bootstraps a tagless fork from the imported ancestral release without blocking its first release", () => {
     const workflow = Bun.YAML.parse(readFileSync(join(import.meta.dir, "../.github/workflows/ci.yml"), "utf8")) as {
       jobs: { fast: { steps: Array<{ uses?: string; with?: Record<string, unknown>; name?: string; run?: string }> } };
     };
@@ -221,7 +221,8 @@ describe("check", () => {
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
     const script = lines.slice(start, end + 1).join("\n");
-    const upstream = released({ "src/App.tsx": "upstream" });
+    const imported = "0.5.1";
+    const upstream = released({ "src/App.tsx": "upstream" }, imported);
     const makeFork = () => {
       const fork = mkdtempSync(join(tmpdir(), "ovis-guard-import-"));
       made.push(fork);
@@ -234,25 +235,41 @@ describe("check", () => {
     });
     const ancestral = makeFork();
     expect(execute(ancestral).status).toBe(0);
-    run(ancestral, "merge-base", "--is-ancestor", "v1.0.0^{commit}", "HEAD");
+    run(ancestral, "merge-base", "--is-ancestor", `v${imported}^{commit}`, "HEAD");
     expect(check(ancestral, false)).toEqual({ version: null, problems: [] });
-    // A fork's own version bump is not an upstream release and may not bypass the release guards.
-    const unreleased = makeFork();
-    writeFileSync(join(unreleased, "package.json"), JSON.stringify({ version: "1.1.0" }));
-    expect(execute(unreleased).status).not.toBe(0);
-    // Nor may a tag of the same version name an unrelated tree.
+    // A complete independent fork release passes even though upstream has no v1.1.0.
+    const release = makeFork();
+    releasePr(release, imported);
+    expect(execute(release).status).toBe(0);
+    expect(check(release, false)).toEqual({ version: "1.1.0", problems: [] });
+    expect(spawnSync("git", ["-C", release, "tag", "--list", "v1.1.0"], { encoding: "utf8" }).stdout.trim()).toBe("");
+    // Bootstrapping must not mark the proposed version released or bypass its real guards.
+    const incomplete = makeFork();
+    writeFileSync(join(incomplete, "package.json"), JSON.stringify({ version: "1.1.0" }));
+    expect(execute(incomplete).status).toBe(0);
+    expect(check(incomplete, false).problems.length).toBeGreaterThan(0);
+    const changedServer = makeFork();
+    writeFileSync(join(changedServer, "server/index.ts"), "changed");
+    releasePr(changedServer, imported);
+    run(changedServer, "fetch", "--no-tags", upstream, "refs/tags/remote-v1:refs/tags/remote-v1");
+    expect(execute(changedServer).status).toBe(0);
+    expect(check(changedServer, false).problems[0]).toContain("server/index.ts");
+    // Metadata never supplies a refspec, including malformed proposed versions.
+    const invalid = makeFork();
+    writeFileSync(join(invalid, "package.json"), JSON.stringify({ version: "1.0.0:refs/heads/other" }));
+    expect(execute(invalid).status).toBe(0);
+    expect(check(invalid, false).problems.length).toBeGreaterThan(0);
+    expect(spawnSync("git", ["-C", invalid, "show-ref", "--verify", "refs/heads/other"], { encoding: "utf8" }).status).not.toBe(0);
+    // Nor may the pinned release tag be missing or name an unrelated tree.
+    run(upstream, "tag", "-d", `v${imported}`);
+    expect(execute(makeFork()).status).not.toBe(0);
     const original = spawnSync("git", ["-C", upstream, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
     run(upstream, "checkout", "-q", "--orphan", "unrelated");
     run(upstream, "add", "-A");
     run(upstream, "commit", "-qm", "unrelated release");
-    run(upstream, "tag", "-f", "v1.0.0");
+    run(upstream, "tag", `v${imported}`);
     run(upstream, "checkout", "-q", "--detach", original);
-    const nonAncestor = makeFork();
-    expect(execute(nonAncestor).status).not.toBe(0);
-    // Validate before interpolation into a remote refspec, even for malformed metadata.
-    const invalid = makeFork();
-    writeFileSync(join(invalid, "package.json"), JSON.stringify({ version: "1.0.0:refs/heads/other" }));
-    expect(execute(invalid).status).not.toBe(0);
+    expect(execute(makeFork()).status).not.toBe(0);
   });
 
   it("passes a release PR that changed only the client", () => {

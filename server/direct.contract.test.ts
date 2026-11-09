@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as herdr from "./herdr/client.ts";
@@ -106,6 +106,33 @@ describe("ticket-only direct ingress", () => {
     expect(response.headers.get("access-control-allow-origin")).toBe(page);
     const ordinary = await fetch(`http://127.0.0.1:${app.port}/api/fs/stat?path=${encodeURIComponent(path)}`, { headers: { ...headers, authorization: "Bearer fictional-bridge-secret" } });
     expect(ordinary.status).toBe(403);
+  });
+
+  it("permits signed cross-site diff reads without weakening bridge, cookie or watch restrictions", async () => {
+    const repo = join(root, "cors-repo"); mkdirSync(repo);
+    const git = (...args: string[]) => {
+      const result = Bun.spawnSync(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", ...args], {
+        cwd: repo, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+      });
+      expect(result.exitCode).toBe(0);
+    };
+    git("init", "-q", "-b", "main");
+    writeFileSync(join(repo, "tracked.txt"), "before\n"); git("add", "tracked.txt"); git("commit", "-qm", "Fixture");
+    writeFileSync(join(repo, "tracked.txt"), "after\n");
+    const headers = { "sec-fetch-site": "cross-site", "sec-fetch-mode": "cors" };
+    const token = credential("http");
+    for (const route of ["files", "file", "refs"]) {
+      const path = `/api/workspace/diff/${route}?directory=${encodeURIComponent(repo)}&path=tracked.txt`;
+      const response = await direct(path, token, page, { headers });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("access-control-allow-origin")).toBe(page);
+      expect((await direct(path, credential("http", "observe"), page, { headers })).status).toBe(403);
+      expect((await direct(path, token, "https://untrusted.example.test", { headers })).status).toBe(401);
+      for (const [name, value] of Object.entries({ authorization: "Bearer fictional-bridge-secret", cookie: "ovis_token=fictional-bridge-secret" })) {
+        const ordinary = await fetch(`http://127.0.0.1:${app.port}${path}`, { headers: { ...headers, [name]: value } });
+        expect(ordinary.status).toBe(403);
+      }
+    }
   });
 
   it("keeps observing credentials read-only on HTTP and WebSocket, and revokes live connections", async () => {

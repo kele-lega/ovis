@@ -124,9 +124,12 @@ existing CSP and proxy paths.
   Programmatic chat, file and Git diff requests use the central machine-scoped fetch transport.
   Images, videos, PDF frames and download links that cannot carry bearer headers continue through
   A's existing authenticated file proxy. They never receive a long-lived credential in a URL.
-- An unavailable direct route falls back to SSH relay, with a 60-second retry cooldown. Reads may
-  retry through A; a write attempted on B is never automatically replayed on A because it may
-  already have executed. Disconnected terminal input stays a draft for explicit sending.
+- An unavailable direct route falls back to SSH relay, with a 60-second retry cooldown. Broker
+  failures, malformed grants and authorization timeouts also enter that cooldown. Safe GET/HEAD
+  requests wait at most five seconds for B's response headers before falling back through A;
+  caller cancellation still reaches a response body after its headers arrive and never triggers
+  fallback. A write attempted on B is never automatically replayed on A because it may already
+  have executed. Disconnected terminal input stays a draft for explicit sending.
 
 The sidebar roster/status machine-events WebSocket (with SSE fallback) and account/device
 management stay on A. This change follows the existing Ovis machine/session ownership rather than

@@ -259,6 +259,99 @@ describe("memory-only per-PC direct transport", () => {
     }
   });
 
+  it("bounds blackholed safe direct reads, falls back once and enters cooldown", async () => {
+    jest.useFakeTimers();
+    try {
+      for (const method of ["GET", "HEAD"] as const) {
+        const late = deferred<Response>();
+        const { transport, calls } = harness(({ url }) => url.endsWith("direct-access")
+          ? Response.json(credential("a")) : url.startsWith("https://a.example/") ? late.promise : new Response("relay"));
+        try {
+          let response: Response | undefined;
+          const read = transport.directFetch("/api/machines/a/session", { method }).then((next) => { response = next; return next; });
+          void read.catch(() => {});
+          await settle();
+          jest.advanceTimersByTime(4_999); await settle(); expect(response).toBeUndefined();
+          jest.advanceTimersByTime(1); await settle();
+          expect(response?.status).toBe(200);
+          await read;
+          expect(calls.find((call) => call.url === "https://a.example/api/session")?.init?.signal?.aborted).toBe(true);
+          await transport.directFetch("/api/machines/a/session");
+          expect(calls.filter((call) => call.url.endsWith("direct-access"))).toHaveLength(1);
+          expect(calls.filter((call) => call.url === "/api/machines/a/session")).toHaveLength(2);
+          late.resolve(new Response("late direct")); await settle();
+        } finally { transport.clear(); }
+      }
+    } finally { jest.useRealTimers(); }
+  });
+
+  it("does not fall back from a blackholed direct read after cancellation or sign-out", async () => {
+    for (const cancel of ["caller", "clear"]) {
+      const late = deferred<Response>(), caller = new AbortController();
+      const { transport, calls } = harness(({ url }) => url.endsWith("direct-access") ? Response.json(credential("a")) : late.promise);
+      const read = transport.directFetch("/api/machines/a/session", { signal: caller.signal });
+      await settle();
+      if (cancel === "caller") caller.abort(new DOMException("Explicit cancel", "TimeoutError")); else transport.clear();
+      await expect(read).rejects.toMatchObject({ name: cancel === "caller" ? "TimeoutError" : "AbortError" });
+      expect(calls.some((call) => call.url === "/api/machines/a/session")).toBe(false);
+      late.resolve(new Response("late")); transport.clear();
+    }
+  });
+
+  it("keeps caller cancellation attached to a direct response body after headers arrive", async () => {
+    for (const combine of [true, false]) {
+      const any = AbortSignal.any;
+      if (!combine) Object.defineProperty(AbortSignal, "any", { configurable: true, value: undefined });
+      const caller = new AbortController();
+      let directSignal: AbortSignal | undefined;
+      const { transport, calls } = harness(({ url, init }) => {
+        if (url.endsWith("direct-access")) return Response.json(credential("a"));
+        directSignal = init!.signal!;
+        return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+          controller.enqueue(new TextEncoder().encode("partial"));
+          directSignal!.addEventListener("abort", () => controller.error(directSignal!.reason), { once: true });
+        } }));
+      });
+      try {
+        const response = await transport.directFetch("/api/machines/a/session", { signal: caller.signal });
+        const body = response.text();
+        expect(directSignal?.aborted).toBe(false);
+        const reason = new DOMException("Viewer closed", "AbortError");
+        caller.abort(reason);
+        await expect(body).rejects.toBe(reason);
+        expect(directSignal?.aborted).toBe(true);
+        expect(calls.some((call) => call.url === "/api/machines/a/session")).toBe(false);
+      } finally {
+        transport.clear();
+        Object.defineProperty(AbortSignal, "any", { configurable: true, value: any });
+      }
+    }
+  });
+
+  it("cools down broker outages, malformed credentials and authorization timeouts for HTTP reads", async () => {
+    const failures = [() => new Response(null, { status: 503 }), () => new Response(null, { status: 429 }),
+      () => Response.json({ invalid: true }), () => { throw new TypeError("control unavailable"); }];
+    for (const fail of failures) {
+      const { transport, calls, advance } = harness(({ url }) => url.endsWith("direct-access") ? fail() : new Response("relay"));
+      await transport.directFetch("/api/machines/a/session");
+      await transport.directFetch("/api/machines/a/session");
+      expect(calls.filter((call) => call.url.endsWith("direct-access"))).toHaveLength(1);
+      advance(60_000);
+      await transport.directFetch("/api/machines/a/session");
+      expect(calls.filter((call) => call.url.endsWith("direct-access"))).toHaveLength(2);
+      transport.clear();
+    }
+    jest.useFakeTimers();
+    const late = deferred<Response>();
+    const { transport, calls } = harness(({ url }) => url.endsWith("direct-access") ? late.promise : new Response("relay"));
+    try {
+      const read = transport.directFetch("/api/machines/a/session");
+      await settle(); jest.advanceTimersByTime(5_000); await settle(); await read;
+      await transport.directFetch("/api/machines/a/session");
+      expect(calls.filter((call) => call.url.endsWith("direct-access"))).toHaveLength(1);
+    } finally { transport.clear(); jest.useRealTimers(); late.resolve(Response.json(credential("a"))); }
+  });
+
   it("leaves local, external, admin, setup, roster, events and noncanonical routes on the relay", async () => {
     const { transport, calls } = harness(() => Response.json({ ok: true }));
     const urls = [

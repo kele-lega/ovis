@@ -7,6 +7,8 @@ import type { SocketEndpointResolver } from "./ws.ts";
 const COOLDOWN_MS = 60_000;
 /** Leave time for the relay handshake within HerdrSocket's initial 8s connect deadline. */
 const AUTHORIZATION_TIMEOUT_MS = 5_000;
+/** Safe reads may use A after a silent direct route; writes retain their own deadlines and are never replayed. */
+const SAFE_READ_TIMEOUT_MS = 5_000;
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 type HttpCredential = Omit<DirectCredentialResponse, "ticket">;
 interface PendingCredential {
@@ -82,6 +84,7 @@ export class DirectTransport {
   }
 
   private async issue(machineId: string, state: MachineTransport, signal: AbortSignal): Promise<DirectCredentialResponse | null> {
+    let issued = false;
     try {
       checkAbort(signal);
       const response = await this.fetcher(`/api/machines/${encodeURIComponent(machineId)}/direct-access`, {
@@ -108,11 +111,19 @@ export class DirectTransport {
       const origin = normalizeDirectOrigin(credential.origin);
       const http = { origin, access_token: credential.access_token, expires_at: credential.expires_at };
       state.http = http;
+      issued = true;
       return { ...http, ticket: credential.ticket };
     } catch (error) {
       checkAbort(signal);
       if (isAbort(error)) throw error;
       return null;
+    } finally {
+      // All unavailable/malformed broker answers cool down, not only permanent refusals.
+      // Caller cancellation and sign-out are not network evidence and must not poison a new grant.
+      if (!issued && !signal.aborted && this.machines.get(machineId) === state) {
+        state.failedUntil = this.now() + COOLDOWN_MS;
+        state.http = undefined;
+      }
     }
   }
 
@@ -128,7 +139,13 @@ export class DirectTransport {
         controller, users: 0,
         // Discard the ticket immediately. An HTTP reader cannot consume a later WS connect's ticket.
         promise: abortable(this.issue(machineId, state, controller.signal), controller.signal)
-          .catch((error) => { if (error instanceof Error && error.name === "TimeoutError") return null; throw error; })
+          .catch((error) => {
+            if (error instanceof Error && error.name === "TimeoutError") {
+              if (this.machines.get(machineId) === state) { state.failedUntil = this.now() + COOLDOWN_MS; state.http = undefined; }
+              return null;
+            }
+            throw error;
+          })
           .then((credential) => credential ? { origin: credential.origin, access_token: credential.access_token, expires_at: credential.expires_at } : null)
           .finally(() => clearTimeout(deadline)),
       };
@@ -220,16 +237,29 @@ export class DirectTransport {
     direct.search = target.search;
     const safe = ["GET", "HEAD"].includes((init?.method ?? "GET").toUpperCase());
     let response: Response;
+    const controller = new AbortController();
+    const callerSignal = init?.signal;
+    // A caller's cancellation must keep reaching fetch's body after its headers resolve.
+    let requestSignal = controller.signal;
+    if (callerSignal && typeof AbortSignal.any === "function") requestSignal = AbortSignal.any([callerSignal, controller.signal]);
+    else if (callerSignal?.aborted) controller.abort(abortReason(callerSignal));
+    else callerSignal?.addEventListener("abort", () => controller.abort(abortReason(callerSignal)), { once: true });
+    this.controllers.add(controller);
+    const deadline = safe ? setTimeout(() => controller.abort(new DOMException("Direct read timed out", "TimeoutError")), SAFE_READ_TIMEOUT_MS) : undefined;
     try {
-      response = await this.fetcher(direct.href, { ...init, headers, credentials: "omit", redirect: "error", cache: "no-store" });
-      checkAbort(init?.signal);
+      checkAbort(requestSignal);
+      response = await abortable(this.fetcher(direct.href, { ...init, headers, credentials: "omit", redirect: "error", cache: "no-store", signal: requestSignal }), requestSignal);
+      checkAbort(callerSignal);
     } catch (error) {
-      checkAbort(init?.signal);
+      checkAbort(callerSignal);
       if (isAbort(error) || this.machines.get(machineId) !== state) throw error;
       state.failedUntil = this.now() + COOLDOWN_MS;
       state.http = undefined;
       if (!safe) throw error; // A write may already have reached B; never replay it through A.
       return this.fetcher(url, init);
+    } finally {
+      clearTimeout(deadline);
+      this.controllers.delete(controller);
     }
     if (response.status === 401) {
       if (state.http?.access_token === credential.access_token) state.http = undefined;

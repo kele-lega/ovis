@@ -4,6 +4,7 @@
  * and the disk; the dispatcher in index.ts runs the access gate first.
  */
 import type { ServerContext } from "./dispatch.ts";
+import type { Access } from "./access.ts";
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
@@ -99,7 +100,9 @@ export async function handleWorkspaceRequest(request: Request, url: URL, pathnam
   /** a move herdr confirmed: its receipt in this server's order (server/order-sequence.ts), taken at once */
   workspaceMoved: () => MoveReceipt, shellAgents?: ShellAgentLocator,
   /** false: the folders are another machine's, which hc checks as it starts the shell there */
-  localFolders = true): Promise<Response | null> {
+  localFolders = true,
+  /** Already-verified authority, never inferred from browser headers. */
+  access?: Access): Promise<Response | null> {
   if (pathname === "/api/workspace/directories" && request.method === "POST") {
     setRequestRoute(pathname);
     let payload: unknown;
@@ -135,7 +138,7 @@ export async function handleWorkspaceRequest(request: Request, url: URL, pathnam
     setRequestRoute(pathname);
     if (request.method !== "GET") return badRequest("method_not_allowed", "use GET");
     // file contents, like /api/fs/file: this app reads them, another site's page does not
-    if (request.headers.get("sec-fetch-site") === "cross-site") return jsonResponse({ error: { code: "cross_site", message: "A repository's changes are read from this app" } }, 403);
+    if (!(access?.level === "full" && access.via === "direct") && request.headers.get("sec-fetch-site") === "cross-site") return jsonResponse({ error: { code: "cross_site", message: "A repository's changes are read from this app" } }, 403);
     const cwd = await routeFolder(url.searchParams.get("pane_id"), (url.searchParams.get("directory") ?? "").trim());
     if (cwd instanceof Response) return cwd;
     return repoDiffResponse(pathname.endsWith("/files") ? "files" : pathname.endsWith("/refs") ? "refs" : "file", cwd, url.searchParams);
