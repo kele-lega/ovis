@@ -1,7 +1,8 @@
 import type { DialogReader, ReaderContext } from "./registry.ts";
 import { pickerPlan } from "./interaction-plan.ts";
 import { type InteractivePrompt } from "../../shared/protocol.ts";
-import { ANSI_RE, onePerPass, type AnswerStep, KEY, type OmoAsk, PI_MODEL_TAIL_RE, type ParsedPrompt, SOLID_RULE_RE, cleanLine, findLastIndex, finishPrompt, isDivider, joinWrapped, keySteps, navigationKeys, normalizeText, piModelRows, screenWidth, wrapped } from "./shared.ts";
+import type { NativeSteps } from "./step-navigate.ts";
+import { ANSI_RE, onePerPass, type AnswerStep, type CardWords, KEY, type OmoAsk, PI_MODEL_TAIL_RE, type ParsedPrompt, type PromptDraft, SOLID_RULE_RE, cleanLine, englishOf, findLastIndex, finishPrompt, isDivider, own, joinWrapped, keySteps, navigationKeys, normalizeText, piModelRows, screenWidth, wrapped } from "./shared.ts";
 
 // OmO's ask_user_question form (omo 5.1): `Ask user · 30m`, a tab per question then Submit, and
 // under them the active question or, on the Submit tab, the review of the answers
@@ -28,6 +29,10 @@ export const OMO_NOT_FOOTER_RE = /^[>❯›➜λ$%#]|[$%#>❯›λ]$/;
 const OMO_PENDING_STATUS_RE = /^\?\s+(?:Question pending \((\d+) unanswered\)|\d+ questions pending)(?:\s+·.*)?$/;
 
 export const OMO_PENDING_HINT_RE = /^enter(?: or \S+)? to answer · \/answer · or just type your reply\b/;
+
+// between the widget's header and its question: " - " (omo 5.1.48), " — " (omo 5.1.30); the space
+// after it is left unconsumed, so separators sharing a space (`Plan - - Choose`) are each found
+const OMO_PENDING_SEPARATOR_RE = / [-—](?= )/g;
 
 interface OmoForm {
   /** the line the tab bar ends on (a narrow pane wraps it between tabs) */
@@ -79,9 +84,28 @@ function omoSteps(tabs: OmoForm["tabs"], ask: OmoAsk | null): InteractivePrompt[
   return tabs.length > 1 ? tabs.map((tab, index) => ({ ...tab, label: ask?.questions[index]?.header ?? tab.label })) : undefined;
 }
 
+/**
+ * The card's steps as OmO's own keys move between its tabs, a question left unanswered: Tab on,
+ * Shift+Tab back, through Submit (senpi ask-user-question-keys.js, 5.1.51). Only the tab bar on
+ * screen says which tab shows, so a form cut off above it gets its steps and nothing to tap; and
+ * only the session's call names the form, so a form no call names gets nothing to tap either.
+ */
+function omoNavigation(form: OmoForm | null, tabs: OmoForm["tabs"], index: number, ask: OmoAsk | null): Pick<PromptDraft, "steps" | "can_step_back" | "can_step_next"> & { nativeSteps?: NativeSteps } {
+  const steps = omoSteps(tabs, ask);
+  // the form is the call's: a move needs it named, and named by every question and option it asks
+  if (!form || !steps || !ask?.id) return { steps };
+  const at = form.reviewing ? tabs.length : index;
+  return {
+    steps: steps.map((step) => step.current ? step : { ...step, can_navigate: true }),
+    can_step_back: at > 0,
+    can_step_next: !form.reviewing,
+    nativeSteps: { identity: JSON.stringify([ask.id, ask.questions.map((question) => [question.header, question.question, question.multiSelect, question.options.map((option) => option.label)])]), index: at, count: tabs.length + 1, next: KEY.tab, previous: KEY.backtab },
+  };
+}
+
 /** The card's title: where the question stands among several, else its header. */
-function omoTitle(tabs: OmoForm["tabs"], index: number, ask: OmoAsk | null): string {
-  return tabs.length > 1 ? `Question ${index + 1} of ${tabs.length}` : ask?.questions[index]?.header ?? tabs[index]!.label;
+function omoTitle(tabs: OmoForm["tabs"], index: number, ask: OmoAsk | null): CardWords {
+  return tabs.length > 1 ? own("Question {n} of {total}", { n: index + 1, total: tabs.length }) : ask?.questions[index]?.header ?? tabs[index]!.label;
 }
 
 /**
@@ -151,15 +175,22 @@ function omoQuestionView(lines: string[], start: number, end: number, cut: boole
 }
 
 /**
- * The question of the session's call a cut-off form shows: the one whose options end with the
- * rows in view, each matched by its first line (which the pane may cut). Unique, or -1.
+ * A cut-off form that more than one question of a call fits: it names none of them, and it counts against every
+ * other open call it might be, instead of leaving the only other call that fits to take it (#2092).
  */
-function askedQuestion(view: OmoQuestionView, ask: OmoAsk): number {
+const AMBIGUOUS = "ambiguous" as const;
+
+/**
+ * The question of the session's call a cut-off form shows: the one whose options end with the
+ * rows in view, each matched by its first line (which the pane may cut), and that the rest of the
+ * screen can show (`shows`). Unique, -1 for none, or AMBIGUOUS when several fit.
+ */
+function askedQuestion(view: OmoQuestionView, ask: OmoAsk, shows: (index: number) => boolean = () => true): number | typeof AMBIGUOUS {
   const start = (raw: string): string => comparable(cleanLine(raw).replace(/^(?:→\s+)?\d+\.\s+/, "").replace(/\s+✓$/, ""));
   const last = view.rows.at(-1)?.number;
   const matches = ask.questions.flatMap((question, index) => question.options.length === last
-    && view.rows.every((row) => comparable(question.options[row.number - 1]!.label).startsWith(start(row.label[0]!))) ? [index] : []);
-  return matches.length === 1 ? matches[0]! : -1;
+    && view.rows.every((row) => comparable(question.options[row.number - 1]!.label).startsWith(start(row.label[0]!))) && shows(index) ? [index] : []);
+  return matches.length > 1 ? AMBIGUOUS : matches[0] ?? -1;
 }
 
 /**
@@ -186,7 +217,7 @@ function cutSteps(ask: OmoAsk, current: number, currentAnswered: boolean, answer
  * in a multiple choice, clear the previous answer (Backspace), navigate and toggle each choice
  * with Space, then move on with Tab.
  */
-function parseOmoQuestion(screen: string, ask: OmoAsk | null, trusted: boolean): ParsedPrompt | null {
+function parseOmoQuestion(screen: string, ask: OmoAsk | null, trusted: boolean): ParsedPrompt | null | typeof AMBIGUOUS {
   const lines = screen.replace(ANSI_RE, "").split(/\r?\n/);
   const hintIndex = findLastIndex(lines, (_, index) => OMO_OPTIONS_HINT_RE.test(wrapped(lines, index, OMO_HINT_LINES)));
   if (hintIndex < 0) return null;
@@ -205,13 +236,18 @@ function parseOmoQuestion(screen: string, ask: OmoAsk | null, trusted: boolean):
   let question: string;
   let options: InteractivePrompt["options"];
   if (known) {
-    index = form ? form.tabs.findIndex((tab) => tab.current) : askedQuestion(view, known);
+    // the screen must show this question's rows, numbered to its last option: only a question it can show makes a
+    // cut-off form ambiguous (#2092)
+    const shows = (asked: OmoAsk["questions"][number]): boolean => asked.multiSelect === multiSelect
+      && (view.rows.at(-1)?.number ?? 0) === asked.options.length
+      && (view.question.length === 0 || sameText(joinWrapped(view.question, width), asked.question))
+      && view.rows.every((row, at) => sameText(shownLabels[at]!.replace(/\s+✓$/, ""), asked.options[row.number - 1]!.label));
+    const fit = form ? form.tabs.findIndex((tab) => tab.current) : askedQuestion(view, known, (at) => shows(known.questions[at]!));
+    if (fit === AMBIGUOUS) return AMBIGUOUS;
+    index = fit;
     if (index < 0) return null;
     const asked = known.questions[index]!;
-    // the screen must show this question's rows, numbered to its last option
-    if (asked.multiSelect !== multiSelect || (view.rows.at(-1)?.number ?? 0) !== asked.options.length) return null;
-    if (view.question.length > 0 && !sameText(joinWrapped(view.question, width), asked.question)) return null;
-    if (!view.rows.every((row, at) => sameText(shownLabels[at]!.replace(/\s+✓$/, ""), asked.options[row.number - 1]!.label))) return null;
+    if (!shows(asked)) return null;
     tabs = form ? form.tabs : cutSteps(known, index, currentAnswered, omoAnsweredCount(lines, view.own.lineIndex, hintIndex));
     question = normalizeText(asked.question);
     options = asked.options.map((option) => ({ label: normalizeText(option.label), description: option.description && normalizeText(option.description) }));
@@ -230,13 +266,15 @@ function parseOmoQuestion(screen: string, ask: OmoAsk | null, trusted: boolean):
   const selectedIndex = view.own.selected ? options.length : highlighted ? highlighted.number - 1 : -1;
   const rows = options.length + 1;
   const pick = (option: number): AnswerStep[] => keySteps([...omoWalk(option, selectedIndex, rows), KEY.enter]);
+  const { nativeSteps, ...navigation } = omoNavigation(form, tabs, index, known);
   return finishPrompt("omo", {
     // several questions: the card's steps name them, the title says where this one stands
     kind: "question", title: omoTitle(tabs, index, known),
     question, body: null, options, multi_select: multiSelect, custom_option_index: multiSelect ? null : options.length,
-    steps: omoSteps(tabs, known),
+    ...navigation,
   }, {
     omoQuestion: known?.id ? { call: known.id, index } : undefined,
+    ...(nativeSteps ? { nativeSteps } : {}),
     responder: "omo-question", menuLabels: [...options.map((option) => option.label), OMO_OWN_ANSWER], selectedIndex,
     checkedOptionIndices: view.rows.flatMap((row, at) => /\s✓$/.test(shownLabels[at]!) ? [row.number - 1] : []),
     customMenuIndex: options.length, rejectWithEscapeIndex: null,
@@ -265,7 +303,7 @@ function parseOmoQuestion(screen: string, ask: OmoAsk | null, trusted: boolean):
  *
  * The card offers to save what is typed (Enter, which moves on as an answer does) or to discard it.
  */
-function parseOmoTyping(screen: string, ask: OmoAsk | null, trusted: boolean): ParsedPrompt | null {
+function parseOmoTyping(screen: string, ask: OmoAsk | null, trusted: boolean): ParsedPrompt | null | typeof AMBIGUOUS {
   const lines = screen.replace(ANSI_RE, "").split(/\r?\n/);
   const hintIndex = findLastIndex(lines, (_, index) => OMO_TYPING_HINT_RE.test(wrapped(lines, index, OMO_HINT_LINES)));
   if (hintIndex < 0) return null;
@@ -282,7 +320,18 @@ function parseOmoTyping(screen: string, ask: OmoAsk | null, trusted: boolean): P
   let tabs: OmoForm["tabs"];
   let question: string;
   if (known) {
-    index = form ? form.tabs.findIndex((tab) => tab.current) : view.rows.length > 0 ? askedQuestion(view, known) : -1;
+    // as parseOmoQuestion matches it, but for the choice mode, which the typing hint does not show: only a question
+    // whose whole labels are the rows in view makes the cut-off form ambiguous (#2092)
+    const width = screenWidth(lines);
+    const shownLabels = view.rows.map((row) => joinWrapped(row.label, width, /^(?:\u2192\s+)?\d+\.\s+/).replace(/\s+\u2713$/, ""));
+    const shows = (at: number): boolean => {
+      const asked = known.questions[at]!;
+      return (view.question.length === 0 || sameText(joinWrapped(view.question, width), asked.question))
+        && view.rows.every((row, rowAt) => sameText(shownLabels[rowAt]!, asked.options[row.number - 1]!.label));
+    };
+    const fit = form ? form.tabs.findIndex((tab) => tab.current) : view.rows.length > 0 ? askedQuestion(view, known, shows) : -1;
+    if (fit === AMBIGUOUS) return AMBIGUOUS;
+    index = fit;
     if (index < 0) return null;
     tabs = form ? form.tabs : cutSteps(known, index, false, null);
     question = normalizeText(known.questions[index]!.question);
@@ -292,9 +341,9 @@ function parseOmoTyping(screen: string, ask: OmoAsk | null, trusted: boolean): P
     tabs = form.tabs;
     question = joinWrapped(view.question, screenWidth(lines));
   }
-  const choices: { label: string; description: string | null; steps: AnswerStep[] }[] = [
-    { label: "Save the typed answer", description: typed || null, steps: keySteps([KEY.enter]) },
-    { label: "Discard it", description: null, steps: keySteps([KEY.escape]) },
+  const choices: { label: CardWords; description: string | null; steps: AnswerStep[] }[] = [
+    { label: own("Save the typed answer"), description: typed || null, steps: keySteps([KEY.enter]) },
+    { label: own("Discard it"), description: null, steps: keySteps([KEY.escape]) },
   ];
   return finishPrompt("omo", {
     // a menu: a number typed in the chat acts on the terminal's input, so it waits for Confirm
@@ -302,7 +351,7 @@ function parseOmoTyping(screen: string, ask: OmoAsk | null, trusted: boolean): P
     options: choices.map((choice) => ({ label: choice.label, description: choice.description })),
     multi_select: false, custom_option_index: null, steps: omoSteps(tabs, known),
   }, {
-    responder: "omo-typing", menuLabels: choices.map((choice) => choice.label), selectedIndex: -1,
+    responder: "omo-typing", menuLabels: choices.map((choice) => englishOf(choice.label)), selectedIndex: -1,
     checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null,
     optionSteps: choices.map((choice) => choice.steps),
   }, { call: known?.id });
@@ -362,7 +411,7 @@ function parseOmoReview(screen: string, ask: OmoAsk | null, trusted: boolean): P
   // a notice (`! …`) and the Submit line, both wrapped as well
   const field = rest.findIndex((line) => cleanLine(line).startsWith(">"));
   if (field < 0) return null;
-  const commentLabel = joinWrapped(rest.slice(0, field), width) || "Comment";
+  const commentLabel = joinWrapped(rest.slice(0, field), width) || own("Comment");
   const comment = cleanLine(rest[field]!).replace(/^>\s?/, "").trim();
   const after = joinWrapped(rest.slice(field + 1), width);
   const submitAt = after.search(/Submit \(\d+\/\d+ answered\)/);
@@ -377,18 +426,21 @@ function parseOmoReview(screen: string, ask: OmoAsk | null, trusted: boolean): P
     answered: rowOf[at] ? !/:\s*unanswered$/.test(rowOf[at]!.label) : answeredCount === count,
     current: false,
   }));
-  const choices: { label: string; steps: AnswerStep[] }[] = [
-    { label: "Submit", steps: keySteps([...omoWalk(count, selectedIndex, count + 1), KEY.enter]) },
+  const choices: { label: CardWords; steps: AnswerStep[] }[] = [
+    { label: own("Submit"), steps: keySteps([...omoWalk(count, selectedIndex, count + 1), KEY.enter]) },
     ...labels.map((label, row) => ({ label, steps: keySteps([...omoWalk(row, selectedIndex, count + 1), KEY.enter]) })),
   ];
+  const { nativeSteps, ...navigation } = omoNavigation(form, tabs, count, known);
   return finishPrompt("omo", {
     // a menu: a number typed in the chat submits the whole form, so it waits for Confirm
-    kind: "menu", title: "Review your answers", question: submitAt < 0 ? "Submit your answers?" : after.slice(submitAt),
-    body: [notice, comment ? `Comment: ${comment}` : ""].filter(Boolean).join("\n") || null,
+    kind: "menu", title: own("Review your answers"), question: submitAt < 0 ? own("Submit your answers?") : after.slice(submitAt),
+    // the notice and the comment are omo's and the user's own words, the label before the comment the bridge's
+    body: comment ? (notice ? own("{notice}\nComment: {comment}", { notice, comment }) : own("Comment: {comment}", { comment })) : notice || null,
     options: [...choices.map(({ label }) => ({ label, description: null })), { label: commentLabel, description: null }],
-    multi_select: false, custom_option_index: choices.length, steps: omoSteps(tabs, known),
+    multi_select: false, custom_option_index: choices.length, ...navigation,
   }, {
-    responder: "omo-review", menuLabels: [...labels, commentLabel], selectedIndex,
+    ...(nativeSteps ? { nativeSteps } : {}),
+    responder: "omo-review", menuLabels: [...labels, englishOf(commentLabel)], selectedIndex,
     checkedOptionIndices: [], customMenuIndex: count, rejectWithEscapeIndex: null,
     optionSteps: [...choices.map(({ steps }) => steps), []],
     customSteps: (text) => [...keySteps(omoWalk(count, selectedIndex, count + 1)), { text }, ...keySteps([KEY.enter])],
@@ -400,7 +452,7 @@ function parseOmoReview(screen: string, ask: OmoAsk | null, trusted: boolean): P
  * 5.1.19): OmO goes on working, or ends its turn, and the question stays open until answered:
  *
  *    ? Question pending (2 unanswered) · 30m          (`? 2 questions pending · 30m` for several calls)
- *      표시 위치 — 음성 사용량과 추정 비용을 어디에 보여줄까요?
+ *      표시 위치 - 음성 사용량과 추정 비용을 어디에 보여줄까요?     (`—` before omo 5.1.48)
  *    [ 설정 > 음성 입력 (추천) ]  [ 설정 + 사이드바 미터 ]  [ own answer… ]
  *    +1 more question
  *    enter to answer · /answer · or just type your reply
@@ -417,13 +469,26 @@ function parseOmoPending(screen: string, pending: readonly OmoAsk[]): ParsedProm
   const statusIndex = findLastIndex(lines.slice(0, hintIndex), (line) => OMO_PENDING_STATUS_RE.test(cleanLine(line)));
   if (statusIndex < 0 || hintIndex - statusIndex > 12) return null;
   const unanswered = OMO_PENDING_STATUS_RE.exec(cleanLine(lines[statusIndex]!))![1];
-  const shown = /^(.+?) — (.+)$/.exec(cleanLine(lines[statusIndex + 1] ?? ""));
-  if (!shown) return null;
-  // the line is cut at the pane's edge
-  const start = comparable(shown[2]!.replace(/(?:…|\.\.\.)$/, ""));
-  const matches = pending.filter((ask) => ask.wait === false).flatMap((ask) => ask.questions.flatMap((question, index) =>
-    sameHeader(shown[1]!, question.header) && comparable(question.question).startsWith(start) ? [{ ask, index }] : []));
-  if (matches.length !== 1) return null;
+  const line = cleanLine(lines[statusIndex + 1] ?? "");
+  // a header may hold the separator itself, so each place it occurs is a split to try; the line
+  // is cut at the pane's edge. A split with nothing after it still counts against the others:
+  // the cut may have left only that question's header, so a question it fits makes the line
+  // ambiguous. It never names a question on its own.
+  const splits = [...line.matchAll(OMO_PENDING_SEPARATOR_RE)].map((separator) => ({
+    header: line.slice(0, separator.index),
+    start: comparable(line.slice(separator.index + separator[0].length + 1).replace(/(?:…|\.\.\.)$/, "")),
+  }));
+  // A line cut at the pane's edge may have lost the separator itself, or its space: every question
+  // whose header and text begin with what is shown is a candidate too, so it can only make the
+  // line ambiguous.
+  const cut = /(?:\u2026|\.\.\.)$/.test(line);
+  const shown = comparable(line.replace(/(?:\u2026|\.\.\.)$/, ""));
+  const matches = pending.filter((ask) => ask.wait === false).flatMap((ask) => ask.questions.flatMap((question, index) => {
+    const fits = splits.filter((split) => sameHeader(split.header, question.header) && comparable(question.question).startsWith(split.start));
+    const fitsCut = cut && comparable(question.header + question.question).startsWith(shown);
+    return fits.length > 0 || fitsCut ? [{ ask, index, named: fits.some((split) => split.start !== "") }] : [];
+  }));
+  if (matches.length !== 1 || !matches[0]!.named) return null;
   const { ask, index } = matches[0]!;
   const asked = ask.questions[index]!;
   const tabs = cutSteps(ask, index, false, unanswered === undefined ? null : ask.questions.length - Number(unanswered));
@@ -498,7 +563,7 @@ function parseOmoModel(screen: string): ParsedPrompt | null {
   return finishPrompt("omo", {
     kind: "question",
     title: "",
-    question: current ? `Select model (currently ${current.label})` : "Select model",
+    question: current ? own("Select model (currently {model})", { model: current.label }) : own("Select model"),
     body: null,
     options: labels.map((label) => ({ label, description: null })),
     multi_select: false,
@@ -550,8 +615,12 @@ const agents = ["omo", "pi", "claude", ""] as const;
 
 const forms = onePerPass((screen: string, ctx: ReaderContext): (ParsedPrompt | null)[] => {
   const read = (ask: OmoAsk | null, trusted: boolean) => [parseOmoQuestion(screen, ask, trusted), parseOmoTyping(screen, ask, trusted), parseOmoReview(screen, ask, trusted)];
-  const matched = ctx.omoOpen.flatMap((ask) => read(ask, false)).filter((form) => form !== null);
-  return ctx.omoOpen.length > 0 ? matched.length === 1 ? matched : [] : read(ctx.omoAsk, ctx.omoTrusted);
+  if (ctx.omoOpen.length === 0) return read(ctx.omoAsk, ctx.omoTrusted).map((form) => form === AMBIGUOUS ? null : form);
+  // the form must be exactly one question of one open call: a call it fits more than one way counts too (#2092)
+  const fits = ctx.omoOpen.flatMap((ask) => read(ask, false));
+  if (fits.includes(AMBIGUOUS)) return [];
+  const matched = fits.filter((form): form is ParsedPrompt => form !== null && form !== AMBIGUOUS);
+  return matched.length === 1 ? matched : [];
 });
 
 export const readers: readonly DialogReader[] = [

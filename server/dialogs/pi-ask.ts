@@ -1,6 +1,6 @@
 import type { DialogReader } from "./registry.ts";
 import { piAskTabs } from "./pi-ask-tabs.ts";
-import { ANSI_RE, KEY, type AnswerStep, type OmoAsk, type ParsedPrompt, cleanLine, findLastIndex, finishPrompt, keySteps, navigationKeys, normalizeText } from "./shared.ts";
+import { ANSI_RE, KEY, type AnswerStep, type OmoAsk, type ParsedPrompt, cleanLine, findLastIndex, finishPrompt, keySteps, navigationKeys, normalizeText, own } from "./shared.ts";
 
 // rpiv-ask-user-question uses ui.custom, not Pi's native select widget. Its numbered
 // rows are cursor positions, NOT numeric shortcuts. Keep it separate from pi.ts.
@@ -118,7 +118,8 @@ function question(frame: Frame, expected?: OmoAsk): ParsedPrompt | null {
     ...(confirmed !== undefined ? { default_option_index: confirmed } : {}),
     ...(expected && other.label !== OTHER ? { default_custom_text: typing ? other.label : other.label.replace(/ ✔$/, "") } : {}),
     ...(tabs ? { steps: typing ? tabs.steps.map(step => ({ ...step, can_navigate: false })) : tabs.steps,
-      can_step_back: navigable && tabs.index! > 0 } : {}),
+      can_step_back: navigable && tabs.index! > 0,
+      can_step_next: navigable && tabs.steps[tabs.index! + 1]?.can_navigate === true } : {}),
   }, {
     ...(navigable ? { piAskForm: { identity: `${expected?.id ?? ""}\0${tabs!.identity}`, index: tabs!.index! } } : {}),
     ...(typing ? { piAskTyping: true as const } : {}),
@@ -138,7 +139,7 @@ function question(frame: Frame, expected?: OmoAsk): ParsedPrompt | null {
       keys.push(...navigationKeys(rows.length - cursor), KEY.enter);
       return keySteps(keys);
     } }),
-  }, { steps: undefined, can_step_back: undefined, default_custom_text: undefined,
+  }, { steps: undefined, can_step_back: undefined, can_step_next: undefined, default_custom_text: undefined,
     call: JSON.stringify({ source: expected?.id, tabBar, tab: tabs?.index ?? null, ...(multi ? { checked } : {}) }) });
 }
 
@@ -186,7 +187,7 @@ function review(frame: Frame, expected?: OmoAsk): ParsedPrompt | null {
   let at = 0;
   const answers = questions.map(step => ({ question: step.label, answer: step.answered ? summaries[at++]!.answer : null }));
   return finishPrompt("pi", {
-    kind: "question", title: "Review your answers", question: missing.length ? caption.replace(/^⚠\s+/, "") : "Submit these answers?", body: null, answers,
+    kind: "question", title: own("Review your answers"), question: missing.length ? caption.replace(/^⚠\s+/, "") : own("Submit these answers?"), body: null, answers,
     options: missing.length ? [{ label: "Cancel", description: null }]
       : [{ label: "Submit answers", description: null }, { label: "Cancel", description: null }],
     multi_select: false, custom_option_index: null,

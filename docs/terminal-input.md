@@ -74,6 +74,9 @@ The key bar waits only for a direct-typing (xterm) composition, so a key cannot 
 pending commit. A composition in the input line leaves the key bar live: Esc, ^C and the arrows
 go to the pane at once, Ctrl, Alt and Shift arm, and the line's unfinished text stays where it is.
 Only the switch to direct typing waits for it, so the line is not removed mid-word.
+A key bar key, or a hardware arrow, Home, Tab, Esc or Ctrl key, empties xterm's helper textarea as
+Enter does, so a keyboard's later correction (Gboard rewriting a word) only reaches text typed since
+the cursor moved (#2836).
 
 The key bar defaults to Esc, Tab, ^C, Ctrl, Alt, Shift, Enter and the arrows. Esc, Tab and ^C
 come first so they stay reachable without scrolling on narrow phones.
@@ -113,6 +116,18 @@ initial output has passed refusal detection, or when an existing ready attachmen
 the existing RPC input path. Legacy unattached mirror input remains serialized with submits.
 Clients talking to an older bridge use its first output, after capabilities are known, as the
 compatibility signal. A screen frame alone does not establish readiness on a new bridge.
+
+A client that joins an attachment whose stream ended after it was ready (the replacement attach has
+not taken yet) first gets `{type:"output-recovering", pane_id}`, then the retained replay, and no
+`input-ready`. The client treats that replay as the screen from before: it does not present it as
+the pane's current screen (so it does not count as reading the agent's finish) or read the agent's
+input row from it, until the next attach takes (`input-ready`) and new output arrives. The replay's
+output credit is still acknowledged as usual. The wait belongs to that pane: another pane's output
+is its own; a reconnect drops it, and so does a terminal that leaves the pane (herdr could not
+restore it), as a rejoin is told again while the attachment still recovers. A replaced terminal of
+the same pane keeps it until its new attach answers: `output-recovering` again (the replay that
+follows it is still the screen from before), or a replay without it, which joined an attachment
+that recovered meanwhile and is the current screen. Queued input still waits for `input-ready`.
 
 `input_not_ready` reports a rejected PTY input. `input_failed` reports an RPC or local sidecar
 write failure; the UI displays it outside the terminal stream. These are not acknowledgements
@@ -158,8 +173,8 @@ trips and pane changes on those keyboards before claiming universal IME compatib
   `compositionend.data`, retaining the `핫 → 하세` case. The readable source patch is in `patches/`;
   Vite builds that source through `scripts/build-xterm.ts` so the patch is present in the shipped
   app, not just unused TypeScript. Version changes fail closed until the patch is revalidated.
-  The queue/watermark approach follows @joonhoekim's proposal in #6090 (MIT); the backport targets
-  5.5.0 and is maintained here pending an upstream release. Reset/disposal also invalidate deferred
+  The queue/watermark approach follows @joonhoekim's proposal in #6090 (MIT); the backport was written
+  for 5.5.0, ported to 6.0.0 (#1617), and is maintained here pending an upstream release. Reset/disposal also invalidate deferred
   composition work so old input cannot enter a newly selected pane. The app resets in a layout
   effect, before another task can deliver the previous pane's commit.
 - Related to [xterm #3600](https://github.com/xtermjs/xterm.js/issues/3600), native Gboard testing
@@ -179,7 +194,7 @@ trips and pane changes on those keyboards before claiming universal IME compatib
 - [xterm #6036](https://github.com/xtermjs/xterm.js/issues/6036): a Linux input method that
   shows no in-app preedit (fcitx4 with Sogou Pinyin) loses a candidate picked with a digit key.
   [PR #6037](https://github.com/xtermjs/xterm.js/pull/6037) defers every digit and Space on Linux
-  for up to 50 ms and is unmerged. The 5.5.0 patch here takes a smaller step, below.
+  for up to 50 ms and is unmerged. The patch here takes a smaller step, below.
 - Mosh-style speculative local echo is not added. It addresses network responsiveness and needs
   a separate reconciliation design; it does not repair text lost before transmission.
 
@@ -196,7 +211,7 @@ composition path preserved the Korean text. Safari emitted `insertText("ㅎ")`, 
 and no composition events; its keydown 229 arrived after each DOM edit. Stock xterm handling
 sent the first jamo and ignored subsequent replacements.
 
-The 5.5.0 source patch treats a single Hangul insertion on macOS Safari as local preedit,
+The source patch treats a single Hangul insertion on macOS Safari as local preedit,
 tracks the corrected DOM range through replacements and deletion, and commits it before the
 next syllable, ordinary key, paste or blur. Reset cancels pending text before a pane change.
 Native composition events and screen-reader mode retain their existing paths. The recorded
@@ -368,6 +383,40 @@ Afterwards the same taps delivered `한글 `, `abc한글 `, `하 ` (Backspace in
 one DEL. The iPad simulator's on-screen keyboard already composed.
 `scripts/terminal-ipad-ime-regression.ts` replays the trace under an iPhone user agent and
 platform with `keyCode` 0.
+
+#### The iOS app: a web view without "Safari" in its user agent
+
+Updated: 2026-10-29
+
+In the iOS 27.0 simulator (iPhone 18 Pro, on-screen Korean 2-set keyboard driven by
+WebDriverAgent taps, `scripts/terminal-ime-diagnostic.ts`), typing 안녕 then Space sent `안녕 `
+from a Safari tab and from the page added to the Home Screen, but `ㅇㅏㄴㄴㅕㅇ ` from the Ovis
+iOS app. The DOM events were the same in all three; only the user agent differed. The app's
+WKWebView reports `… AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148`, with no `Version/`
+or `Safari/`, and the xterm patch's replacement path was gated on xterm's `isSafari`. So each
+jamo went out on its keypress, while iOS still composed it in the field. (The Mac app appends
+`Safari/` to its user agent itself, `app/mac/Sources/OvisMac/WebPage.swift`; the iOS app did not.)
+The path now runs on a Mac, iPad or iPhone for Safari and for any page whose user agent names
+`AppleWebKit/` and neither Chrome nor Android: the iOS app, other iOS web views, and Mac WebKit
+web views. Chrome, Edge and Opera on a Mac still say Chrome and stay out.
+This applies to installed apps as soon as the PC's Ovis is updated, with no new app build. The
+replay runs the same trace under the app's recorded user agent.
+
+#### A keyboard that commits a whole string as one key (#1488)
+
+Updated: 2026-10-30
+
+A dictation keyboard such as FluidVoice commits the transcript with one `insertText` call. In
+the iOS 27.0 simulator, a minimal keyboard extension doing the same put the whole sentence in a
+plain textarea but sent only `h` to the pane. WebKit reports such a commit as one key: a
+keydown whose `key` is the whole string (`code` `Unidentified`), a keypress whose `charCode` is
+its first character, then `beforeinput` and `input` (`insertText`) with the whole string. xterm
+sent the keypress's character and then ignored the insertion as already handled. The patch now
+holds a keypress whose `key` is longer than one character and starts with the code point its
+`charCode` names, which may be an emoji (a key name never does: Enter's `charCode` is 13), and
+the insertion carrying that string sends it whole, once. If no such insertion follows before the next key, keyup, other input or blur, the
+held character is sent, as before. Hangul committed this way is text too, not a syllable to
+compose. `scripts/terminal-ipad-ime-regression.ts` replays the recorded sequence.
 
 ### Native Linux check: a candidate picked with a digit (#1649)
 

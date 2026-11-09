@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { UsageReport } from "../shared/protocol.ts";
-import { FRESH_MS, handleUsageRequest, MAX_READ_BYTES, MIN_REFRESH_MS, RETRY_MS, runCommand, USAGE_PROVIDERS, UsageHttpError, UsageService, type KeychainRead, type UsageContext, type UsageProvider } from "./usage.ts";
+import { FRESH_MS, handleStatuslineRequest, handleUsageRequest, MAX_READ_BYTES, MIN_REFRESH_MS, RETRY_MS, runCommand, USAGE_PROVIDERS, UsageHttpError, UsageService, type KeychainRead, type UsageContext, type UsageProvider } from "./usage.ts";
+import { installStatusline } from "./statusline-install.ts";
 
 const NOW = Date.parse("2026-09-29T12:00:00Z");
 const HOUR = 3600_000;
@@ -23,6 +24,8 @@ let requests: Array<{ url: string; init: RequestInit }>;
 let keychain: Map<string, KeychainRead>;
 let commands: Map<string, string>;
 let commandCalls: string[][];
+/** commands this PC does not have installed */
+let absent: Set<string>;
 
 function context(platform: NodeJS.Platform = "linux"): UsageContext {
   return {
@@ -40,6 +43,7 @@ function context(platform: NodeJS.Platform = "linux"): UsageContext {
       commandCalls.push(argv);
       return commands.get(argv.join(" ")) ?? null;
     },
+    has: (command) => !absent.has(command),
   };
 }
 
@@ -53,6 +57,8 @@ function write(path: string, value: unknown) {
 }
 
 const CODEX_USAGE = "https://chatgpt.com/backend-api/wham/usage";
+const CODEX_RESETS = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+const CLAUDE_USAGE = "https://api.anthropic.com/api/oauth/usage";
 
 function signInCodex(exp = NOW / 1000 + HOUR / 1000, dir = ".codex", user = "user-1", email = "me@example.com") {
   write(join(home, dir, "auth.json"), {
@@ -83,6 +89,7 @@ beforeEach(() => {
   keychain = new Map();
   commands = new Map();
   commandCalls = [];
+  absent = new Set();
 });
 
 afterEach(() => rmSync(home, { recursive: true, force: true }));
@@ -113,7 +120,7 @@ describe("providers", () => {
   it("prefers the Claude keychain item on macOS and reads the scoped weekly limits", async () => {
     keychain.set("Claude Code-credentials|me", { status: "found", value: JSON.stringify({ claudeAiOauth: { accessToken: "k", expiresAt: NOW + HOUR, subscriptionType: "max" } }) });
     write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "file", expiresAt: NOW + HOUR } });
-    replies.set("https://api.anthropic.com/api/oauth/usage", { body: {
+    replies.set(CLAUDE_USAGE, { body: {
       five_hour: { utilization: 42, resets_at: "2026-09-29T14:00:00.000Z" },
       seven_day: { utilization: 63.44, resets_at: "2026-10-03T00:00:00Z" },
       seven_day_opus: null,
@@ -129,9 +136,302 @@ describe("providers", () => {
     ]);
   });
 
+  it("reads Claude's extra usage in its currency, against its monthly cap", async () => {
+    write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "k", expiresAt: NOW + HOUR } });
+    replies.set(CLAUDE_USAGE, { body: {
+      five_hour: { utilization: 42, resets_at: null },
+      extra_usage: { is_enabled: true, monthly_limit: 1539, used_credits: 1219, utilization: 79.2, currency: "EUR" },
+    } });
+    const [usage] = (await new UsageService(context(), only("claude")).report()).providers;
+    expect(requests.map((request) => request.url)).toEqual([CLAUDE_USAGE]);
+    expect(usage!.credits).toEqual({ kind: "spend", currency: "EUR", used: 12.19, limit: 15.39, used_percent: 79.2 });
+    expect(usage).not.toHaveProperty("resets");
+  });
+
+  it("lists no Claude credits when extra usage is off", async () => {
+    write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "k", expiresAt: NOW + HOUR } });
+    replies.set(CLAUDE_USAGE, { body: {
+      five_hour: { utilization: 42, resets_at: null },
+      extra_usage: { is_enabled: false, monthly_limit: null, used_credits: null, utilization: null },
+    } });
+    const [usage] = (await new UsageService(context(), only("claude")).report()).providers;
+    expect(usage).not.toHaveProperty("credits");
+  });
+
+  it("reads Claude's uncapped extra usage as spend with no limit, in yen without cents", async () => {
+    write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "k", expiresAt: NOW + HOUR } });
+    replies.set(CLAUDE_USAGE, { body: { extra_usage: { is_enabled: true, monthly_limit: null, used_credits: 830, utilization: null, currency: "JPY" } } });
+    const [usage] = (await new UsageService(context(), only("claude")).report()).providers;
+    expect(usage!.credits).toEqual({ kind: "spend", currency: "JPY", used: 830, limit: null, used_percent: null });
+  });
+
+  it("reads Codex's credit balance and its limit resets with the soonest expiry", async () => {
+    signInCodex();
+    const reply = codexReply();
+    replies.set(CODEX_USAGE, { body: { ...(reply.body as object), credits: { has_credits: true, unlimited: false, balance: "31.84" }, rate_limit_reset_credits: { available_count: 2 } } });
+    replies.set(CODEX_RESETS, { body: { available_count: 2, credits: [
+      { id: "r1", reset_type: "codex_rate_limits", status: "available", granted_at: "2026-09-20T00:00:00Z", expires_at: new Date(NOW + 30 * HOUR).toISOString() },
+      { id: "r2", reset_type: "codex_rate_limits", status: "available", granted_at: "2026-09-21T00:00:00Z", expires_at: new Date(NOW + 8 * HOUR).toISOString() },
+      { id: "r3", reset_type: "codex_rate_limits", status: "redeemed", granted_at: "2026-09-19T00:00:00Z", expires_at: new Date(NOW + HOUR).toISOString() },
+    ] } });
+    const [usage] = (await new UsageService(context(), only("codex")).report()).providers;
+    expect(usage!.credits).toEqual({ kind: "balance", balance: 31.84, unlimited: false });
+    expect(usage!.resets).toEqual({ available: 2, expires_at: new Date(NOW + 8 * HOUR).toISOString() });
+    expect((requests[1]!.init.headers as Record<string, string>)["chatgpt-account-id"]).toBe("acct-1");
+  });
+
+  it("keeps Codex's reset count when the list of resets cannot be read, and asks for it only when one is left", async () => {
+    signInCodex();
+    const reply = codexReply();
+    replies.set(CODEX_USAGE, { body: { ...(reply.body as object), credits: { has_credits: false, unlimited: true, balance: null }, rate_limit_reset_credits: { available_count: 1 } } });
+    replies.set(CODEX_RESETS, { status: 500 });
+    const service = new UsageService(context(), only("codex"));
+    const [usage] = (await service.report()).providers;
+    expect(usage!.problem).toBeNull();
+    expect(usage!.credits).toEqual({ kind: "balance", balance: null, unlimited: true });
+    expect(usage!.resets).toEqual({ available: 1, expires_at: null });
+    requests.length = 0;
+    now += FRESH_MS;
+    replies.set(CODEX_USAGE, { body: { ...(reply.body as object), credits: { has_credits: false, unlimited: false, balance: "0" }, rate_limit_reset_credits: { available_count: 0 } } });
+    const [later] = (await service.report()).providers;
+    expect(requests.map((request) => request.url)).toEqual([CODEX_USAGE]);
+    expect(later).not.toHaveProperty("credits");
+    expect(later).not.toHaveProperty("resets");
+  });
+
+  it("keeps a fresh Codex reading when its list of resets answers 429", async () => {
+    signInCodex();
+    const reply = codexReply();
+    replies.set(CODEX_USAGE, { body: { ...(reply.body as object), rate_limit_reset_credits: { available_count: 1 } } });
+    replies.set(CODEX_RESETS, { status: 429, headers: { "retry-after": "3600" } });
+    const [usage] = (await new UsageService(context(), only("codex")).report()).providers;
+    expect(usage!.problem).toBeNull();
+    expect(usage!.windows.map((window) => window.used_percent)).toEqual([12, 77]);
+    expect(usage!.resets).toEqual({ available: 1, expires_at: null });
+  });
+
+  it("keeps the last credits and resets through a failed read, as it keeps the windows", async () => {
+    signInCodex();
+    const reply = codexReply();
+    replies.set(CODEX_USAGE, { body: { ...(reply.body as object), credits: { has_credits: true, unlimited: false, balance: "12" }, rate_limit_reset_credits: { available_count: 1 } } });
+    replies.set(CODEX_RESETS, { body: { available_count: 1, credits: [] } });
+    const service = new UsageService(context(), only("codex"));
+    await service.report();
+    now += FRESH_MS;
+    replies.set(CODEX_USAGE, { status: 500 });
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      const [usage] = (await service.report()).providers;
+      expect(usage!.problem).toBe("failed");
+      expect(usage!.credits).toEqual({ kind: "balance", balance: 12, unlimited: false });
+      expect(usage!.resets).toEqual({ available: 1, expires_at: null });
+    } finally {
+      console.warn = warn;
+    }
+  });
+
+  it("reads Claude's windows from the status line Claude's own payload keeps, without a request", async () => {
+    keychain.set("Claude Code-credentials|me", { status: "found", value: JSON.stringify({ claudeAiOauth: { accessToken: "k", expiresAt: NOW + HOUR, subscriptionType: "max" } }) });
+    write(join(home, ".claude.json"), { oauthAccount: { accountUuid: "uuid-1" } });
+    const path = join(home, ".herdr", "statusline-last.json");
+    write(path, { _herdr: { account: { id: "uuid-1" } }, session_id: "s", model: { display_name: "Opus 5.5" }, rate_limits: {
+      five_hour: { used_percentage: 17, resets_at: (NOW + 2 * HOUR) / 1000 },
+      seven_day: { used_percentage: 64, resets_at: (NOW + 48 * HOUR) / 1000 },
+    } });
+    utimesSync(path, new Date(NOW), new Date(NOW));
+    const [usage] = (await new UsageService(context("darwin"), only("claude")).report()).providers;
+    // the endpoint answers 403 from some networks; nothing is asked of it when the line has the numbers
+    expect(requests).toEqual([]);
+    expect(usage!.problem).toBeNull();
+    expect(usage!.plan).toBe("max");
+    expect(usage!.windows).toEqual([
+      { kind: "session", scope: null, used_percent: 17, resets_at: new Date(NOW + 2 * HOUR).toISOString(), starts_at: new Date(NOW + 2 * HOUR - 5 * HOUR).toISOString() },
+      { kind: "week", scope: null, used_percent: 64, resets_at: new Date(NOW + 48 * HOUR).toISOString(), starts_at: new Date(NOW + 48 * HOUR - 7 * 24 * HOUR).toISOString() },
+    ]);
+  });
+
+  it("uses only the captured account's local limits, falling back for other or unknown accounts", async () => {
+    write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "personal", expiresAt: NOW + HOUR } });
+    write(join(home, ".claude.json"), { oauthAccount: { accountUuid: "personal" } });
+    write(join(home, ".claude-work", ".credentials.json"), { claudeAiOauth: { accessToken: "work", expiresAt: NOW + HOUR } });
+    write(join(home, ".claude-work", ".claude.json"), { oauthAccount: { accountUuid: "work" } });
+    const path = join(home, ".herdr", "statusline-last.json");
+    write(path, { _herdr: { account: { id: "work" } }, rate_limits: { five_hour: { used_percentage: 17 } } });
+    utimesSync(path, new Date(NOW), new Date(NOW));
+    replies.set(CLAUDE_USAGE, { body: { five_hour: { utilization: 42 } } });
+    const report = await new UsageService(context(), only("claude")).report();
+    expect(report.providers.map((usage) => [usage.key, usage.windows[0]?.used_percent])).toEqual([["claude:personal", 42], ["claude:work", 17]]);
+    expect(requests.map((request) => (request.init.headers as Record<string, string>)["authorization"])).toEqual(["Bearer personal"]);
+    requests.length = 0;
+    write(path, { rate_limits: { five_hour: { used_percentage: 99 } } });
+    utimesSync(path, new Date(NOW), new Date(NOW));
+    expect((await new UsageService(context(), only("claude")).report()).providers.map((usage) => usage.windows[0]?.used_percent)).toEqual([42, 42]);
+    expect(requests).toHaveLength(2);
+  });
+
+  it("falls back to the Claude endpoint when every captured usage window has reset", async () => {
+    write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "k", expiresAt: NOW + HOUR } });
+    write(join(home, ".claude.json"), { oauthAccount: { accountUuid: "a" } });
+    const path = join(home, ".herdr", "statusline-last.json");
+    write(path, { _herdr: { account: { id: "a" } }, rate_limits: { five_hour: { used_percentage: 99, resets_at: NOW / 1000 } } });
+    utimesSync(path, new Date(NOW - 60_000), new Date(NOW - 60_000));
+    replies.set(CLAUDE_USAGE, { body: { five_hour: { utilization: 1 } } });
+    const [usage] = (await new UsageService(context(), only("claude")).report()).providers;
+    expect(usage?.windows[0]?.used_percent).toBe(1);
+    expect(requests).toHaveLength(1);
+  });
+
+  it("invalidates a cached local reading at its reset instead of waiting for the report TTL", async () => {
+    write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "k", expiresAt: NOW + HOUR } });
+    write(join(home, ".claude.json"), { oauthAccount: { accountUuid: "a" } });
+    const path = join(home, ".herdr", "statusline-last.json");
+    write(path, { _herdr: { account: { id: "a" } }, rate_limits: { five_hour: { used_percentage: 99, resets_at: (NOW + 60_000) / 1000 } } });
+    utimesSync(path, new Date(NOW), new Date(NOW));
+    replies.set(CLAUDE_USAGE, { body: { five_hour: { utilization: 1 } } });
+    const service = new UsageService(context(), only("claude"));
+    expect((await service.report()).providers[0]?.windows[0]?.used_percent).toBe(99);
+    expect(requests).toHaveLength(0);
+    now += 60_000;
+    expect((await service.report()).providers[0]?.windows[0]?.used_percent).toBe(1);
+    expect(requests).toHaveLength(1);
+  });
+
+  it("accepts matched local Claude limits with an expired token but never sends that token", async () => {
+    write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "expired", expiresAt: NOW - HOUR } });
+    write(join(home, ".claude.json"), { oauthAccount: { accountUuid: "a" } });
+    const path = join(home, ".herdr", "statusline-last.json");
+    write(path, { _herdr: { account: { id: "a" } }, rate_limits: { five_hour: { used_percentage: 17 } } });
+    utimesSync(path, new Date(NOW), new Date(NOW));
+    const [usage] = (await new UsageService(context(), only("claude")).report()).providers;
+    expect(usage?.problem).toBeNull();
+    expect(usage?.windows[0]?.used_percent).toBe(17);
+    rmSync(path);
+    const [missing] = (await new UsageService(context(), only("claude")).report()).providers;
+    expect(missing?.problem).toBe("expired");
+    expect(requests).toEqual([]);
+  });
+
+  it("asks the endpoint over a capture older than five minutes, and falls back to it with its own time", async () => {
+    write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "k", expiresAt: NOW + HOUR } });
+    write(join(home, ".claude.json"), { oauthAccount: { accountUuid: "a" } });
+    const path = join(home, ".herdr", "statusline-last.json");
+    write(path, { _herdr: { account: { id: "a" } }, rate_limits: { five_hour: { used_percentage: 17 } } });
+    const taken = NOW - 10 * 60_000;
+    utimesSync(path, new Date(taken), new Date(taken));
+    replies.set(CLAUDE_USAGE, { body: { five_hour: { utilization: 42 } } });
+    const [answered] = (await new UsageService(context(), only("claude")).report()).providers;
+    expect(answered).toMatchObject({ problem: null, checked_at: new Date(NOW).toISOString(), windows: [{ used_percent: 42 }] });
+    expect(requests).toHaveLength(1);
+    replies.set(CLAUDE_USAGE, { status: 403, body: { error: { message: "Request not allowed" } } });
+    const [refused] = (await new UsageService(context(), only("claude")).report()).providers;
+    expect(refused).toMatchObject({ problem: null, checked_at: new Date(taken).toISOString(), windows: [{ used_percent: 17 }] });
+    expect(requests).toHaveLength(2);
+  });
+
+  it("offers the status line for a 403 to a token that has not expired, never for a real expiry or once it is on", async () => {
+    write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "k", expiresAt: NOW + HOUR } });
+    write(join(home, ".claude.json"), { oauthAccount: { accountUuid: "a" } });
+    replies.set(CLAUDE_USAGE, { status: 403, body: { error: { message: "Request not allowed" } } });
+    const read = async () => (await new UsageService(context(), only("claude")).report()).providers[0];
+    expect(await read()).toMatchObject({ problem: "expired", statusline_offer: true });
+    replies.set(CLAUDE_USAGE, { status: 401, body: {} });
+    expect(await read()).not.toHaveProperty("statusline_offer");
+    replies.set(CLAUDE_USAGE, { status: 403, body: { error: { message: "Request not allowed" } } });
+    installStatusline({ home });
+    expect(await read()).not.toHaveProperty("statusline_offer");
+    expect((await read())?.problem).toBe("expired");
+  });
+
+  it("offers the status line only for the sign-in whose config directory the switch changes", async () => {
+    write(join(home, ".claude-work", ".credentials.json"), { claudeAiOauth: { accessToken: "work", expiresAt: NOW + HOUR } });
+    replies.set(CLAUDE_USAGE, { status: 403, body: { error: { message: "Request not allowed" } } });
+    const [elsewhere] = (await new UsageService(context(), only("claude")).report()).providers;
+    expect(elsewhere).toMatchObject({ problem: "expired" });
+    expect(elsewhere).not.toHaveProperty("statusline_offer");
+    const configured = { ...context(), env: { ...context().env, CLAUDE_CONFIG_DIR: join(home, ".claude-work") } };
+    const [switched] = (await new UsageService(configured, only("claude")).report()).providers;
+    expect(switched).toMatchObject({ problem: "expired", statusline_offer: true });
+  });
+
+  it("takes a CLAUDE_CONFIG_DIR named default as a path, not as the default ~/.claude", async () => {
+    write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "k", expiresAt: NOW + HOUR } });
+    replies.set(CLAUDE_USAGE, { status: 403, body: { error: { message: "Request not allowed" } } });
+    const [usage] = (await new UsageService({ ...context(), env: { ...context().env, CLAUDE_CONFIG_DIR: "default" } }, only("claude")).report()).providers;
+    expect(usage).toMatchObject({ problem: "expired" });
+    expect(usage).not.toHaveProperty("statusline_offer");
+  });
+
+  it("offers the status line when CLAUDE_CONFIG_DIR names the default ~/.claude, however it is spelled", async () => {
+    write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "k", expiresAt: NOW + HOUR } });
+    replies.set(CLAUDE_USAGE, { status: 403, body: { error: { message: "Request not allowed" } } });
+    for (const spelled of [join(home, ".claude"), `${join(home, ".claude")}/`]) {
+      const [usage] = (await new UsageService({ ...context(), env: { ...context().env, CLAUDE_CONFIG_DIR: spelled } }, only("claude")).report()).providers;
+      expect(usage).toMatchObject({ problem: "expired", statusline_offer: true });
+    }
+  });
+
+  it("answers a failed switch without quoting Claude's settings or a command saved in them", async () => {
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const service = new UsageService(context(), only("claude"));
+    const post = () => handleStatuslineRequest(new Request("http://x/api/usage/statusline", { method: "POST", body: JSON.stringify({ enabled: true }) }), service);
+    expect((await post()).status).toBe(200);
+    // a command that runs the installed wrapper behind a secret of its own is refused, not wrapped
+    const wrapper = join(home, ".claude", "herdr-statusline", "statusline-tee.sh");
+    write(join(home, ".claude", "settings.json"), { statusLine: { type: "command", command: `API_KEY=FAKE_SECRET_FOR_TEST sh ${wrapper}` } });
+    const refused = await post();
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).not.toContain("FAKE_SECRET_FOR_TEST");
+    writeFileSync(join(home, ".claude", "settings.json"), "{ \"statusLine\": API_KEY=FAKE_SECRET_FOR_TEST");
+    const broken = await post();
+    expect(broken.status).toBe(500);
+    expect(await broken.text()).not.toContain("FAKE_SECRET_FOR_TEST");
+  });
+
+  it("answers a turn-off it could only do in part as refused, not as off", async () => {
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const service = new UsageService(context(), only("claude"));
+    const post = (enabled: boolean) => handleStatuslineRequest(new Request("http://x/api/usage/statusline", { method: "POST", body: JSON.stringify({ enabled }) }), service);
+    expect((await post(true)).status).toBe(200);
+    const wrapper = join(home, ".claude", "herdr-statusline", "statusline-tee.sh");
+    write(join(home, ".claude", "settings.json"), { statusLine: { type: "command", command: `sh ${wrapper}` } });
+    const kept = await post(false);
+    expect(kept.status).toBe(409);
+    expect(existsSync(wrapper)).toBe(true);
+  });
+
+  it("never offers the status line where it cannot run", async () => {
+    write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "k", expiresAt: NOW + HOUR } });
+    replies.set(CLAUDE_USAGE, { status: 403, body: { error: { message: "Request not allowed" } } });
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const [usage] = (await new UsageService(context(), only("claude")).report()).providers;
+      expect(usage).toMatchObject({ problem: "expired" });
+      expect(usage).not.toHaveProperty("statusline_offer");
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
+
+  it("keeps a newer endpoint answer over an older capture when a later refresh is refused", async () => {
+    write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "k", expiresAt: NOW + 2 * HOUR } });
+    write(join(home, ".claude.json"), { oauthAccount: { accountUuid: "a" } });
+    const path = join(home, ".herdr", "statusline-last.json");
+    write(path, { _herdr: { account: { id: "a" } }, rate_limits: { five_hour: { used_percentage: 17 } } });
+    utimesSync(path, new Date(NOW - 10 * 60_000), new Date(NOW - 10 * 60_000));
+    replies.set(CLAUDE_USAGE, { body: { five_hour: { utilization: 42 } } });
+    const service = new UsageService(context(), only("claude"));
+    expect((await service.report()).providers[0]).toMatchObject({ problem: null, windows: [{ used_percent: 42 }] });
+    now += 6 * 60_000;
+    replies.set(CLAUDE_USAGE, { status: 403, body: { error: { message: "Request not allowed" } } });
+    expect((await service.report()).providers[0]).toMatchObject({ problem: "expired", checked_at: new Date(NOW).toISOString(), windows: [{ used_percent: 42 }] });
+    expect(requests).toHaveLength(2);
+  });
+
   it("reads Claude's other per-model weekly limits from `limits`, after the flat fields", async () => {
     keychain.set("Claude Code-credentials|me", { status: "found", value: JSON.stringify({ claudeAiOauth: { accessToken: "k", expiresAt: NOW + HOUR, subscriptionType: "max" } }) });
-    replies.set("https://api.anthropic.com/api/oauth/usage", { body: {
+    replies.set(CLAUDE_USAGE, { body: {
       five_hour: { utilization: 42, resets_at: "2026-09-29T14:00:00.000Z" },
       seven_day_sonnet: { utilization: 5, resets_at: null },
       limits: [
@@ -152,7 +452,7 @@ describe("providers", () => {
   it("reads the Claude credentials file when Claude Code refreshed it but not the keychain item", async () => {
     keychain.set("Claude Code-credentials|me", { status: "found", value: JSON.stringify({ claudeAiOauth: { accessToken: "stale", expiresAt: NOW - HOUR } }) });
     write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "file", expiresAt: NOW + 8 * HOUR } });
-    replies.set("https://api.anthropic.com/api/oauth/usage", { body: { five_hour: { utilization: 1, resets_at: null } } });
+    replies.set(CLAUDE_USAGE, { body: { five_hour: { utilization: 1, resets_at: null } } });
     const [usage] = (await new UsageService(context("darwin"), only("claude")).report()).providers;
     expect((requests[0]!.init.headers as Record<string, string>)["authorization"]).toBe("Bearer file");
     expect(usage!.problem).toBeNull();
@@ -161,13 +461,13 @@ describe("providers", () => {
   it("keeps the Claude keychain item when the credentials file is older", async () => {
     keychain.set("Claude Code-credentials|me", { status: "found", value: JSON.stringify({ claudeAiOauth: { accessToken: "k", expiresAt: NOW + 8 * HOUR } }) });
     write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "old", expiresAt: NOW - HOUR } });
-    replies.set("https://api.anthropic.com/api/oauth/usage", { body: { five_hour: { utilization: 1, resets_at: null } } });
+    replies.set(CLAUDE_USAGE, { body: { five_hour: { utilization: 1, resets_at: null } } });
     await new UsageService(context("darwin"), only("claude")).report();
     expect((requests[0]!.init.headers as Record<string, string>)["authorization"]).toBe("Bearer k");
   });
 
   it("reads the later of two unexpired Claude sign-ins, and keeps a keychain item that names no expiry", async () => {
-    replies.set("https://api.anthropic.com/api/oauth/usage", { body: { five_hour: { utilization: 1, resets_at: null } } });
+    replies.set(CLAUDE_USAGE, { body: { five_hour: { utilization: 1, resets_at: null } } });
     keychain.set("Claude Code-credentials|me", { status: "found", value: JSON.stringify({ claudeAiOauth: { accessToken: "k", expiresAt: NOW + HOUR } }) });
     write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "file", expiresAt: NOW + 8 * HOUR } });
     await new UsageService(context("darwin"), only("claude")).report();
@@ -201,7 +501,7 @@ describe("providers", () => {
     keychain.set(`Claude Code-credentials-${createHash("sha256").update(dir).digest("hex").slice(0, 8)}|me`, { status: "found", value: credentials("work") });
     write(join(home, ".claude.json"), { oauthAccount: { accountUuid: "uuid-1", emailAddress: "me@example.com" } });
     write(join(dir, ".claude.json"), { oauthAccount: { accountUuid: "uuid-2", emailAddress: "work@example.com" } });
-    replies.set("https://api.anthropic.com/api/oauth/usage", { body: { five_hour: { utilization: 1, resets_at: null } } });
+    replies.set(CLAUDE_USAGE, { body: { five_hour: { utilization: 1, resets_at: null } } });
     const report = await new UsageService(context("darwin"), only("claude")).report();
     expect(report.providers.map((usage) => [usage.key, usage.account])).toEqual([["claude:uuid-1", "me@example.com"], ["claude:uuid-2", "work@example.com"]]);
     expect(requests.map((request) => (request.init.headers as Record<string, string>)["authorization"])).toEqual(["Bearer personal", "Bearer work"]);
@@ -209,7 +509,7 @@ describe("providers", () => {
 
   it("reads the Claude credentials file where there is no keychain", async () => {
     write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "file", expiresAt: NOW + HOUR } });
-    replies.set("https://api.anthropic.com/api/oauth/usage", { body: { five_hour: { utilization: 1, resets_at: null } } });
+    replies.set(CLAUDE_USAGE, { body: { five_hour: { utilization: 1, resets_at: null } } });
     await new UsageService(context("linux"), only("claude")).report();
     expect((requests[0]!.init.headers as Record<string, string>)["authorization"]).toBe("Bearer file");
   });
@@ -521,8 +821,52 @@ describe("providers", () => {
   it.each(["missing", "failing"] as const)("does not show Antigravity when Linux secret-tool is %s", async (result) => {
     if (result === "failing") commands.set("secret-tool lookup service gemini username antigravity", "");
     const report = await new UsageService(context("linux"), only("antigravity")).report();
-    expect(report.providers).toEqual([]);
+    expect(report).toEqual({ providers: [] });
     expect(commandCalls).toEqual([["secret-tool", "lookup", "service", "gemini", "username", "antigravity"]]);
+  });
+
+  it("names secret-tool when Linux lacks it and no Antigravity sign-in was found, and looks again on the next report", async () => {
+    absent.add("secret-tool");
+    const service = new UsageService(context("linux"), only("antigravity"));
+    expect(await service.report()).toEqual({ providers: [], missing_commands: [{ provider: "antigravity", command: "secret-tool" }] });
+    // installed since: the next plain report finds the keyring item, without waiting for FRESH_MS
+    absent.delete("secret-tool");
+    commands.set("secret-tool lookup service gemini username antigravity", JSON.stringify({
+      token: { access_token: "ya29-keyring", expiry: new Date(NOW + HOUR).toISOString() },
+      id_token: jwt({ email: "keyring@example.com", sub: "keyring-sub" }),
+    }));
+    replies.set("https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary", { body: { response: { groups: [] } } });
+    now += 1000;
+    const report = await service.report();
+    expect(report.missing_commands).toBeUndefined();
+    expect(report.providers).toMatchObject([{ id: "antigravity", key: "antigravity:keyring-sub" }]);
+  });
+
+  it("looks in the keyring again once secret-tool, removed after a search was kept, is back", async () => {
+    const service = new UsageService(context("linux"), only("antigravity"));
+    expect(await service.report()).toEqual({ providers: [] });
+    absent.add("secret-tool");
+    now += 1000;
+    expect((await service.report()).missing_commands).toEqual([{ provider: "antigravity", command: "secret-tool" }]);
+    absent.delete("secret-tool");
+    commands.set("secret-tool lookup service gemini username antigravity", JSON.stringify({ token: { access_token: "ya29-keyring", expiry: new Date(NOW + HOUR).toISOString() } }));
+    replies.set("https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary", { body: { response: { groups: [] } } });
+    now += 1000;
+    expect((await service.report()).providers).toHaveLength(1);
+  });
+
+  it("names no missing secret-tool once Antigravity's token file gives its account", async () => {
+    absent.add("secret-tool");
+    write(join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token"), { token: { access_token: "ya29-file", expiry: new Date(NOW + HOUR).toISOString() } });
+    replies.set("https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary", { body: { response: { groups: [] } } });
+    const report = await new UsageService(context("linux"), only("antigravity")).report();
+    expect(report.missing_commands).toBeUndefined();
+    expect(report.providers).toHaveLength(1);
+  });
+
+  it("never names secret-tool off Linux", async () => {
+    absent.add("secret-tool");
+    expect(await new UsageService(context("darwin"), only("antigravity")).report()).toEqual({ providers: [] });
   });
 
   it.each([
@@ -744,7 +1088,6 @@ describe("the service", () => {
   it("runs a refresh that arrives during a plain pass after it, so a cached provider is asked again", async () => {
     signInCodex(NOW / 1000 + 24 * 3600);
     write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "c", expiresAt: NOW + 24 * HOUR } });
-    const CLAUDE_USAGE = "https://api.anthropic.com/api/oauth/usage";
     replies.set(CODEX_USAGE, codexReply());
     replies.set(CLAUDE_USAGE, { status: 500 });
     const service = new UsageService(context(), [...only("claude"), ...only("codex")]);
@@ -799,6 +1142,213 @@ describe("the service", () => {
     signInCodex(NOW / 1000 + 24 * 3600, ".codex-other", "user-2", "other@example.com");
     now += FRESH_MS;
     expect((await service.report()).providers.map((usage) => usage.account)).toEqual(["other@example.com"]);
+  });
+
+  it("stops looking up a provider's sign-ins once every account it lists is hidden or removed, until one is shown again", async () => {
+    let searches = 0;
+    const copilot: UsageProvider = {
+      id: "copilot",
+      async signIns() {
+        searches += 1;
+        return ["a", "b", "none"].map((id) => ({ source: id, token: `token-${id}`, expiresAt: null, account: { id, label: id } }));
+      },
+      // "none" has no plan, so it is never listed and cannot be hidden
+      async read(_ctx, signIn) { return signIn.token === "token-none" ? null : { plan: "pro", windows: [] }; },
+    };
+    let skipped = new Set(["copilot:a"]);
+    const service = new UsageService(context(), [copilot]);
+    service.skipAccounts(() => skipped);
+    await service.report();
+    now += FRESH_MS;
+    await service.report();
+    expect(searches).toBe(2);
+
+    skipped = new Set(["copilot:a", "copilot:b"]);
+    now += FRESH_MS;
+    const report = await service.report(true);
+    expect(searches).toBe(2);
+    expect(report.providers.map((usage) => usage.key)).toEqual(["copilot:a", "copilot:b"]);
+
+    skipped = new Set(["copilot:a"]);
+    await service.report(true);
+    expect(searches).toBe(3);
+  });
+
+  it("still finds a provider's accounts the first time, whatever the hidden list names", async () => {
+    let searches = 0;
+    const copilot: UsageProvider = {
+      id: "copilot",
+      async signIns() { searches += 1; return [{ source: "new", token: "token-new", expiresAt: null, account: { id: "new", label: "new" } }]; },
+      async read() { return { plan: "pro", windows: [] }; },
+    };
+    const service = new UsageService(context(), [copilot]);
+    service.skipAccounts(() => new Set(["copilot:old"]));
+    expect((await service.report()).providers.map((usage) => usage.key)).toEqual(["copilot:new"]);
+    expect(searches).toBe(1);
+  });
+
+  it("keeps a fully hidden Copilot unread when another provider's sign-in ends", async () => {
+    commands.set("gh auth status --hostname github.com --json hosts", JSON.stringify({ hosts: { "github.com": [{ state: "success", login: "alice" }] } }));
+    commands.set("gh auth token --hostname github.com --user alice", "gho_alice");
+    replies.set("https://api.github.com/copilot_internal/user", { body: { login: "alice", copilot_plan: "individual", quota_snapshots: { chat: { entitlement: 50, percent_remaining: 50 } } } });
+    let claudeSearches = 0;
+    const claude: UsageProvider = { id: "claude", async signIns() { claudeSearches += 1; return []; }, async read() { return null; } };
+    const service = new UsageService(context(), [...only("copilot"), claude]);
+    service.skipAccounts(() => new Set(["copilot:alice"]));
+    const tokenReads = () => commandCalls.filter((argv) => argv.slice(0, 3).join(" ") === "gh auth token").length;
+    await service.report();
+    expect(tokenReads()).toBe(1);
+    service.invalidate("claude");
+    await service.report();
+    expect([tokenReads(), claudeSearches]).toEqual([1, 2]);
+  });
+
+  it("asks the usage endpoint nothing for a provider's hidden accounts when its own sign-in ends", async () => {
+    const reads: string[] = [];
+    const copilot: UsageProvider = {
+      id: "copilot",
+      async signIns() { return ["a", "b"].map((id) => ({ source: id, token: `token-${id}`, expiresAt: null, account: { id, label: id } })); },
+      async read(_ctx, signIn) { reads.push(signIn.token); return { plan: "pro", windows: [] }; },
+    };
+    const service = new UsageService(context(), [copilot]);
+    service.skipAccounts(() => new Set(["copilot:a"]));
+    await service.report();
+    service.invalidate("copilot");
+    const report = await service.report();
+    expect(reads).toEqual(["token-a", "token-b", "token-b"]);
+    expect(report.providers.map((usage) => usage.key)).toEqual(["copilot:a", "copilot:b"]);
+  });
+
+  it("asks the usage endpoint nothing for an account hidden since the last report when its provider's sign-in ends", async () => {
+    const reads: string[] = [];
+    const copilot: UsageProvider = {
+      id: "copilot",
+      async signIns() { return ["a", "b"].map((id) => ({ source: id, token: `token-${id}`, expiresAt: null, account: { id, label: id } })); },
+      async read(_ctx, signIn) { reads.push(signIn.token); return { plan: "pro", windows: [] }; },
+    };
+    let skipped = new Set<string>();
+    const service = new UsageService(context(), [copilot]);
+    service.skipAccounts(() => skipped);
+    await service.report();
+    skipped = new Set(["copilot:a"]);
+    service.invalidate("copilot");
+    await service.report();
+    expect(reads).toEqual(["token-a", "token-b", "token-b"]);
+  });
+
+  it.each([
+    ["fails", () => { throw new Error("gh did not answer"); }],
+    ["leaves the hidden account out", () => ["b"]],
+  ])("asks the usage endpoint nothing for a hidden account after its provider's search %s once", async (_name, failed) => {
+    const reads: string[] = [];
+    let failing = false;
+    const copilot: UsageProvider = {
+      id: "copilot",
+      async signIns() { return (failing ? failed() : ["a", "b"]).map((id) => ({ source: id, token: `token-${id}`, expiresAt: null, account: { id, label: id } })); },
+      async read(_ctx, signIn) { reads.push(signIn.token); return { plan: "pro", windows: [] }; },
+    };
+    const service = new UsageService(context(), [copilot]);
+    service.skipAccounts(() => new Set(["copilot:a"]));
+    await service.report();
+    service.invalidate("copilot");
+    failing = true;
+    await service.report();
+    failing = false;
+    now += FRESH_MS;
+    const report = await service.report();
+    expect(reads.filter((token) => token === "token-a")).toEqual(["token-a"]);
+    expect(report.providers.map((usage) => usage.key)).toEqual(["copilot:a", "copilot:b"]);
+  });
+
+  it("asks the usage endpoint nothing for a hidden account found at a new place, keeping one reading of it", async () => {
+    let place = 0;
+    const reads: string[] = [];
+    const copilot: UsageProvider = {
+      id: "copilot",
+      async signIns() { return [{ source: `place-${place}`, token: `token-${place}`, expiresAt: null, account: { id: "a", label: "a" } }]; },
+      async read(_ctx, signIn) { reads.push(signIn.token); return { plan: "pro", windows: [] }; },
+    };
+    const service = new UsageService(context(), [copilot]);
+    service.skipAccounts(() => new Set(["copilot:a"]));
+    await service.report();
+    for (place = 1; place <= 3; place++) {
+      service.invalidate("copilot");
+      await service.report();
+    }
+    expect(reads).toEqual(["token-0"]);
+    expect([...service["entries"].keys()]).toEqual(["copilot|place-3"]);
+  });
+
+  it("looks a provider up again and reads it anew as soon as one of its accounts is shown again", async () => {
+    let searches = 0;
+    const copilot: UsageProvider = {
+      id: "copilot",
+      async signIns() { searches += 1; return [{ source: "a", token: "token-a", expiresAt: null, account: { id: "a", label: "a" } }]; },
+      async read() { return { plan: "pro", windows: [] }; },
+    };
+    let skipped = new Set(["copilot:a"]);
+    const service = new UsageService(context(), [copilot]);
+    service.skipAccounts(() => skipped);
+    await service.report();
+    skipped = new Set();
+    now += MIN_REFRESH_MS;
+    const [shown] = (await service.report()).providers;
+    expect(searches).toBe(2);
+    expect(shown!.checked_at).toBe(new Date(now).toISOString());
+  });
+
+  it("reads only the account shown again, not its provider's accounts still hidden", async () => {
+    const reads: string[] = [];
+    const copilot: UsageProvider = {
+      id: "copilot",
+      async signIns() { return ["a", "b"].map((id) => ({ source: id, token: `token-${id}`, expiresAt: null, account: { id, label: id } })); },
+      async read(_ctx, signIn) { reads.push(signIn.token); return { plan: "pro", windows: [] }; },
+    };
+    let skipped = new Set(["copilot:a", "copilot:b"]);
+    const service = new UsageService(context(), [copilot]);
+    service.skipAccounts(() => skipped);
+    await service.report();
+    skipped = new Set(["copilot:b"]);
+    now += FRESH_MS;
+    await service.report();
+    expect(reads).toEqual(["token-a", "token-b", "token-a"]);
+  });
+
+  it("searches a provider with one hidden and one visible account once per FRESH_MS", async () => {
+    let searches = 0;
+    const copilot: UsageProvider = {
+      id: "copilot",
+      async signIns() { searches++; return ["a", "b"].map((id) => ({ source: id, token: `token-${id}`, expiresAt: null, account: { id, label: id } })); },
+      async read() { return { plan: "pro", windows: [] }; },
+    };
+    let skipped = new Set<string>();
+    const service = new UsageService(context(), [copilot]);
+    service.skipAccounts(() => skipped);
+    await service.report();
+    skipped = new Set(["copilot:a"]);
+    now += FRESH_MS;
+    await service.report();
+    now += 1000;
+    await service.report();
+    now += 1000;
+    await service.report();
+    expect(searches).toBe(2);
+  });
+
+  it("reads a hidden account's place anew once it holds another account's sign-in", async () => {
+    const holders = new Map([["x", "alice"], ["y", "carol"]]);
+    const copilot: UsageProvider = {
+      id: "copilot",
+      async signIns() { return [...holders].map(([source, id]) => ({ source, token: `token-${id}`, expiresAt: null, account: { id, label: `${id}@example.test` } })); },
+      async read() { return { plan: "pro", windows: [] }; },
+    };
+    const service = new UsageService(context(), [copilot]);
+    service.skipAccounts(() => new Set(["copilot:alice"]));
+    await service.report();
+    holders.set("x", "bob");
+    now += FRESH_MS;
+    const report = await service.report();
+    expect(report.providers.map((usage) => usage.account)).toEqual(["bob@example.test", "carol@example.test"]);
   });
 
   it("marks a failed request and asks again after RETRY_MS", async () => {

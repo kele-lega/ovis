@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
-import { clearFileCache, filesNamed, GIT_LIST_DEADLINE_MS, GIT_LIST_MAX_BYTES, paneFiles, setGitListOptions } from "./files.ts";
+import { clearFileCache, filesNamed, GIT_LIST_DEADLINE_MS, GIT_LIST_MAX_BYTES, MAX_MARKDOWN_DOCUMENTS, paneDocuments, paneFiles, readMarkdownDocuments, setGitListOptions } from "./files.ts";
 
 const roots: string[] = [];
 /** what a test may set for the code under test to read; each is put back as it was */
@@ -205,6 +206,84 @@ function heldGit() {
 
 const INERT_ARGV = ["--no-pager", "--no-optional-locks", "--literal-pathspecs", "-c", "core.fsmonitor="];
 
+describe("paneDocuments", () => {
+  const at = (root: string, path: string, iso: string): void => utimesSync(join(root, path), new Date(iso), new Date(iso));
+
+  it("lists the folder's Markdown files newest first, with their sizes and times, and no skipped folder's", async () => {
+    const root = fixture();
+    mkdirSync(join(root, "docs"));
+    writeFileSync(join(root, "docs", "plan.markdown"), "# Plan\n");
+    writeFileSync(join(root, "NOTES.MD"), "n");
+    writeFileSync(join(root, "node_modules", "hidden", "skipped.md"), "x");
+    at(root, "README.md", "2026-11-01T00:00:00.000Z");
+    at(root, "docs/plan.markdown", "2026-11-03T00:00:00.000Z");
+    at(root, "NOTES.MD", "2026-11-02T00:00:00.000Z");
+    expect(await paneDocuments(root)).toEqual({
+      root,
+      documents: [
+        { path: "docs/plan.markdown", size: 7, modified: "2026-11-03T00:00:00.000Z" },
+        { path: "NOTES.MD", size: 1, modified: "2026-11-02T00:00:00.000Z" },
+        { path: "README.md", size: 7, modified: "2026-11-01T00:00:00.000Z" },
+      ],
+      truncated: false,
+    });
+  });
+
+  it("leaves out what git ignores in a repository", async () => {
+    const root = fixture();
+    expect(Bun.spawnSync(["git", "init", "-q", root]).exitCode).toBe(0);
+    mkdirSync(join(root, "out"));
+    writeFileSync(join(root, "out", "report.md"), "built");
+    writeFileSync(join(root, ".gitignore"), "out/\n");
+    expect((await paneDocuments(root)).documents.map((document) => document.path)).toEqual(["README.md"]);
+  });
+
+  it("answers at most its cap of files, the newest, and says the list was cut", async () => {
+    const root = fixture();
+    rmSync(join(root, "README.md"));
+    for (let index = 0; index <= MAX_MARKDOWN_DOCUMENTS; index += 1) {
+      writeFileSync(join(root, `n${index}.md`), "");
+      at(root, `n${index}.md`, new Date(Date.UTC(2026, 0, 1) + index * 1000).toISOString());
+    }
+    const listed = await paneDocuments(root);
+    expect(listed.truncated).toBe(true);
+    expect(listed.documents).toHaveLength(MAX_MARKDOWN_DOCUMENTS);
+    expect(listed.documents[0]!.path).toBe(`n${MAX_MARKDOWN_DOCUMENTS}.md`);
+    expect(listed.documents.some((document) => document.path === "n0.md")).toBe(false);
+  });
+
+  it("finds the newest file of a repository holding thousands, wherever its name sorts", async () => {
+    const root = fixture();
+    expect(Bun.spawnSync(["git", "init", "-q", root]).exitCode).toBe(0);
+    mkdirSync(join(root, "notes"));
+    for (let index = 0; index < 2_000; index += 1) {
+      writeFileSync(join(root, "notes", `a${String(index).padStart(5, "0")}.md`), "");
+      at(root, `notes/a${String(index).padStart(5, "0")}.md`, "2026-01-01T00:00:00.000Z");
+    }
+    writeFileSync(join(root, "zz-newest.md"), "new");
+    at(root, "README.md", "2026-01-01T00:00:00.000Z");
+    at(root, "zz-newest.md", "2026-11-05T00:00:00.000Z");
+    const listed = await paneDocuments(root);
+    expect(listed.documents[0]!.path).toBe("zz-newest.md");
+    expect(listed.truncated).toBe(true);
+  });
+
+  it("outside a repository, finds a note in a folder crowded with other files", async () => {
+    const root = fixture();
+    rmSync(join(root, "README.md"));
+    for (let index = 0; index < 1_000; index += 1) writeFileSync(join(root, `a${String(index).padStart(4, "0")}.txt`), "");
+    writeFileSync(join(root, "z-note.md"), "note");
+    expect(await paneDocuments(root)).toMatchObject({ documents: [{ path: "z-note.md" }], truncated: false });
+  });
+
+  it("stops reading at its time limit and says the list is cut", () => {
+    const root = fixture();
+    expect(readMarkdownDocuments(root, null, 0)).toEqual({ documents: [], cut: true });
+    expect(readMarkdownDocuments(root, ["README.md"], 0)).toEqual({ documents: [], cut: true });
+    expect(readMarkdownDocuments(root, ["README.md"])).toMatchObject({ documents: [{ path: "README.md" }], cut: false });
+  });
+});
+
 describe("git inventories", () => {
   it("isolates both Git inventories from inherited repository variables", async () => {
     const root = fixture();
@@ -218,7 +297,7 @@ describe("git inventories", () => {
     // a server started with these set (from a hook, say) inherits them; Bun.spawn ignores later edits to process.env
     const script = `import { filesNamed, paneFiles } from ${JSON.stringify(join(import.meta.dir, "files.ts"))};
       const root = process.env.FILES_ROOT;
-      console.log(JSON.stringify({ listed: await paneFiles(root, "", 100), foreign: filesNamed(root, "foreign-only.txt"), api: filesNamed(root, "api.ts") }));`;
+      console.log(JSON.stringify({ listed: await paneFiles(root, "", 100), foreign: await filesNamed(root, "foreign-only.txt"), api: await filesNamed(root, "api.ts") }));`;
     const child = Bun.spawn([process.execPath, "-e", script], {
       stdin: "ignore",
       stdout: "pipe",
@@ -256,10 +335,10 @@ describe("git inventories", () => {
     expect(listed).toContain("src/api.ts");
     expect(listed).toContain(buried);
     expect(listed).not.toContain("README.md");
-    expect(filesNamed(root, "buried.txt")).toEqual([buried]);
+    expect(await filesNamed(root, "buried.txt")).toEqual([buried]);
   });
 
-  it("hands both subprocess APIs the inert argv, environment, cap and deadline", async () => {
+  it("hands both inventories the inert argv and environment, never through a synchronous spawn", async () => {
     const root = fixture();
     gitRepository(root);
     process.env["GIT_DIR"] = join(root, "elsewhere");
@@ -267,16 +346,18 @@ describe("git inventories", () => {
     const spawnSync = spyOn(Bun, "spawnSync");
     try {
       await paneFiles(root, "", 100);
-      filesNamed(root, "api.ts");
+      await filesNamed(root, "api.ts");
       const argv = ["git", ...INERT_ARGV, "-C", root, "ls-files", "-z", "-co", "--exclude-standard"];
-      const calls = [spawn.mock.calls[0], spawnSync.mock.calls[0]] as unknown as [string[], { stdin?: string; env?: Record<string, string> }][];
+      const calls = spawn.mock.calls as unknown as [string[], { stdin?: string; env?: Record<string, string> }][];
+      expect(calls).toHaveLength(2);
       for (const [command, options] of calls) {
         expect(command).toEqual(argv);
         expect(options.stdin).toBe("ignore");
         expect(options.env?.["GIT_DIR"]).toBeUndefined();
         expect(options.env).toMatchObject({ GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C" });
       }
-      expect(spawnSync.mock.calls[0]![1]).toMatchObject({ timeout: GIT_LIST_DEADLINE_MS, maxBuffer: GIT_LIST_MAX_BYTES });
+      // a synchronous listing holds the whole server's event loop for up to its deadline (#1404)
+      expect(spawnSync).not.toHaveBeenCalled();
       expect(GIT_LIST_MAX_BYTES).toBe(16 * 1024 * 1024);
       expect(GIT_LIST_DEADLINE_MS).toBe(3_000);
     } finally {
@@ -302,7 +383,7 @@ describe("git inventories", () => {
     const files = await paneFiles(root, "", 100);
     expect(files).toContain("src/components/PromptCard.tsx");
     expect(files).not.toContain("README.md");
-    expect(filesNamed(root, "PromptCard.tsx")).toEqual(["src/components/PromptCard.tsx"]);
+    expect(await filesNamed(root, "PromptCard.tsx")).toEqual(["src/components/PromptCard.tsx"]);
     expect(existsSync(join(hook.folder, "ran"))).toBe(false);
     expect(existsSync(join(onPath, "ran"))).toBe(false);
     expect(readFileSync(join(root, ".git", "config"), "utf8")).toBe(config);
@@ -322,14 +403,14 @@ describe("git inventories", () => {
       expect(readFileSync(listing).byteLength).toBe(bytes);
       clearFileCache();
       const listed = await paneFiles(root, "", 100);
-      const named = filesNamed(root, second);
+      const named = await filesNamed(root, second);
       if (bytes <= cap) {
         expect(listed).toEqual([second, "ghost-first"].sort());
         expect(named).toEqual([second]);
       } else {
         expect(listed).toEqual(["README.md", "src/api.ts", "src/components/PromptCard.tsx"]);
         expect(named).toEqual([]);
-        expect(filesNamed(root, "ghost-first")).toEqual([]);
+        expect(await filesNamed(root, "ghost-first")).toEqual([]);
       }
     }
   });
@@ -345,9 +426,9 @@ describe("git inventories", () => {
       writeFileSync(listing, output);
       clearFileCache();
       expect(await paneFiles(root, "", 100)).toEqual(["README.md", "src/api.ts", "src/components/PromptCard.tsx"]);
-      expect(filesNamed(root, "ghost-partial")).toEqual([]);
-      expect(filesNamed(root, "ghost-whole")).toEqual([]);
-      expect(filesNamed(root, "api.ts")).toEqual(["src/api.ts"]);
+      expect(await filesNamed(root, "ghost-partial")).toEqual([]);
+      expect(await filesNamed(root, "ghost-whole")).toEqual([]);
+      expect(await filesNamed(root, "api.ts")).toEqual(["src/api.ts"]);
     }
   });
 
@@ -379,18 +460,61 @@ describe("git inventories", () => {
       await asyncHolder.end();
     }
 
-    const syncHolder = heldGit();
-    setGitListOptions({ git: syncHolder.git, deadlineMs });
+    const namedHolder = heldGit();
+    setGitListOptions({ git: namedHolder.git, deadlineMs });
     clearFileCache();
     try {
       const started = performance.now();
-      expect(filesNamed(root, "ghost-held")).toEqual([]);
+      expect(await within(filesNamed(root, "ghost-held"), deadlineMs + 1_000, "the name lookup")).toEqual([]);
       expect(performance.now() - started).toBeLessThan(deadlineMs + 1_000);
       // the holder reported in while the lookup ran, and still holds stdout after it answered
-      await within(syncHolder.ready, 1_000, "the holder's readiness");
-      expect(syncHolder.holding()).toBe(true);
+      await within(namedHolder.ready, 1_000, "the holder's readiness");
+      expect(namedHolder.holding()).toBe(true);
     } finally {
-      await syncHolder.end();
+      await namedHolder.end();
     }
+  });
+
+  it("runs other work while a name lookup waits for a slow git", async () => {
+    const root = fixture();
+    // a git that answers only once the test lets it go, through a FIFO no one else writes
+    const { git, folder } = fakeGit((dir) => `read _ < "${dir}/go"\nprintf 'slow-name\\0'`);
+    expect(Bun.spawnSync(["mkfifo", join(folder, "go")]).exitCode).toBe(0);
+    setGitListOptions({ git });
+    const spawn = spyOn(Bun, "spawn");
+    try {
+      let answered = false;
+      const named = filesNamed(root, "slow-name").finally(() => { answered = true; });
+      // a second lookup of the folder meanwhile waits for the same listing, not a git of its own
+      const again = filesNamed(root, "api.ts");
+      // a timer comes due while git still waits: the lookup holds no one else's turn (#1404)
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(answered).toBe(false);
+      await within(writeFile(join(folder, "go"), "\n"), 5_000, "git's release");
+      expect(await within(named, 5_000, "the name lookup")).toEqual(["slow-name"]);
+      expect(await within(again, 5_000, "the second lookup")).toEqual(["src/api.ts"]);
+      expect(spawn).toHaveBeenCalledTimes(1);
+    } finally {
+      spawn.mockRestore();
+    }
+  });
+
+  it("keeps a listing begun before clearFileCache out of the cache it cleared", async () => {
+    const root = fixture();
+    // the old git answers only once released; the new one answers at once
+    const slow = fakeGit((dir) => `read _ < "${dir}/go"\nprintf 'old-name\\0'`);
+    expect(Bun.spawnSync(["mkfifo", join(slow.folder, "go")]).exitCode).toBe(0);
+    const fast = fakeGit(() => `printf 'new-name\\0'`);
+    setGitListOptions({ git: slow.git });
+    // filesNamed starts its git before its first await, so the old listing is under way here
+    const old = filesNamed(root, "old-name");
+    clearFileCache();
+    setGitListOptions({ git: fast.git });
+    expect(await within(filesNamed(root, "new-name"), 5_000, "the new lookup")).toEqual(["new-name"]);
+    await within(writeFile(join(slow.folder, "go"), "\n"), 5_000, "the old git's release");
+    // the old lookup still answers its caller, but leaves the newer listing in the cache
+    expect(await within(old, 5_000, "the old lookup")).toEqual(["old-name"]);
+    expect(await filesNamed(root, "old-name")).toEqual([]);
+    expect(await filesNamed(root, "new-name")).toEqual(["new-name"]);
   });
 });

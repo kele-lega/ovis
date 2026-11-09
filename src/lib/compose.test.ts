@@ -1,14 +1,16 @@
 import { describe, expect, it } from "bun:test";
 
 import { skillSyntax } from "../../shared/skill-syntax.ts";
-import { agentDisplayLabel, composerDelivery, composerMessage, composerSendShown, composerPayload, composerModelDraw, composerStatusCompact, composerStatusHint, composerStatusWord, COMPOSER_STATUS_COMPACT_BELOW, contextLeftPercent, formatTokens, imageMention, insertLeadingMention, insertNote, MAX_COMPOSER_CHARS, QUEUE_READY_STATUS, rankSlashCommands, submitNote, submitNotTyped, submitRefusal, sameMessage, pendingActionUncertain } from "./compose.ts";
+import { agentDisplayLabel, claudeMainAtRest, composerDelivery, composerMessage, composerSendShown, composerPayload, composerModelDraw, composerStatusCompact, composerStatusHint, composerStatusWord, COMPOSER_STATUS_COMPACT_BELOW, contextLeftPercent, formatTokens, imageMention, insertLeadingMention, insertNote, MAX_COMPOSER_CHARS, QUEUE_READY_STATUS, rankSlashCommands, submitNote, submitNotTyped, submitRefusal, sameMessage, pendingActionUncertain, draftSendNote, endsWithTurn, stoppedTurn } from "./compose.ts";
 import { briefDescription, COMMAND_GROUPS, commandGroup, commandsForTrigger, slashCommandReplacement, terminalCommand, typedTerminalCommand } from "./compose.ts";
-import type { SlashCommand } from "../../shared/protocol.ts";
+import type { ConversationTurn, SlashCommand } from "../../shared/protocol.ts";
 import { activeTrigger, applyCompletion, type ActiveTrigger } from "./mentions.ts";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { paneCommands } from "../../server/commands.ts";
+import { NO_AGENT_MESSAGE, PASTED_NOT_SENT_MESSAGE } from "../../shared/submit-outcome.ts";
+import { setCurrentLanguage, translate } from "./i18n.ts";
 
 describe("menu rows", () => {
   it("keeps a description's first sentence, without its full stop", () => {
@@ -99,6 +101,14 @@ describe("omo command completion", () => {
     expect(applyCompletion("/skill:pd", activeTrigger("/skill:pd", 9, options("pi"))!, slashCommandReplacement(skill, "pi", slash))).toEqual({ text: "/skill:mass-ulw ", caret: 16 });
   });
 
+  it("keeps Command Code mode completion open after a colon", () => {
+    const syntax = skillSyntax("cmd");
+    const options = { skills: syntax.skillTriggers.includes("$"), namespaced: syntax.namespaced };
+    for (const text of ["/mode:", "/mode:pl"]) {
+      expect(activeTrigger(text, text.length, options)).toEqual({ kind: "slash", query: text.slice(1), start: 0, end: text.length });
+    }
+  });
+
   it("offers omp inline /skill: but not /model or dollar triggers", () => {
     const syntax = skillSyntax("omp");
     const options = { skills: syntax.skillTriggers.includes("$"), namespaced: syntax.namespaced };
@@ -131,6 +141,12 @@ describe("composerMessage and submitNote", () => {
     expect(submitNote("submit_timeout", "x")).toMatch(/^Not sent: .*nothing was typed/);
     expect(submitNote("disconnected", "x")).toMatch(/^Not confirmed: .*Check the terminal/);
     expect(submitNote("pane_not_found", "pane w1:p9 not found")).toBe("Not sent: pane w1:p9 not found");
+    // #511: the no-agent sentence is for the bridge's no-agent refusal alone; an unknown input state keeps its own words
+    expect(submitNote("agent_not_ready", NO_AGENT_MESSAGE)).toBe("Not sent: no agent is running in this pane. Your message stayed here.");
+    expect(submitNote("agent_not_ready", "The agent's current input state is not known")).toBe("Not sent: The agent's current input state is not known");
+    // a paste left in the input line says so, and is never taken for a refusal that typed nothing
+    expect(submitNote("pasted_not_sent", PASTED_NOT_SENT_MESSAGE)).toBe("Not sent: the message is in the terminal's input line. Clear it there, or press Enter there to send it.");
+    expect(submitNotTyped("pasted_not_sent")).toBe(false);
   });
 
   it("knows a refusal that typed nothing from a message that may have reached the pane", () => {
@@ -159,6 +175,13 @@ describe("composerMessage and submitNote", () => {
     expect(pendingActionUncertain("disconnected", "held")).toBe(true);
     expect(submitNote("held_input", "x")).toBe("Not sent: send or discard the held input first.");
     expect(submitNote("pending_input_unsupported", "x")).toBe("Update this PC to send messages in the next turn. Your draft stayed here.");
+    // a first message held because its launched agent ended typed nothing, and says so apart from a changed terminal or session, in the client's words (#1547)
+    expect(submitNotTyped("first_message_launch_ended")).toBe(true);
+    const ended = "The agent started for this message has ended; review the message before sending it";
+    const changed = "The pane's terminal or agent session changed; review the message before sending it again";
+    expect(submitNote("first_message_launch_ended", ended)).not.toContain(ended);
+    expect(submitNote("pending_target_changed", changed)).not.toContain(changed);
+    expect(submitNote("first_message_launch_ended", "x")).not.toBe(submitNote("pending_target_changed", "x"));
     expect(submitNotTyped("submit_changed")).toBe(false);
     expect(submitNotTyped("pending_uncertain")).toBe(false);
     expect(submitNotTyped("submit_partial")).toBe(false);
@@ -169,6 +192,18 @@ describe("composerMessage and submitNote", () => {
     // bash mode, a clipped box or an older bridge name none: the note alone
     expect(submitRefusal("input_draft", "x")).toBe(submitNote("input_draft", "x"));
     expect(submitRefusal("agent_blocked", "x", "ㅔ")).toBe(submitNote("agent_blocked", "x"));
+  });
+
+  it("names the draft after a Send it that did not go, and offers another draft's buttons", () => {
+    const other = submitRefusal("input_draft", "x", "other draft");
+    expect(draftSendNote(other, "fix the tests")).toBe(other);
+    // cleared and not confirmed, refused, or a box shown with no draft named: the reason, then the draft
+    for (const result of [submitNote("submit_partial", "x"), submitNote("agent_not_ready", "x"), submitRefusal("input_draft", "x", undefined, "! ls")]) {
+      const note = draftSendNote(result, "fix the tests");
+      expect(typeof note).toBe("string");
+      expect(note as string).toStartWith(`${typeof result === "string" ? result : submitNote("input_draft", "x")}\n`);
+      expect(note as string).toContain("fix the tests");
+    }
   });
 
   it("offers to send anyway only when the server showed the box and named no draft", () => {
@@ -186,6 +221,54 @@ describe("sameMessage", () => {
     expect(sameMessage("fix the login bug\nthen run tests", "fix the login\u00a0bug\n  then run tests")).toBe(true);
     expect(sameMessage("fix the login bug", "fix the logout bug")).toBe(false);
     expect(sameMessage("  ", "")).toBe(false);
+  });
+});
+
+describe("a stopped send's turn", () => {
+  const turn = (role: ConversationTurn["role"], text: string, ts: string): ConversationTurn => ({ role, ts, parts: [{ kind: "text", text }] });
+  const words = "Rename the backup job\nand rerun it";
+  const page = [turn("assistant", "earlier answer", "2026-11-01T00:00:01Z"), turn("user", words, "2026-11-01T00:00:02Z")];
+
+  it("is the same turn in a later read whose earlier turns changed, until a newer turn", () => {
+    const stopped = stoppedTurn(page, "Rename the backup job and rerun it");
+    expect(stopped).not.toBeNull();
+    // a new turns array: an earlier turn edited, the stopped turn a new object with the same time and words
+    expect(endsWithTurn([turn("assistant", "earlier answer, edited", "2026-11-01T00:00:01Z"), { ...page[1]! }], stopped)).toBe(true);
+    expect(endsWithTurn([...page, turn("assistant", "answer", "2026-11-01T00:00:03Z")], stopped)).toBe(false);
+    // the same words sent again are a newer turn
+    expect(endsWithTurn([page[0]!, turn("user", words, "2026-11-01T00:00:04Z")], stopped)).toBe(false);
+    expect(stoppedTurn(page, "other words")).toBeNull();
+  });
+
+  it("taken while the copy was in the box, still names it after a read that answers no copy", () => {
+    // the send empties the box: a read before the send's receipt answers no restored copy
+    const taken = stoppedTurn(page, words);
+    expect(stoppedTurn(page, null)).toBeNull();
+    expect(endsWithTurn(page, taken)).toBe(true);
+  });
+});
+
+describe("OpenCode agent-change refusal", () => {
+  it.each(["en", "ko", "ja", "zh"] as const)("localizes the refusal fields in %s", (language) => {
+    const fields = { from: 'Build "custom"', to: "Plan \\ next" };
+    const message = `Tab switched OpenCode's agent from ${JSON.stringify(fields.from)} to ${JSON.stringify(fields.to)}. Nothing more was typed.`;
+    setCurrentLanguage(language);
+    try {
+      expect(submitNote("submit_changed", message)).toBe(translate(language, "Tab switched OpenCode's agent from {from} to {to}. Nothing more was typed. Check the terminal before sending again.", fields));
+    } finally {
+      setCurrentLanguage("en");
+    }
+  });
+
+  it.each(["en", "ko", "ja", "zh"] as const)("localizes the another-skill refusal in %s", (language) => {
+    const message = "OpenCode attached another skill. Your chat text stayed here. Check the terminal before sending again.";
+    setCurrentLanguage(language);
+    try {
+      expect(submitNote("submit_changed", message)).toBe(translate(language, message));
+      expect(submitNote("submit_changed", message)).not.toContain("Not sent");
+    } finally {
+      setCurrentLanguage("en");
+    }
   });
 });
 
@@ -563,5 +646,42 @@ describe("the menu over a catalog the server built", () => {
     expect(typedTerminalCommand(rows, "/review the auth change")).toBeNull();
     expect(typedTerminalCommand(rows, "/apps")).toBeNull();
     expect(typedTerminalCommand(rows, "/compact")).toBeNull();
+  });
+});
+
+describe("claudeMainAtRest", () => {
+  // the real shape of a Claude screen whose main turn ended while two subagents ran: herdr's claude
+  // manifest still says working (a braille title spinner, plus background_agents_working)
+  const restingWithSubagents = [
+    "  Waiting for 2 background agents to finish",
+    "  ◯ impl-mismatch2-sonnet      Resume store-mismatch build        24m 28s · ↓ 132.6k tokens",
+    "  ◯ qa-p00win3-sonnet          P00 Windows checks and latency     9m 8s · ↓ 91.2k tokens",
+    "  ────────────────────────────────────────────────────────────────",
+    "  ❯",
+    "  ────────────────────────────────────────────────────────────────",
+    "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents",
+  ];
+
+  it("accepts a message when the row is at rest, whatever herdr reports", () => {
+    expect(composerDelivery("claude", "working")).toBe("queue");
+    expect(claudeMainAtRest("ready", restingWithSubagents)).toBe(true);
+  });
+
+  it("holds the message while a turn says how to interrupt it", () => {
+    expect(claudeMainAtRest("ready", ["  ✻ Forming… (3m 35s · ↓ 4.8k tokens) · esc to interrupt", ...restingWithSubagents])).toBe(false);
+    expect(claudeMainAtRest("ready", ["  ● Forming… (3m 35s · ↓ 4.8k tokens · thought for 1s)", ...restingWithSubagents])).toBe(false);
+    expect(claudeMainAtRest("ready", ["  enter to confirm · esc to cancel", ...restingWithSubagents])).toBe(false);
+  });
+
+  it("holds the message while the row holds a draft", () => {
+    expect(claudeMainAtRest("draft", restingWithSubagents)).toBe(false);
+    expect(claudeMainAtRest("gone", restingWithSubagents)).toBe(false);
+    expect(claudeMainAtRest("unknown", restingWithSubagents)).toBe(false);
+    expect(claudeMainAtRest(null, restingWithSubagents)).toBe(false);
+  });
+
+  it("does not read a row it cannot see as at rest", () => {
+    expect(claudeMainAtRest("ready", ["  ⏵⏵ auto mode on · ← 2 agents"])).toBe(false);
+    expect(claudeMainAtRest("ready", ["  ────────────────", "  ⏵⏵ auto mode on"])).toBe(false);
   });
 });

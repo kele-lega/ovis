@@ -1,6 +1,6 @@
 /**
  * Agents herdr's agent.start cannot launch (`herdr agent start --kind` lists its
- * kinds; omo and gjc are not among them). The pane's shell runs the command
+ * kinds; omo, gjc and DeepSeek Harness's dsh-tui are not among them). The pane's shell runs the command
  * instead, and the pane's process tree, not the prompt, says when it is up.
  *
  * A Windows pane differs in three ways, each live-verified on a Windows PC (herdr 0.9.3):
@@ -14,15 +14,19 @@ import { accessSync, constants, statSync } from "node:fs";
 import { userInfo } from "node:os";
 import { isAbsolute } from "node:path";
 import { herdrRpc } from "./herdr/client.ts";
+import { isDshProcess } from "./dsh.ts";
 import { isGjcProcess } from "./gjc-runtime.ts";
 import { isOmoProcess, omoProcessIdentity } from "./omo.ts";
 import { psQuote } from "./powershell.ts";
 import { descendantArgv, windowsProcessTable } from "./windows-processes.ts";
+import { userHome } from "./user-home.ts";
 
 /** kind -> the foreground-process test that proves the agent is running in the pane. */
 export const SHELL_AGENTS: Record<string, (argv: readonly string[]) => boolean> = {
   omo: isOmoProcess,
   gjc: isGjcProcess,
+  // dsh-tui's host process (node …/@deepseek-harness-tui/dsh-tui/lib/…/host-entry.js), behind its launcher shims
+  "dsh-tui": isDshProcess,
 };
 /** The shell-started agents known to start on Windows; the others are not offered there. */
 const WINDOWS_SHELL_AGENTS = new Set(["omo", "gjc"]);
@@ -161,9 +165,13 @@ export class ShellAgentLocator {
   readonly #ttlMs: number;
   readonly #now: () => number;
   #found = new Map<string, string>();
+  /** the login PATH the last run read: a kind it missed is looked for there again at each read */
+  #loginPath: string | null = null;
   /** when the last run ended; null before the first */
   #checkedAt: number | null = null;
   #running: Promise<void> | null = null;
+  /** a refresh waiting for the run before it to end */
+  #queued: Promise<void> | null = null;
   /** why the last run found no PATH, as last logged; null after one that found it */
   #failure: string | null = null;
   #abort = new AbortController();
@@ -194,8 +202,9 @@ export class ShellAgentLocator {
     if (this.#stopped) return Promise.resolve();
     if (this.#running !== null) return this.#running;
     if (this.#checkedAt !== null && this.#now() - this.#checkedAt < this.#ttlMs) return Promise.resolve();
-    this.#running = this.#lookup(probe).finally(() => { this.#running = null; });
-    return this.#running;
+    const run: Promise<void> = this.#lookup(probe).finally(() => { if (this.#running === run) this.#running = null; });
+    this.#running = run;
+    return run;
   }
 
   async #lookup(probe: LoginPathProbe): Promise<void> {
@@ -211,17 +220,19 @@ export class ShellAgentLocator {
     }
     // a failed run proves nothing is there: it answers as a miss until the next one
     this.#found = found;
+    this.#loginPath = result?.path ?? null;
     this.#checkedAt = this.#now();
     if (result === null) return;
     const failure = result.path === null ? result.reason : null;
-    if (failure !== null && failure !== this.#failure) console.warn(`shell agents: no login-shell PATH (${failure}); omo and gjc are looked up on this server's PATH alone`);
+    if (failure !== null && failure !== this.#failure) console.warn(`shell agents: no login-shell PATH (${failure}); shell-started agents are looked up on this server's PATH alone`);
     this.#failure = failure;
   }
 
   /**
    * The absolute executable `kind` is started by, or null. A kind the service PATH misses waits
-   * for a login-shell run when the kept answer is missing or older than ttlMs; a path a run found
-   * that is no longer an executable is not replaced by anything else until the next run.
+   * for a login-shell run when the kept answer is missing or older than ttlMs; a kind that run
+   * missed is looked for again on the PATH it read, so one installed since is found at once; a path
+   * a run found that is no longer an executable is not replaced by anything else until the next run.
    */
   async executable(kind: string): Promise<string | null> {
     if (!isShellAgentKind(kind)) return null;
@@ -229,7 +240,28 @@ export class ShellAgentLocator {
     if (own !== null || this.#probe === null) return own;
     await this.#fresh(this.#probe);
     const found = this.#found.get(kind);
-    return found !== undefined && isExecutableFile(found) ? found : null;
+    if (found !== undefined) return isExecutableFile(found) ? found : null;
+    // installed since the run (an install from the catalog): the kept login PATH has it, no new shell
+    const late = this.#loginPath === null ? null : Bun.which(kind, { PATH: this.#loginPath });
+    if (late === null || !isAbsolute(late) || !isExecutableFile(late)) return null;
+    this.#found.set(kind, late);
+    return late;
+  }
+
+  /**
+   * Asks the login shell again, whatever the kept answer's age (an install may have changed its PATH):
+   * a run already out may have read the PATH before the install, so this one starts after it, and
+   * every read meanwhile waits for it.
+   */
+  refresh(): Promise<void> {
+    if (this.#probe === null || this.#stopped) return Promise.resolve();
+    // one already waiting to start covers this one too
+    if (this.#queued !== null) return this.#queued;
+    const probe = this.#probe;
+    const run: Promise<void> = (this.#running ?? Promise.resolve()).then(() => { if (this.#queued === run) this.#queued = null; return this.#lookup(probe); }).finally(() => { if (this.#running === run) this.#running = null; });
+    this.#queued = run;
+    this.#running = run;
+    return run;
   }
 
   /** Kills a login shell still running and runs no more; later lookups use this server's PATH and the last run's answer. */
@@ -245,7 +277,7 @@ const servicePathOnly = new ShellAgentLocator({ probe: null });
 
 const quote = (word: string) => `'${word.replaceAll("'", `'\\''`)}'`;
 /** cmd.exe has no escape for a quote inside quotes, and expands %NAME%. */
-function cmdQuote(word: string): string {
+export function cmdQuote(word: string): string {
   if (/["%\r\n]/.test(word)) throw new Error("this argument cannot be typed into cmd.exe");
   // a backslash right before the closing quote would escape it for the program's own parser
   return `"${word.replace(/\\+$/, (run) => run + run)}"`;
@@ -265,6 +297,56 @@ export function shellCommandLine(shell: PaneShell, executable: string, args: rea
   if (shell === "powershell") return ["&", psQuote(executable), ...args.map(psQuote)].join(" ");
   if (shell === "cmd") return [executable, ...args].map(cmdQuote).join(" ");
   return [executable, ...args].map(quote).join(" ");
+}
+
+/** What .NET takes for whitespace (Char.IsWhiteSpace): Windows PowerShell 5.1 quotes a native argument that holds any after an even number of `"`. */
+const DOTNET_WHITESPACE = /[\t-\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/u;
+/**
+ * What cmd reads in a line outside its quotes. An agent PowerShell starts through a `.cmd` file alone
+ * has its arguments read by cmd again, where `&` would end the agent's line and run the rest as a
+ * command.
+ */
+const CMD_SPECIAL = /[&|<>^%]/;
+/**
+ * Whether cmd reads `arg`'s `&`, `|`, `<` and `>` as text: both PowerShells put an argument holding a
+ * space in one pair of quotes, where cmd does (live-verified, 5.1.26100 and 7.6 to npm's shim), as
+ * long as no `"` in any argument of the line toggles cmd's quotes, which runs across arguments
+ * (#3092), and no `!` names a variable delayed expansion would put there, one holding a `"` for a
+ * shim's `call` to read again. Not with a `%` (cmd expands `%NAME%` inside quotes too) or a `^` (a
+ * shim's `call` doubles it).
+ */
+const cmdQuotedText = (arg: string, args: readonly string[]): boolean =>
+  arg.includes(" ") && !/[%^]/.test(arg) && !args.some((other) => /["!]/.test(other));
+
+/**
+ * `args` as a PowerShell line must give them for the native program it starts to read them back
+ * unchanged. Windows PowerShell 5.1 (`powershell`) passes each as it is, in double quotes when it
+ * holds whitespace after an even number of `"` (each one counts, an escaped one too), and drops an
+ * empty one: an empty one goes as `""`, a quote as `\"` after its backslashes are doubled, and the
+ * backslashes ending one with whitespace are doubled before the quote 5.1 closes it with
+ * (live-verified, 5.1.26100 to node.exe). One whose whitespace all follows an odd number of `"`
+ * (`"fix the bug"`, `x="a b"`) would go unquoted, split at its spaces: it throws. PowerShell 7 (`pwsh`)
+ * escapes them itself from 7.3 and passes them as 5.1 does before that: they go as they are, and
+ * one the two would pass differently throws. So does one holding what cmd reads outside its quotes
+ * (CMD_SPECIAL) but where it reads it as text (cmdQuotedText): which file the agent's name finds is
+ * the pane's PowerShell's to say, not this one's.
+ */
+export function powershellNativeArgs(program: "powershell" | "pwsh", args: readonly string[]): string[] {
+  return args.map((arg) => {
+    if (CMD_SPECIAL.test(arg) && !cmdQuotedText(arg, args)) throw new Error("cmd would read this argument again if the agent starts through a .cmd file");
+    const spaced = DOTNET_WHITESPACE.test(arg);
+    if (program === "pwsh") {
+      if (arg === "" || arg.includes('"') || (spaced && arg.endsWith("\\"))) throw new Error("PowerShell 7 may not pass this argument unchanged");
+      return arg;
+    }
+    if (arg === "") return '""';
+    const escaped = arg.replace(/(\\*)"/g, (_, run: string) => `${run}${run}\\"`);
+    if (!spaced) return escaped;
+    const encoded = escaped.replace(/\\+$/, (run) => run + run);
+    // a part between its quotes follows as many of them as its index: 5.1 quotes the argument for whitespace in an even one
+    if (!encoded.split('"').some((part, index) => index % 2 === 0 && DOTNET_WHITESPACE.test(part))) throw new Error("Windows PowerShell 5.1 would split this argument");
+    return encoded;
+  });
 }
 
 interface ProcessInfo { process_info?: { shell_pid?: number; foreground_processes?: { pid: number; argv?: string[]; cwd?: string }[] } }
@@ -299,7 +381,7 @@ export async function startShellAgent(kind: string, paneId: string, args: string
   const deadline = Date.now() + (options.timeoutMs ?? 60_000);
   while (Date.now() < deadline) {
     const info = await processInfo(paneId);
-    const started = info?.process_info?.foreground_processes?.find((entry) => kind === "omo" ? omoProcessIdentity(entry, "", process.env["HOME"] ?? "") !== null : isProcess(entry.argv ?? []));
+    const started = info?.process_info?.foreground_processes?.find((entry) => kind === "omo" ? omoProcessIdentity(entry, "", userHome()) !== null : isProcess(entry.argv ?? []));
     if (started) return started.pid;
     const shellPid = info?.process_info?.shell_pid;
     // the table query never outlasts what is left of the start's own time

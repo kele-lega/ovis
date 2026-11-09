@@ -505,6 +505,33 @@ describe("shared preferences of the install's other state dir", () => {
     expect(existsSync(join(active, "preferences.json"))).toBe(false);
     expect(readFileSync(join(sibling, "preferences.json"), "utf8")).toBe("{ not json");
   });
+
+  it("end with one state folder id, this dir's or, while it has none, the other's", () => {
+    const id = (dir: string) => (JSON.parse(readFileSync(join(dir, "preferences-id.json"), "utf8")) as { state_id: string }).state_id;
+    const name = (dir: string, value: string) => writeFileSync(join(dir, "preferences-id.json"), JSON.stringify({ state_id: value }));
+    const a = "a".repeat(32);
+    const b = "b".repeat(32);
+    {
+      const { active, sibling } = install();
+      name(active, a);
+      mergeSiblingState(active, sibling, at(0));
+      expect([id(active), id(sibling)]).toEqual([a, a]);
+    }
+    {
+      const { active, sibling } = install();
+      name(sibling, b);
+      mergeSiblingState(active, sibling, at(0));
+      expect([id(active), id(sibling)]).toEqual([b, b]);
+      expect(new PreferenceStore(active).get().state_id).toBe(b);
+    }
+    {
+      const { active, sibling } = install();
+      name(active, a);
+      name(sibling, b);
+      mergeSiblingState(active, sibling, at(0));
+      expect([id(active), id(sibling)]).toEqual([a, a]);
+    }
+  });
 });
 
 describe("push subscriptions of the install's other state dir", () => {
@@ -515,6 +542,34 @@ describe("push subscriptions of the install's other state dir", () => {
     writeJson(join(dir, "push-subscriptions.json"), [{ ...fake.subscription, device_id: null }]);
     return fake;
   };
+
+  // regression: the merge compared raw spellings, so another spelling of an endpoint retired here came back registered (#2012)
+  it("leave out another spelling of an endpoint retired here", async () => {
+    const { active, sibling } = install();
+    const key = webpush.generateVAPIDKeys();
+    const fake = await subscribe(sibling, key);
+    writeJson(join(sibling, "push-subscriptions.json"), [{ ...fake.subscription, endpoint: `${fake.subscription.endpoint}#other`, device_id: null }]);
+    const retiredHash = createHash("sha256").update(fake.subscription.endpoint).digest("base64url");
+    writeJson(join(active, "push-retired.json"), [{ hash: retiredHash, at: 1, owner: "device-a" }]);
+    mergeSiblingState(active, sibling, at(0));
+    const held = existsSync(join(active, "push-subscriptions.json")) ? JSON.parse(readFileSync(join(active, "push-subscriptions.json"), "utf8")) as unknown[] : [];
+    expect(held).toEqual([]);
+  });
+
+  // regression: storing endpoints normalized let the other dir's next write respell one taken over, and the next merge took it again
+  it("do not come back after a goodbye here when the other dir writes its list again", async () => {
+    const { active, sibling } = install();
+    const fake = await subscribe(sibling, webpush.generateVAPIDKeys());
+    const legacy = `${fake.subscription.endpoint}#legacy`;
+    writeJson(join(sibling, "push-subscriptions.json"), [{ ...fake.subscription, endpoint: legacy, device_id: null }]);
+    mergeSiblingState(active, sibling, at(0));
+    createPushService({ stateDir: active, loopbackHttp: true }).unsubscribe(legacy);
+    // the other dir writes its list again, for a subscription of its own
+    createPushService({ stateDir: sibling, loopbackHttp: true }).subscribe({ ...fake.subscription, endpoint: `${fake.subscription.endpoint}-other` }, undefined, null);
+    mergeSiblingState(active, sibling, at(1));
+    const held = JSON.parse(readFileSync(join(active, "push-subscriptions.json"), "utf8")) as { endpoint: string }[];
+    expect(held.map((subscription) => subscription.endpoint)).toEqual([`${fake.subscription.endpoint}-other`]);
+  });
 
   it("bring their key along where this dir has none", async () => {
     const { active, sibling } = install();

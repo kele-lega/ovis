@@ -1,7 +1,7 @@
 import type { DialogReader } from "./registry.ts";
 import { pickerPlan } from "./interaction-plan.ts";
 import { type InteractivePrompt } from "../../shared/protocol.ts";
-import { ANSI_RE, type AnswerStep, KEY, NUMBERED_OPTION_RE, type ParsedPrompt, cleanLine, findLastIndex, finishPrompt, isDivider, keySteps, listNames, listRows, menuRows, navigationKeys, nearestQuestion, normalizeText, parseNumberedRows, sequentialRows, wrapped } from "./shared.ts";
+import { ANSI_RE, type AnswerStep, KEY, NUMBERED_OPTION_RE, type ParsedPrompt, cleanLine, findLastIndex, finishPrompt, isDivider, own, keySteps, listNames, listRows, menuRows, navigationKeys, nearestQuestion, normalizeText, parseNumberedRows, sequentialRows, wrapped } from "./shared.ts";
 
 // the last of several questions submits them all
 export const CODEX_ASK_HINT_RE = /tab to add notes.*enter to submit (?:answer|all).*esc to interrupt/i;
@@ -15,6 +15,9 @@ export const CODEX_CONTINUE_HINT_RE = /press\s+enter\s+to\s+continue/i;
 export const CODEX_QUEUE_HEADER_RE = /^(?:•\s*)?Queued follow-up inputs$/;
 
 const CODEX_QUEUE_POSITION_RE = /^(\d+) of (\d+)$/;
+
+// request_user_input's hint over several questions: `←/→ to navigate questions` (Codex 0.156 to 0.166)
+const CODEX_NAVIGATE_RE = /←\/→ to navigate questions/;
 
 // Codex's `/model` lists, by the footer of the row under the cursor (its keymap's own words): a
 // row that only opens the next list takes Enter, a row that picks takes `s` for this session and
@@ -40,7 +43,7 @@ function parseCodexContinueMenu(screen: string): ParsedPrompt | null {
   const body = lines.slice(Math.max(0, rows[0]!.lineIndex - 16), rows[0]!.lineIndex)
     .map(cleanLine).filter((line) => line && !isDivider(line)).join("\n");
   return finishPrompt("codex", {
-    kind: "menu", title: "Codex", question: "Choose how to continue", body: body || null,
+    kind: "menu", title: "Codex", question: own("Choose how to continue"), body: body || null,
     options: rows.map((row) => ({ label: row.label, description: row.description ?? null })),
     multi_select: false, custom_option_index: null,
   }, {
@@ -66,15 +69,22 @@ function parseCodexQuestion(screen: string): ParsedPrompt | null {
   });
   const progress = lines.slice(Math.max(0, rows[0]!.lineIndex - 6), rows[0]!.lineIndex)
     .map(cleanLine).map((line) => line.match(/^Question (\d+)\/(\d+)/)).find(Boolean);
-  const title = progress && progress[2] !== "1" ? `Question ${progress[1]} of ${progress[2]}` : "Question";
+  const title = progress && progress[2] !== "1" ? own("Question {n} of {total}", { n: progress[1]!, total: progress[2]! }) : own("Question");
+  // several questions, and the hint says ←/→ move between them without answering: the card's Back and Next
+  const at = progress ? Number(progress[1]) - 1 : 0;
+  const total = progress ? Number(progress[2]) : 1;
+  const navigates = total > 1 && at < total && CODEX_NAVIGATE_RE.test(wrapped(lines, hintIndex));
   return finishPrompt("codex", {
     kind: "question", title, question, body: null, options,
     multi_select: false, custom_option_index: options.length,
+    ...(navigates ? { can_step_back: at > 0, can_step_next: at < total - 1 } : {}),
   }, {
+    ...(navigates ? { nativeSteps: { identity: `codex:${total}`, index: at, count: total, next: KEY.right, previous: KEY.left } } : {}),
     responder: "codex-question", menuLabels: rows.map((row) => row.label),
     selectedIndex: rows.findIndex((row) => row.selected), checkedOptionIndices: [], customMenuIndex: customIndex,
     rejectWithEscapeIndex: null,
-  });
+    // Back and Next come from the hint, which a narrow pane may cut: the same question keeps its id without them
+  }, { can_step_back: undefined, can_step_next: undefined });
 }
 
 /**
@@ -125,7 +135,7 @@ function parseCodexAsyncQuestion(screen: string): ParsedPrompt | null {
   if (!question) return null;
   const at = position as RegExpMatchArray | null;
   return finishPrompt("codex", {
-    kind: "question", title: at ? `Question ${at[1]} of ${at[2]}` : "Question", question, body: null,
+    kind: "question", title: at ? own("Question {n} of {total}", { n: at[1]!, total: at[2]! }) : own("Question"), question, body: null,
     // Codex keeps working while it asks: the card answers it, never a message typed in the chat
     options, multi_select: false, custom_option_index: options.length, queued: "open",
   }, {
@@ -283,13 +293,16 @@ function parseCodexModel(screen: string): ParsedPrompt | null {
   if (offered.length === 0) return null;
   const current = names.findIndex(({ name }) => /\s\(current\)$/.test(name));
   // "Medium (default)" in use reads as Medium: the tag is the list's, not the level's name
-  const now = current >= 0 ? ` (currently ${drawn[current]!.label.replace(/\s*\(default\)$/i, "")})` : "";
-  const asked = header.title === "Advanced Reasoning" ? "Select advanced reasoning for this session"
-    : header.model !== undefined ? `Select reasoning level for ${header.model} for this session` : "Select model for this session";
+  const now = current >= 0 ? drawn[current]!.label.replace(/\s*\(default\)$/i, "") : null;
+  const asked = header.title === "Advanced Reasoning"
+    ? now !== null ? own("Select advanced reasoning for this session (currently {level})", { level: now }) : own("Select advanced reasoning for this session")
+    : header.model !== undefined
+      ? now !== null ? own("Select reasoning level for {model} for this session (currently {level})", { model: header.model, level: now }) : own("Select reasoning level for {model} for this session", { model: header.model })
+      : now !== null ? own("Select model for this session (currently {model})", { model: now }) : own("Select model for this session");
   return finishPrompt("codex", {
     kind: "question",
     title: "",
-    question: `${asked}${now}${offered.length < rows.length ? ". More levels are listed in the terminal." : ""}`,
+    question: offered.length < rows.length ? own("{question}. More levels are listed in the terminal.", { question: asked }) : asked,
     body: header.notes.join("\n") || null,
     options: offered.map((row) => drawn[row]!),
     multi_select: false,

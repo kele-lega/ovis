@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import type { ServerMessage, SessionSnapshot } from "../shared/protocol.ts";
 import { CompletionTracker } from "./completion.ts";
 import { handleMachineRequest } from "./machine-api.ts";
 import { bridgeAgentNews, MachineManager, SOURCE_CHECK_INTERVAL_MS } from "./machines.ts";
+import { privateStateFs } from "./private-state.ts";
 import type { PushService } from "./push.ts";
 import { REMOTE_LIMITS, RemoteResponseTooLarge } from "./remote-json.ts";
 
@@ -78,7 +79,7 @@ function responses() {
   };
 }
 
-async function fixture(options: { bootId?: string; now?: () => number } = {}) {
+async function fixture(options: { bootId?: string; now?: () => number; serverId?: () => string | undefined; moveOfferMs?: { idle: number; active: number } } = {}) {
   const root = mkdtempSync(join(tmpdir(), "herdr-machine-refresh-"));
   const path = join(root, "herdr.sock");
   const local = responses();
@@ -138,10 +139,12 @@ type TestRuntime = {
   retry?: ReturnType<typeof setTimeout>;
 };
 
-async function remoteFixture(options: { bootId?: string; now?: () => number } = {}) {
+async function remoteFixture(options: { bootId?: string; now?: () => number; serverId?: () => string | undefined; moveOfferMs?: { idle: number; active: number } } = {}) {
   const local = await fixture(options);
   /** the bridge's own /api/health; without one it answers as before (a snapshot, so no boot id) */
   let health: ((request: Request) => Response | Promise<Response>) | null = null;
+  /** its GET /api/runtime/move; without one it is an Ovis that has no such route */
+  let move: (() => Response | Promise<Response>) | null = null;
   const remote = responses();
   let observer: { send(data: string): unknown } | undefined;
   let observing = false;
@@ -149,6 +152,7 @@ async function remoteFixture(options: { bootId?: string; now?: () => number } = 
   let sshCloses = 0;
   let terminalCloses = 0;
   let answerNext: ((captured: SessionSnapshot) => Promise<Response>) | null = null;
+  let observedNext: (() => void) | undefined;
   const bridge = Bun.serve({
     port: 0, hostname: "127.0.0.1",
     async fetch(request, server) {
@@ -158,13 +162,14 @@ async function remoteFixture(options: { bootId?: string; now?: () => number } = 
         return new Response(null, { status: 400 });
       }
       if (health && new URL(request.url).pathname === "/api/health") return health(request);
+      if (new URL(request.url).pathname === "/api/runtime/move") return move ? move() : Response.json({ error: { code: "not_found", message: "unknown endpoint /api/runtime/move" } }, { status: 404 });
       const status = httpStatus;
       const captured = await remote.read();
       const answer = answerNext;
       answerNext = null;
       return answer ? answer(captured) : Response.json({ snapshot: captured }, { status });
     },
-    websocket: { open(ws) { observer = ws; }, message(_ws, data) { observing = JSON.parse(String(data)).mode === "observe"; } },
+    websocket: { open(ws) { observer = ws; }, message(_ws, data) { observing = JSON.parse(String(data)).mode === "observe"; if (observing) observedNext?.(); } },
   });
   cleanups.push(() => { remote.finish(); bridge.stop(true); });
   const runtime = local.drive.runtime({ id: "remote", name: "Fixture PC", kind: "ssh", enabled: true, state: "connecting", error: null, snapshot: null });
@@ -179,8 +184,11 @@ async function remoteFixture(options: { bootId?: string; now?: () => number } = 
     send: (message: ServerMessage) => observer!.send(JSON.stringify(message)),
     setHttpStatus: (status: number) => { httpStatus = status; },
     setHealth: (answer: typeof health) => { health = answer; },
+    setMove: (answer: typeof move) => { move = answer; },
     /** the next /api/session answer, built from the snapshot the PC had when asked */
     answerNext: (answer: (captured: SessionSnapshot) => Promise<Response>) => { answerNext = answer; },
+    /** settles once the next observer connection asked to observe: its frames reach the manager from then on */
+    observed: (): Promise<void> => new Promise((resolve) => { observedNext = resolve; }),
     sshCloses: () => sshCloses,
     terminalCloses: () => terminalCloses,
   };
@@ -286,6 +294,22 @@ describe("machine snapshot refresh races", () => {
     send({ type: "pane-status", pane_id: "fixture:p1", agent_status: "done", finish_id: 4, finish_epoch: "remote-server" });
     expect(await received).toMatchObject({ finish_id: 4, finish_epoch: "remote-server" });
     expect(runtime.machine.snapshot?.panes[0]?.finish_id).toBe(4);
+  });
+
+  it("ends a remote PC's herdr run for read finishes only once a read of the PC names another, never from a saved snapshot", async () => {
+    const { manager, drive } = await fixture();
+    const saved = { ...snapshot("done"), finish_epoch: "saved-run" };
+    drive.machines.set("saved", drive.runtime({ id: "saved", name: "Saved PC", kind: "ssh", enabled: true, state: "disconnected", error: null, snapshot: saved }));
+    expect(manager.list().find((machine) => machine.id === "saved")?.snapshot?.finish_epoch).toBe("saved-run");
+    expect(manager.finishEnded("saved", "saved-run")).toBe(false);
+
+    const { manager: live, drive: liveDrive, remote, runtime } = await remoteFixture();
+    remote.set({ ...snapshot("done"), finish_epoch: "remote-server" });
+    await liveDrive.refresh(runtime);
+    expect(live.finishEnded("remote", "remote-server")).toBe(false);
+    remote.set({ ...snapshot("done"), finish_epoch: "remote-next" });
+    await liveDrive.refresh(runtime);
+    expect([live.finishEnded("remote", "remote-server"), live.finishEnded("remote", "remote-next")]).toEqual([true, false]);
   });
 
   it("keeps a newer local status and retries the invalidated snapshot", async () => {
@@ -724,6 +748,120 @@ describe("workspace order evidence through the manager", () => {
     expect(roster.machines.find((machine) => machine.id === "remote")?.snapshot).toMatchObject({ order_epoch: "R", read_seq: 1 });
   });
 
+  it("a late read of a herdr run an HTTP read showed ended cannot bring it back with the same order pair (#2206)", async () => {
+    const { manager, drive, remote, runtime, send, setHealth } = await remoteFixture();
+    setHealth(() => Response.json({ ok: true, web_ui: { boot_id: "R", revision: null } }));
+    const run = (finish_epoch: string, agent_status = "done"): SessionSnapshot => ({ ...paired("R", 0, agent_status), finish_epoch });
+    const proved = published(manager, (machines) => machines.some((machine) => machine.id === "remote" && machine.snapshot?.finish_epoch === "A"));
+    remote.set(run("A"));
+    await drive.refresh(runtime);
+    await proved;
+    // herdr restarts on the PC, its server stays: the next read names the new run, with no move in between
+    remote.set(run("B"));
+    await drive.refresh(runtime);
+    expect(remoteOf(manager)?.snapshot).toMatchObject({ finish_epoch: "B", order_epoch: "R", read_seq: 0 });
+    // the observer's frames read before that restart arrive after it: neither kept nor told to browsers
+    const told: string[] = [];
+    manager.subscribe((event) => { if (event.type === "machine-message" && event.machine_id === "remote" && event.message.type === "pane-status") told.push(event.message.finish_epoch ?? ""); });
+    send({ type: "snapshot", snapshot: run("A", "blocked") });
+    send({ type: "pane-status", pane_id: "fixture:p1", agent_status: "blocked", finish_id: 9, finish_epoch: "A" });
+    send({ type: "pane-status", pane_id: "fixture:p1", agent_status: "done", finish_id: 2, finish_epoch: "B" });
+    await heard(manager, send);
+    expect(remoteOf(manager)?.snapshot).toMatchObject({ finish_epoch: "B", panes: [{ agent_status: "done" }] });
+    expect(told).toEqual(["B"]);
+    expect([manager.finishEnded("remote", "A"), manager.finishEnded("remote", "B")]).toEqual([true, false]);
+    // a frame of a run this server has not seen end is shown, but proves nothing ended: only a read after it does
+    remote.hold();
+    send({ type: "snapshot", snapshot: run("C") });
+    await heard(manager, send);
+    expect(remoteOf(manager)?.snapshot?.finish_epoch).toBe("C");
+    expect([manager.finishEnded("remote", "B"), manager.finishEnded("remote", "C")]).toEqual([false, false]);
+    const reread = published(manager, (machines) => machines.some((machine) => machine.id === "remote" && machine.snapshot?.finish_epoch === "B"));
+    remote.finish();
+    await reread;
+    expect([manager.finishEnded("remote", "A"), manager.finishEnded("remote", "C")]).toEqual([true, true]);
+  });
+
+  it("a snapshot held for health that a status laid another run over names no server for that run (#2206)", async () => {
+    const { manager, drive, remote, runtime, send, setHealth } = await remoteFixture();
+    const health = gatedHealth();
+    setHealth(health.handler);
+    const run = (finish_epoch: string): SessionSnapshot => ({ ...paired("R", 0, "done"), finish_epoch });
+    remote.set(run("A"));
+    await drive.refresh(runtime);
+    const call = await health.next();
+    // while health is asked, a status names run B: it is laid over the held snapshot, whose server is not B's proof
+    // (the reads that status asks for wait at the server until health answers)
+    remote.hold();
+    send({ type: "pane-status", pane_id: "fixture:p1", agent_status: "done", finish_id: 1, finish_epoch: "B" });
+    await heard(manager, send);
+    const proved = published(manager, (machines) => machines.some((machine) => machine.id === "remote" && machine.source_boot_id === "R"));
+    call.answer("R");
+    await proved;
+    expect(remoteOf(manager)?.snapshot).toMatchObject({ order_epoch: "R", finish_epoch: "B" });
+    // R's next read names run C: B is over while R answers, but not for good, so a status of B is still taken and told
+    remote.set(run("C"));
+    const settled = published(manager, (machines) => machines.some((machine) => machine.id === "remote" && machine.snapshot?.finish_epoch === "C"));
+    remote.finish();
+    await settled;
+    expect(manager.finishEnded("remote", "B")).toBe(true);
+    const told: string[] = [];
+    manager.subscribe((event) => { if (event.type === "machine-message" && event.machine_id === "remote" && event.message.type === "pane-status") told.push(event.message.finish_epoch ?? ""); });
+    send({ type: "pane-status", pane_id: "fixture:p1", agent_status: "working", finish_id: 1, finish_epoch: "B" });
+    await heard(manager, send);
+    expect(told).toEqual(["B"]);
+    expect(manager.finishEnded("remote", "B")).toBe(false);
+  });
+
+  it("a status heard before a connection's health proof cannot end its run for good under the cached roster's server (#2206)", async () => {
+    let clock = 0;
+    const { manager, drive, remote, runtime, endpoint, send, setHealth, observed } = await remoteFixture({ now: () => clock });
+    const health = gatedHealth();
+    setHealth(health.handler);
+    const run = (server: string, finish_epoch: string, seq = 0, agent_status = "done"): SessionSnapshot => ({ ...paired(server, seq, agent_status), finish_epoch });
+    const reconnect = async () => {
+      const open = observed();
+      drive.disconnect(runtime);
+      runtime.endpoint = endpoint; runtime.ssh = { close() {} };
+      clock += SOURCE_CHECK_INTERVAL_MS;
+      await drive.observe(runtime);
+      await open;
+    };
+    // the PC's server R, in herdr run A, proved and read again: A is R's own
+    remote.set(run("R", "A"));
+    await drive.refresh(runtime);
+    const provedR = published(manager, (machines) => machines.some((machine) => machine.id === "remote" && machine.snapshot?.finish_epoch === "A"));
+    (await health.next()).answer("R");
+    await provedR;
+    await drive.refresh(runtime);
+    // the PC's other server S (its own Ovis beside this app's bridge) answers in run B; its health is slow, so the
+    // card keeps R's roster and a status of S is laid over it
+    remote.set(run("S", "B"));
+    await reconnect();
+    const slow = await health.next();
+    send({ type: "pane-status", pane_id: "fixture:p1", agent_status: "working", finish_id: 1, finish_epoch: "B" });
+    await heard(manager, send);
+    expect(remoteOf(manager)?.snapshot).toMatchObject({ order_epoch: "R", finish_epoch: "B" });
+    // R answers again, still in A: its read ends B while R answers
+    remote.set(run("R", "A", 1));
+    await reconnect();
+    slow.answer("S");
+    const backR = published(manager, (machines) => machines.some((machine) => machine.id === "remote" && machine.snapshot?.read_seq === 1));
+    (await health.next()).answer("R");
+    await backR;
+    await drive.refresh(runtime);
+    expect([manager.finishEnded("remote", "A"), manager.finishEnded("remote", "B")]).toEqual([false, true]);
+    // S answers again, still in B: its read is not refused as old, and once its health proves it, B is shown again
+    remote.set(run("S", "B", 2, "blocked"));
+    await reconnect();
+    expect((runtime as unknown as { verification?: unknown }).verification).toBeDefined();
+    const backS = published(manager, (machines) => machines.some((machine) => machine.id === "remote" && machine.snapshot?.order_epoch === "S"));
+    (await health.next()).answer("S");
+    await backS;
+    expect(remoteOf(manager)?.snapshot).toMatchObject({ finish_epoch: "B", panes: [{ agent_status: "blocked" }] });
+    expect(manager.finishEnded("remote", "B")).toBe(false);
+  });
+
   it("remote epoch proof comes only from manager sideband health", async () => {
     const { manager, runtime, send, setHealth } = await remoteFixture({ bootId: "local-boot" });
     const health = gatedHealth();
@@ -738,6 +876,28 @@ describe("workspace order evidence through the manager", () => {
     call.answer("R");
     await proved;
     expect(remoteOf(manager)?.snapshot).toMatchObject({ order_epoch: "R", read_seq: 0 });
+  });
+
+  it("names each PC by the relay ID its own server has: this one's, and a remote one's from its health (#2876)", async () => {
+    const own = "ab".repeat(16), theirs = "cd".repeat(16);
+    const { manager, send, setHealth } = await remoteFixture({ serverId: () => own });
+    setHealth(() => Response.json({ ok: true, web_ui: { boot_id: "R", revision: null, server_id: theirs } }));
+    expect(manager.list()[0]?.server_id).toBe(own);
+    const proved = published(manager, (machines) => machines.some((machine) => machine.id === "remote" && machine.source_boot_id === "R"));
+    send({ type: "snapshot", snapshot: paired("R", 0) });
+    await proved;
+    expect(remoteOf(manager)?.server_id).toBe(theirs);
+  });
+
+  it("keeps an SSH PC's relay ID across a restart, so its alerts are known by it before it answers (#2876)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "herdr-machine-id-"));
+    const id = "0f0f0f0f-0000-4000-8000-000000000001", theirs = "cd".repeat(16);
+    writeFileSync(join(dir, "machines.json"), JSON.stringify([{ id, name: "Office", enabled: false, target: { destination: "office" }, server_id: theirs, snapshot: null }]));
+    const manager = new MachineManager(dir, { seed() {} } as unknown as PushService, new CompletionTracker(null));
+    cleanups.push(() => { manager.stop(); rmSync(dir, { recursive: true, force: true }); });
+    expect(manager.list().find((machine) => machine.id === id)?.server_id).toBe(theirs);
+    manager.patch(id, { name: "Office 2" });
+    expect(JSON.parse(readFileSync(join(dir, "machines.json"), "utf8"))[0].server_id).toBe(theirs);
   });
 
   it("a connection's first epoch is published only once its health proves it", async () => {
@@ -1020,4 +1180,114 @@ describe("workspace order evidence through the manager", () => {
     expect(await refused.json()).toMatchObject({ error: { code: "source_unverified" } });
     expect(JSON.stringify(await (await ask("")).json())).not.toContain("fixture-token");
   });
+});
+
+describe("saving a remote PC's snapshot", () => {
+  it("rewrites machines.json durably, and only when a refresh changed what it holds", async () => {
+    // a refresh asks for a save after a short wait (saveSoon): the callback of the timer it armed runs here at once.
+    // Timers are recorded from the start, since the fixture's own first read already arms one.
+    const callbacks = new Map<unknown, () => void>();
+    const realSetTimeout = globalThis.setTimeout;
+    const timers = spyOn(globalThis, "setTimeout");
+    cleanups.push(() => timers.mockRestore());
+    timers.mockImplementation(((callback: () => void, ms?: number, ...args: unknown[]) => {
+      const timer = realSetTimeout(callback, ms, ...args);
+      callbacks.set(timer, callback);
+      return timer;
+    }) as unknown as typeof setTimeout);
+    const { manager, drive, remote, runtime } = await remoteFixture();
+    const internals = manager as unknown as { stateDir: string; saveTimer?: ReturnType<typeof setTimeout> };
+    // each durable write creates its temporary file exclusively ("wx") and fsyncs it
+    const temporaries: string[] = [];
+    const open = spyOn(privateStateFs, "openSync");
+    const fsync = spyOn(privateStateFs, "fsyncSync");
+    cleanups.push(() => { open.mockRestore(); fsync.mockRestore(); });
+    open.mockImplementation(((path: string, flags: string, mode?: number) => {
+      if (flags === "wx" && path.includes("machines.json")) temporaries.push(path);
+      return openSync(path, flags, mode);
+    }) as typeof openSync);
+    const refreshed = async () => {
+      await drive.refresh(runtime);
+      const timer = internals.saveTimer;
+      const save = callbacks.get(timer);
+      expect(save).toBeDefined();
+      clearTimeout(timer);
+      save!();
+      expect(internals.saveTimer).toBeUndefined();
+    };
+    const saved = () => JSON.parse(readFileSync(join(internals.stateDir, "machines.json"), "utf8")) as { snapshot: SessionSnapshot | null }[];
+
+    await refreshed();
+    expect(temporaries).toHaveLength(1);
+    expect(fsync).toHaveBeenCalled();
+    expect(saved()[0]!.snapshot?.panes[0]?.agent_status).toBe("working");
+
+    // the same panes again, in a new object as every read brings: nothing to write
+    await refreshed();
+    await refreshed();
+    expect(temporaries).toHaveLength(1);
+
+    remote.set(snapshot("done"));
+    await refreshed();
+    expect(temporaries).toHaveLength(2);
+    expect(saved()[0]!.snapshot?.panes[0]?.agent_status).toBe("done");
+  });
+});
+
+it("shows a connected PC's move to herdr-core on its roster, one read at a time, often while it runs, and drops it when the PC goes", async () => {
+  const f = await remoteFixture({ moveOfferMs: { idle: 60_000, active: 1 } });
+  // an Ovis without the move routes cannot tell
+  await until(() => f.runtime.machine.runtime_move === null);
+  const told: unknown[] = [];
+  f.manager.subscribe((event) => { if (event.type === "machines") told.push(event.machines.find((machine) => machine.id === "remote")?.runtime_move); });
+  let answer: unknown = { available: true, plan: { workspaces: [], panes: [], ready: true, revision: "r1" }, status: { state: "idle" } };
+  let failing = false;
+  let reads = 0;
+  let open = 0;
+  let most = 0;
+  let held: ReturnType<typeof Promise.withResolvers<void>> | null = Promise.withResolvers<void>();
+  f.setMove(async () => {
+    reads++; open++; most = Math.max(most, open);
+    if (held) await held.promise;
+    open--;
+    return failing ? Response.json({ error: { code: "connect_failed", message: "herdr did not answer" } }, { status: 502 }) : Response.json(answer);
+  });
+  f.manager.moveOfferSoon("remote");
+  await until(() => open === 1);
+  f.manager.moveOfferSoon("remote");
+  held.resolve(); held = null;
+  // the read asked for meanwhile follows the one under way, never beside it
+  await until(() => reads === 2 && open === 0);
+  expect(most).toBe(1);
+  expect(f.runtime.machine.runtime_move).toEqual({ serving: "herdr", offered: true, reason: null, status: { state: "idle" } });
+  expect(told).toContainEqual({ serving: "herdr", offered: true, reason: null, status: { state: "idle" } });
+  // a move that waits is read again every few seconds
+  answer = { available: true, plan: { workspaces: [], panes: [], ready: false, revision: "r1" }, status: { state: "waiting", revision: "r1" } };
+  f.manager.moveOfferSoon("remote");
+  await until(() => reads >= 6);
+  expect(f.runtime.machine.runtime_move?.status).toEqual({ state: "waiting" });
+  // a PC whose herdr does not answer for a moment keeps its badge, and is still read often
+  failing = true;
+  const before = reads;
+  await until(() => reads >= before + 3);
+  expect(f.runtime.machine.runtime_move?.status).toEqual({ state: "waiting" });
+  failing = false;
+  // a move that could not finish names folders and agents' words: the roster tells only how it ended
+  const secret = "/home/someone/secret-project";
+  answer = { available: true, plan: { workspaces: [], panes: [], ready: true, revision: "r2" }, status: { state: "rolled_back", reason: `could not start ${secret}`, left: [{ pane_id: "w1:p1", agent: "claude", why: `${secret} is gone` }] } };
+  await until(() => f.runtime.machine.runtime_move?.status.state === "rolled_back");
+  expect(f.runtime.machine.runtime_move?.status).toEqual({ state: "rolled_back", left: 1 });
+  const watched = await handleMachineRequest(new Request("http://127.0.0.1/api/machines"), f.manager, undefined, undefined, true);
+  expect(await watched.text()).not.toContain("secret-project");
+  // a move that ended is read every minute; a change sent from here reads it at once
+  // a reason this version does not know is not carried: it could be any words of that PC's
+  answer = { available: false, reason: `cannot move ${secret}`, status: { state: "idle" } };
+  f.manager.moveOfferSoon("remote");
+  await until(() => f.runtime.machine.runtime_move === null);
+  answer = { available: false, reason: "not_herdr", status: { state: "idle" } };
+  f.manager.moveOfferSoon("remote");
+  await until(() => f.runtime.machine.runtime_move?.serving === "herdr-core");
+  expect(f.runtime.machine.runtime_move).toEqual({ serving: "herdr-core", offered: false, reason: "not_herdr", status: { state: "idle" } });
+  f.drive.disconnect(f.runtime);
+  expect(f.runtime.machine.runtime_move).toBeUndefined();
 });

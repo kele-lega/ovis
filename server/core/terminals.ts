@@ -4,11 +4,16 @@
  * sent. The pane's agent conversation is watched while a client that shows the pane asks for it.
  */
 import type { ClientMessage, ServerMessage } from "../../shared/protocol.ts";
+import { RECEIPT_RESUME_ID } from "../../shared/receipt-resume.ts";
 import { ConversationMonitor } from "../conversation-monitor.ts";
+import { CoreAttachSession } from "../herdr-core/attach-session.ts";
 import { type SightingFacts, sightingFacts } from "../input-guard.ts";
 import { OUTPUT_HARD_BYTES, OUTPUT_HIGH_BYTES, OUTPUT_STALL_MS, OutputWindow, wireBytes } from "../output-window.ts";
-import { type Client, connectionOf, send } from "./connections.ts";
+import { backlog, type Client, connectionOf, send } from "./connections.ts";
 import { ATTACH_HELD_MESSAGE, createSpawnAttachment, type PaneAttachment } from "./terminal-process.ts";
+
+/** the most panes one connection follows the conversation of without attaching them */
+const DETACHED_CONVERSATION_WATCHES = 32;
 
 /** joins this close together share one repaint: a reconnect brings every tab back at once */
 const REPAINT_COALESCE_MS = 50;
@@ -37,8 +42,11 @@ export interface TerminalSighting {
   readonly pty: unknown;
   readonly claim: unknown;
   facts(): SightingFacts;
-  /** Writes into the session seen, as typing into its pty does (a mirror sends it through herdr). */
-  write(data: string): boolean | void;
+  /**
+   * Writes into the session seen, as typing into its pty does (a mirror sends it through herdr).
+   * `automatic`: the viewer's terminal made the bytes itself; only a herdr-core stream can tell hc so.
+   */
+  write(data: string, automatic?: boolean): boolean | void;
 }
 
 /** Clamp surface for the shared pty, mirroring the sidecar's own limits. */
@@ -80,19 +88,21 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
   // herdr releases its exclusive attach slot only after the old process exits.
   const retiringAttachments = new Map<string, Promise<void>>();
 
+  /** whether the client wants the pane's conversation pushes: through its attachment, or without one (detached) */
+  function follows(client: Client, paneId: string): boolean {
+    return !connectionOf(client).closing && client.readyState === WebSocket.OPEN
+      && ((client.data.attached.has(paneId) && client.data.conversationInterests.has(paneId)) || client.data.conversationWatches.has(paneId));
+  }
+
   const conversations = new ConversationMonitor((paneId, signature) => {
     transcriptChanged?.(paneId);
     for (const client of clients) {
-      if (!connectionOf(client).closing && client.readyState === WebSocket.OPEN && client.data.attached.has(paneId) && client.data.conversationInterests.has(paneId)) {
-        send(client, { type: "conversation-changed", pane_id: paneId, signature });
-      }
+      if (follows(client, paneId)) send(client, { type: "conversation-changed", pane_id: paneId, signature });
     }
   }, options.codexHome, options.devinDbPath, options.opencodeDb, options.hermesHome, options.grokHome, options.museData);
 
   function releaseConversation(paneId: string): void {
-    for (const client of clients) {
-      if (!connectionOf(client).closing && client.readyState === WebSocket.OPEN && client.data.attached.has(paneId) && client.data.conversationInterests.has(paneId)) return;
-    }
+    for (const client of clients) if (follows(client, paneId)) return;
     conversations.unwatch(paneId);
   }
 
@@ -102,10 +112,10 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
     let paused = false;
     for (const client of attachment.clients) {
       const window = client.data.output.get(paneId);
-      const buffered = client.getBufferedAmount();
+      const buffered = backlog(client);
       if (window) {
         // an ACK client: measured by its ACK progress, and a joiner draining its replay never pauses the pty
-        const verdict = window.check(buffered);
+        const verdict = window.check(buffered, Date.now(), client.getBufferedAmount() - buffered);
         if (verdict === "stop") end(client, "stalled");
         else if (verdict === "pause") paused = true;
         continue;
@@ -132,7 +142,7 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
   function sendOutput(client: Client, paneId: string, data: string, replay = false): void {
     const window = client.data.output.get(paneId);
     const bytes = Buffer.byteLength(data);
-    if ((window && window.pending + bytes > OUTPUT_HARD_BYTES) || client.getBufferedAmount() >= OUTPUT_HARD_BYTES) {
+    if ((window && window.pending + bytes > OUTPUT_HARD_BYTES) || backlog(client) >= OUTPUT_HARD_BYTES) {
       end(client, "stalled");
       return;
     }
@@ -174,6 +184,32 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
     attachment.process.kill();
   }
 
+  /**
+   * herdr moved the pane under a new ID: the attach made as `from` ends for its clients (`pty-exit`), and the
+   * first attach as `to` waits for that process to exit, as it holds herdr's one attach slot until then (#1503).
+   */
+  function paneMoved(from: string, to: string): void {
+    if (from === to) return;
+    // what `from` still retires: an earlier move's wait carried to it included, so A to B to C waits for A
+    const retire = (): Promise<void> | undefined => {
+      if (attachments.has(from)) {
+        broadcast(from, { type: "pty-exit", pane_id: from, code: null });
+        closeAttachment(from);
+      }
+      return retiringAttachments.get(from);
+    };
+    // one still being created ends once it is; the new ID waits for that from now, not from then
+    const creating = pendingAttachments.get(from);
+    const exited = creating ? creating.then(retire, () => retiringAttachments.get(from)) : retire();
+    if (!exited) return;
+    const earlier = retiringAttachments.get(to);
+    // a process that failed to exit cleanly still let go: the wait never refuses the attach behind it
+    const waited: Promise<void> = Promise.all([earlier, exited]).then(() => undefined, () => undefined).finally(() => {
+      if (retiringAttachments.get(to) === waited) retiringAttachments.delete(to);
+    });
+    retiringAttachments.set(to, waited);
+  }
+
   /** An interact client's terminal sizes the pty: the grid is remembered as this client's, and it drives. */
   function drivePty(paneId: string, client: Client, cols: number, rows: number): void {
     const attachment = attachments.get(paneId);
@@ -211,6 +247,8 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
     if (!attachment || attachment.kind === "mirror" || (attachment.cols === cols && attachment.rows === rows)) return;
     attachment.cols = cols;
     attachment.rows = rows;
+    attachment.resizes = (attachment.resizes ?? 0) + 1;
+    attachment.resizedTo = [...(attachment.resizedTo ?? []).slice(-15), `${cols}x${rows}`];
     attachment.process.resize(cols, rows);
     // herdr redraws the whole screen for a new size: a repaint still waiting would send it twice
     clearTimeout(attachment.repaint);
@@ -257,6 +295,9 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
   function dropClaims(client: Client): void {
     client.data.attached.clear();
     client.data.conversationInterests.clear();
+    const followed = [...client.data.conversationWatches];
+    client.data.conversationWatches.clear();
+    for (const paneId of followed) releaseConversation(paneId);
     client.data.output.clear();
   }
 
@@ -284,7 +325,7 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
       pty: member ? process : undefined,
       claim,
       facts: () => sightingFacts(seen, { attachment: attachments.get(paneId), claim: client.data.attached.get(paneId) }, client),
-      write: (data) => process!.write(data),
+      write: (data, automatic) => process instanceof CoreAttachSession ? process.write(data, automatic) : process!.write(data),
     };
   }
 
@@ -316,6 +357,8 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
       // neither can see a client that only joins the attachment afterwards
       const claim = client.data.attached.get(message.pane_id) ?? { keepSize: false };
       claim.keepSize = message.keep_size === true;
+      // An opaque, bounded presentation correlator only: never used by input guards.
+      if (typeof message.receipt_resume_id === "string" && RECEIPT_RESUME_ID.test(message.receipt_resume_id)) claim.receiptResumeId = message.receipt_resume_id;
       if (!client.data.attached.has(message.pane_id)) client.data.attached.set(message.pane_id, claim);
       let attachment: PaneAttachment;
       try {
@@ -350,13 +393,20 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
       if (attachment.kind === "mirror") send(client, { type: "pane-geometry", pane_id: message.pane_id, cols: attachment.cols, rows: attachment.rows, fixed: true });
       // hand the newcomer the current screen it would otherwise have missed
       // (a mirror keeps its latest screen whole; a pty keeps a bounded tail of its stream)
-      const replay = attachment.kind === "mirror" ? attachment.process.current ?? "" : attachment.replay.text();
+      const tail = attachment.kind === "mirror" ? attachment.process.current ?? "" : attachment.replay.text();
+      // a herdr-core joiner keeps the history it already holds: a tail that lost the attach's clear would double
+      // it. A tail on the alternate screen gets the clear where it leaves that screen (leaving it first would blank
+      // what the tail restores there), so the main-screen lines after it land once
+      const clear = attachment.kind === "pty" && attachment.replay.truncated && "replayPrefix" in attachment.process ? attachment.process.replayPrefix : "";
+      const alternate = attachment.kind === "pty" && attachment.replay.alternateScreen;
+      const replay = !tail || !clear ? tail : alternate ? tail.replace("\x1b[?1049l", clear) : clear + tail;
       // the members heard `input-ready: false` when the stream ended; a newcomer is told the replay
       // is the screen from before in a frame of its own, as an early negative receipt would pass for
       // the attach-complete barrier queued input waits on
       if (!alreadyAttached && attachment.recovering) send(client, { type: "output-recovering", pane_id: message.pane_id });
       if (!alreadyAttached && replay) {
-        client.data.output.get(message.pane_id)?.join(replay, client.getBufferedAmount());
+        const ahead = backlog(client);
+        client.data.output.get(message.pane_id)?.join(replay, ahead, Date.now(), client.getBufferedAmount() - ahead);
         // marked as the screen from before: the client draws it but takes no new clipboard write from it
         sendOutput(client, message.pane_id, replay, true);
         // a tail that lost the stream's start may miss what was drawn once: herdr draws it again
@@ -402,8 +452,25 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
       return;
     },
     "conversation-watch"(client: Client, message: Frame<"conversation-watch">): void {
-      if (typeof message.pane_id !== "string" || message.pane_id.trim() === "" || typeof message.enabled !== "boolean") {
-        send(client, { type: "error", code: "invalid_conversation_watch", message: "pane_id must be a nonempty string and enabled must be a boolean" });
+      if (typeof message.pane_id !== "string" || message.pane_id.trim() === "" || typeof message.enabled !== "boolean"
+        || (message.detached !== undefined && typeof message.detached !== "boolean")) {
+        send(client, { type: "error", code: "invalid_conversation_watch", message: "pane_id must be a nonempty string, enabled a boolean and detached a boolean when given" });
+        return;
+      }
+      // without an attachment: kept apart from the attached interest, which the pane's detach clears
+      if (message.detached === true) {
+        const watches = client.data.conversationWatches;
+        if (!message.enabled) {
+          watches.delete(message.pane_id);
+          releaseConversation(message.pane_id);
+          return;
+        }
+        if (!watches.has(message.pane_id) && watches.size >= DETACHED_CONVERSATION_WATCHES) {
+          send(client, { type: "error", code: "too_many_conversation_watches", message: `at most ${DETACHED_CONVERSATION_WATCHES} detached conversation watches per connection`, pane_id: message.pane_id });
+          return;
+        }
+        watches.add(message.pane_id);
+        conversations.watch(message.pane_id);
         return;
       }
       if (message.enabled) {
@@ -478,5 +545,5 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
   // the same live records, read through their grid and held state only: the server outside reaches a
   // pane's terminal through `sight`, `poke` and the frames
   const views: ReadonlyMap<string, AttachmentView> = attachments;
-  return { attachments: views, conversations, reconcileOutput, closeAttachment, detachClaimed, dropClaims, sight, poke, drainOutput, terminalFrames };
+  return { attachments: views, conversations, reconcileOutput, closeAttachment, paneMoved, detachClaimed, dropClaims, sight, poke, drainOutput, terminalFrames };
 }

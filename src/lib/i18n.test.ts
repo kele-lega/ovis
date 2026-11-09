@@ -57,7 +57,7 @@ function labelMapUses(): [key: string, file: string][] {
     const text = readFileSync(join(root, file), "utf8");
     const start = text.indexOf(`const ${name}`);
     if (start < 0) throw new Error(`${name} not found in ${file}`);
-    const end = text.indexOf("\n};", start) > 0 && (text.indexOf("\n];", start) < 0 || text.indexOf("\n};", start) < text.indexOf("\n];", start)) ? text.indexOf("\n};", start) : text.indexOf("\n];", start);
+    const end = Math.min(...["\n};", "\n];", "\n] as const;"].map((closer) => text.indexOf(closer, start)).filter((at) => at > 0));
     return [...text.slice(start, end).matchAll(valuePattern)].flatMap((m) => m.slice(1).filter((v): v is string => v !== undefined).map((key): [string, string] => [key, file]));
   };
   const value = /^\s+\w+: "([^"]*)",?$/gm;
@@ -66,7 +66,9 @@ function labelMapUses(): [key: string, file: string][] {
     ...grab("components/MachineSidebar.tsx", "STATE_WORD", value),
     ...grab("components/Composer.tsx", "SOURCE_LABEL", value),
     ...grab("components/DevicesPanel.tsx", "VIA", value),
+    ...grab("../shared/portal.ts", "PORTAL_AUTH_PROBLEMS", value),
     ...grab("components/SettingsDialog.tsx", "THEME_NAMES", /^\s+"?[\w-]+"?: "([^"]*)",?$/gm),
+    ...grab("components/SettingsDialog.tsx", "HERDR_ACTION_LABELS", value),
     ...grab("components/KeyBar.tsx", "ARROWS", /label: "([^"]+)"/g),
     ...grab("components/KeyBar.tsx", "KEY_SPOKEN_NAMES", /label: "([^"]+)"/g),
     ...grab("lib/shortcuts.ts", "SHORTCUTS", /label: "([^"]+)"/g),
@@ -75,6 +77,8 @@ function labelMapUses(): [key: string, file: string][] {
     ...grab("lib/workBlocks.ts", "CATEGORY_LABEL", /\["([^"]+)", "([^"]+)"\]/g),
     ...grab("lib/usage.ts", "WINDOW_LABEL", value),
     ...grab("lib/toolVerbs.ts", "VERB_LABEL", value),
+    // the card text the bridge writes itself, which PromptCard shows by its key (lib/promptText.ts)
+    ...grab("../shared/card-text.ts", "CARD_TEXT", /^\s+"([^"]+)",$/gm).map(([key, file]): [string, string] => [key.replaceAll("\\n", "\n"), file]),
   ];
 }
 
@@ -105,9 +109,10 @@ describe.each(Object.entries(DICTIONARIES))("%s dictionary", (_name, dictionary)
 
   it("is not just the English repeated", () => {
     // names and key caps read the same in every language; Chinese UIs leave "Shell" and "Agent" in English;
-    // theme brand names stay as their projects write them (the color words Amber and Charcoal are translated)
+    // theme brand names stay as their projects write them (the color words Amber and Charcoal are translated),
+    // and so does Claude Code's own term Ultracode
     const themeNames = ["Codex", "Catppuccin", "Catppuccin Latte", "Tokyo Night", "Tokyo Night Day", "Gruvbox", "Gruvbox Light", "One Dark", "One Light", "Solarized", "Solarized Light", "Kanagawa", "Kanagawa Lotus", "Rosé Pine", "Rosé Pine Dawn", "Dracula", "Nord", "Vesper"];
-    const sameOnPurpose = new Set(["PC {name}", "Control C", "Control D", "Control Z", "Shift Tab", "Enter", "Shell", "Agent", ...themeNames]);
+    const sameOnPurpose = new Set(["PC {name}", "CPU", "CPU {value}", "Control C", "Control D", "Control Z", "Shift Tab", "Enter", "Shell", "Agent", "Ultracode", ...themeNames]);
     const same = Object.entries(dictionary).filter(([en, text]) => en === text && /[a-z]{3}/i.test(en) && !sameOnPurpose.has(en));
     expect(same.map(([en]) => en)).toEqual([]);
   });
@@ -115,18 +120,22 @@ describe.each(Object.entries(DICTIONARIES))("%s dictionary", (_name, dictionary)
 
 /** Each part's files: a part holds the keys that only its files use (CONTRIBUTING.md, UI text). */
 const PART_FILES: Record<string, string[]> = {
-  settings: ["components/SettingsDialog.tsx", "components/LaunchSettings.tsx", "components/KeyBarSettings.tsx", "lib/paletteSettings.ts", "components/TelemetryControls.tsx", "components/SettingsControls.tsx"],
+  settings: ["components/SettingsDialog.tsx", "components/SignOutRow.tsx", "components/KeyBarSettings.tsx", "lib/paletteSettings.ts", "components/TelemetryControls.tsx", "components/SettingsControls.tsx", "components/AlertWebhookGroup.tsx"],
   terminal: ["components/PaneTerminal.tsx", "lib/useTerminalMount.ts", "lib/useComposerSends.ts", "lib/usePeekReturn.ts", "lib/useTypedKeys.ts", "components/PaneCanvas.tsx", "components/KeyBar.tsx", "components/FindBar.tsx", "components/TerminalViewportTools.tsx", "components/SplitDropPreview.tsx", "components/TabStrip.tsx", "lib/terminalLabel.ts", "lib/tabName.ts"],
-  composer: ["components/Composer.tsx", "components/ComposerNotices.tsx", "components/VoiceInput.tsx", "components/SecretInput.tsx", "components/TerminalInput.tsx", "components/PendingMessages.tsx", "lib/compose.ts", "components/PromptCard.tsx", "lib/promptAnswer.ts"],
-  chat: ["components/ChatView.tsx", "components/Markdown.tsx", "components/MermaidLightbox.tsx", "components/ChatMinimap.tsx", "components/ImageLightbox.tsx", "components/BackgroundTasks.tsx", "components/BackgroundAgentDetail.tsx", "components/MarkdownLinkMenu.tsx", "lib/workBlocks.ts", "lib/toolVerbs.ts", "lib/outcomeChip.ts", "lib/chatTimestamp.ts", "lib/chatReadDeadline.ts"],
-  sidebar: ["components/Sidebar.tsx", "components/AgentSidebar.tsx", "components/SidebarResizer.tsx"],
-  machines: ["components/TailnetPcs.tsx", "components/TailnetSetupHelp.tsx", "components/MachineBootstrap.tsx", "components/MachineSidebar.tsx", "components/MachineDialog.tsx", "lib/bridgeProgress.ts"],
-  workspace: ["components/NewSessionDialog.tsx", "components/WorktreeDialog.tsx", "components/DirectoryBrowser.tsx", "components/RecentFolderChips.tsx", "components/SessionHistory.tsx", "lib/sessionHistory.ts"],
-  files: ["components/FileViewer.tsx", "components/FilesDialog.tsx", "components/FileReader.tsx", "components/TextFileView.tsx", "components/FilePathLink.tsx", "components/FilePanelResizer.tsx", "components/HighlightedCode.tsx", "components/RepoDiffViewer.tsx", "components/RepoChanges.tsx", "components/RepoDiff.tsx", "lib/repoDiff.ts", "components/WebPanel.tsx"],
-  devices: ["components/DevicesPanel.tsx", "components/PhonePanel.tsx", "components/PortalPanel.tsx", "components/PushTestControls.tsx", "components/AccessGate.tsx", "components/LanExposureNotice.tsx", "lib/install.ts"],
-  usage: ["components/UsageSettings.tsx", "components/UsageAccountDialog.tsx", "components/UsageLocalLogin.tsx", "components/UsageHubConnect.tsx", "components/CLIProxyLogin.tsx", "components/UsageMeters.tsx", "lib/usage.ts"],
+  composer: ["components/Composer.tsx", "components/ReplyComments.tsx", "components/ComposerNotices.tsx", "components/VoiceInput.tsx", "components/SecretInput.tsx", "components/TerminalInput.tsx", "components/PendingMessages.tsx", "lib/compose.ts", "components/PromptCard.tsx", "lib/promptAnswer.ts", "../shared/card-text.ts"],
+  chat: ["components/ChatView.tsx", "lib/chatImages.ts", "components/SentWaiting.tsx", "components/Markdown.tsx", "components/MermaidLightbox.tsx", "components/ChatMinimap.tsx", "components/ImageLightbox.tsx", "components/BackgroundTasks.tsx", "components/BackgroundAgentDetail.tsx", "components/Artifacts.tsx", "components/OmpBtw.tsx", "components/MarkdownLinkMenu.tsx", "lib/workBlocks.ts", "lib/toolVerbs.ts", "lib/outcomeChip.ts", "lib/chatTimestamp.ts", "lib/chatReadDeadline.ts", "components/ConversationSearch.tsx"],
+  sidebar: ["components/Sidebar.tsx", "components/AgentSidebar.tsx", "components/SidebarResizer.tsx", "components/SidebarSplit.tsx", "components/FoldHelpersRow.tsx"],
+  machines: ["components/MachineSidebar.tsx", "components/MachineDialog.tsx", "lib/bridgeProgress.ts", "components/MachineStats.tsx", "lib/systemReport.ts"],
+  workspace: ["components/NewSessionDialog.tsx", "components/WorktreeDialog.tsx", "components/DirectoryBrowser.tsx", "components/RecentFolderChips.tsx", "components/SessionHistory.tsx", "lib/sessionHistory.ts", "lib/useAgentSkills.ts"],
+  files: ["components/FileViewer.tsx", "components/RelayRenderedPage.tsx", "components/FilesDialog.tsx", "components/FileReader.tsx", "components/TextFileView.tsx", "components/TextFileEditor.tsx", "components/FilePathLink.tsx", "components/FilePanelResizer.tsx", "components/HighlightedCode.tsx", "components/RepoDiffViewer.tsx", "components/RepoChanges.tsx", "components/RepoDiff.tsx", "lib/repoDiff.ts", "lib/diffLineNotes.ts", "components/WebPanel.tsx", "components/PullRequestPanel.tsx", "lib/pullRequest.ts", "components/FileTextSizeRow.tsx", "components/FilesPanelRow.tsx", "components/MarkdownDocuments.tsx", "components/MarkdownOutline.tsx"],
+  devices: ["components/DevicesPanel.tsx", "components/ConnectPhoneDialog.tsx", "components/CompactPair.tsx", "components/PhonePanel.tsx", "components/PortalPanel.tsx", "components/RelayPanel.tsx", "components/PortalAuth.tsx", "components/PortalInvite.tsx", "components/PushTestControls.tsx", "components/AccessGate.tsx", "components/LanExposureNotice.tsx", "components/DevicePairedNotice.tsx", "components/InstallHint.tsx", "lib/install.ts", "lib/installHint.ts", "lib/portalAuth.ts", "../shared/portal.ts"],
+  usage: ["components/UsageAccountDialog.tsx", "components/UsageSignInDialog.tsx", "components/UsageLocalLogin.tsx", "components/UsageHubConnect.tsx", "components/CLIProxyLogin.tsx", "components/UsageMeters.tsx", "components/UsageRemoveAccount.tsx", "lib/usage.ts"],
   updates: ["components/UpdateControls.tsx", "lib/updateProgress.ts"],
   palette: ["components/CommandPalette.tsx"],
+  setup: ["components/AgentSetupCard.tsx", "components/AddAgentPanel.tsx", "components/AgentTile.tsx", "components/AgentsSettings.tsx"],
+  guide: ["components/SetupGuide.tsx"],
+  relay: ["components/RelayShell.tsx", "components/AccountPcs.tsx", "lib/relay/shell.tsx"],
+  "runtime-move": ["components/RuntimeMove.tsx", "components/RuntimeMoveViews.tsx", "lib/runtimeMove.ts"],
 };
 
 /** Parts in src/lib/i18n/ hold the keys only one feature uses; the base dictionary holds the rest. */

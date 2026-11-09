@@ -1,7 +1,9 @@
 /**
  * Earlier sessions of a folder, read from each agent's own store, newest first (#1314).
  *
- * Bounded by the #1147 rules: at most the first 64 KiB of any file is read; at most 65536 directory
+ * Bounded by the #1147 rules: at most the first 64 KiB of non-Pi files is read. Pi alone uses the
+ * asynchronous bounded streaming reader in pi-session-metadata.ts (its work/deadline policy
+ * is documented there), to find late names and prompts without retaining history. At most 65536 directory
  * entries are walked per listing (taken or passed over) and at most 16384 lstats time the entries
  * taken (a session file one, a Grok session folder three), and the entries taken are all ordered by
  * time before any is checked, so the newest of them are checked first whatever the readdir order (a
@@ -13,13 +15,13 @@
  * (realpath) and refused when it lands outside the agent's store, nested subagent files
  * included: only a store's own session files are listed, never a file a link makes look like
  * one. SQLite stores are opened read-only and asked for at most 50 sessions, their text cut in
- * the query. Nothing here starts an agent or reads a whole transcript.
+ * the query. Nothing here starts an agent or loads a whole transcript into memory.
  *
  * A row's first message is prompt text: the route returns it only to a connection that may
  * drive (session-history-routes.ts), and it is never logged.
  */
 import { constants as sqliteConstants, Database } from "bun:sqlite";
-import { closeSync, constants, fstatSync, lstatSync, opendirSync, openSync, readSync, realpathSync, statSync, type BigIntStats, type Dir, type Dirent, type Stats } from "node:fs";
+import { closeSync, constants, fstat, fstatSync, lstatSync, opendirSync, open, openSync, readSync, realpathSync, statSync, type BigIntStats, type Dir, type Dirent, type Stats } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -30,9 +32,13 @@ import { claudeProjectDir } from "./claude-store.ts";
 import { cmdSlug } from "./cmd.ts";
 import { grokSessionGroups } from "./grok-store.ts";
 import { directoryKey, interactiveCodexRollout, storedCwds, withoutVerbatimPrefix } from "./codex.ts";
+import { hermesHome } from "./hermes-home.ts";
 import { opencodeDatabasePath } from "./opencode.ts";
+import { environmentHome } from "./user-home.ts";
+import { defaultPiSessionReader, PI_CACHE_ENTRIES, PI_HEADER_DEADLINE_MS, PiMetadataBusy, PiMetadataDeadline, type PiSessionReader } from "./pi-session-metadata.ts";
+import type { PiLabel } from "./pi-session-label.ts";
 
-/** At most this much of any one file is read. */
+/** At most this much of any one non-Pi file is read. */
 export const HEAD_BYTES = 64 * 1024;
 /**
  * At most this many checks for one listing. A check is one session file's resolution with its stat
@@ -73,7 +79,9 @@ export interface SessionHistoryOptions {
   codexHome?: string;
   opencodeDb?: string;
   hermesHome?: string;
-  /** Reads at most `max` bytes from the start of the checked file, opened (tests count the bytes): it gets the descriptor alone. */
+  /** Pi's streaming reader and bounded stat-keyed label cache; createServer owns and closes one. */
+  piReader?: PiSessionReader;
+  /** Reads at most `max` bytes from the start of a checked non-Pi file (tests count bytes): descriptor only. */
   readHead?: (fd: number, max: number) => Buffer;
   /** Stats a path the listing looks at (tests count the calls). */
   stat?: (path: string, bigint?: boolean) => Stats | BigIntStats;
@@ -211,6 +219,26 @@ function openChecked(budget: Budget, file: { real: string; dev: bigint; ino: big
   } catch (error) { closeSync(fd); throw error; }
 }
 
+const defaultFstat = (fd: number, bigint?: boolean): Stats | BigIntStats => bigint ? fstatSync(fd, { bigint: true }) : fstatSync(fd);
+
+/** Pi opens and checks asynchronously too; custom fstat seams stay on the test's calling thread. */
+async function openPiChecked(budget: Budget, file: Found, checkActive: () => void): Promise<number | null> {
+  const fd = await new Promise<number | null>((done, fail) => open(file.real, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0), (error, fd) => {
+    if (error?.code === "ELOOP") done(null);
+    else if (error) fail(error);
+    else done(fd);
+  }));
+  if (fd === null) return null;
+  try {
+    checkActive();
+    const opened = budget.fstatOf !== defaultFstat ? budget.fstatOf(fd, true)
+      : await new Promise<BigIntStats>((done, fail) => fstat(fd, { bigint: true }, (error, stat) => error ? fail(error) : done(stat)));
+    checkActive();
+    if (!opened.isFile() || bigintOf(opened.dev) !== file.dev || bigintOf(opened.ino) !== file.ino) { closeSync(fd); return null; }
+    return fd;
+  } catch (error) { closeSync(fd); throw error; }
+}
+
 /**
  * One listing's bounds: every check of a path (store, folder, file or database), a resolution or a
  * stat, counts against MAX_STATS whatever it finds, and every directory entry read against MAX_ENTRIES.
@@ -224,7 +252,7 @@ class Budget {
     readonly platform: NodeJS.Platform,
     private readonly resolveOf: (path: string) => string = realpathSync,
     private readonly lstatOf: (path: string) => Stats = lstatSync,
-    readonly fstatOf: (fd: number, bigint?: boolean) => Stats | BigIntStats = (fd, bigint) => bigint ? fstatSync(fd, { bigint: true }) : fstatSync(fd),
+    readonly fstatOf: (fd: number, bigint?: boolean) => Stats | BigIntStats = defaultFstat,
     private readonly opendirOf: (dir: string) => Dir = opendirSync,
     readonly onOpened: (path: string, immutable: boolean, db: Database) => void = () => {},
   ) {}
@@ -469,6 +497,76 @@ function piFamilyRow(agent: SessionHistoryAgent, scan: Scan, file: Found, cwds: 
     }
   }
   return row(agent, id, { title, firstMessage, startedAt: iso(header.timestamp), updatedAt: new Date(file.mtimeMs).toISOString() });
+}
+
+async function piSessions(sessions: string, folders: readonly string[], cwds: readonly string[], budget: Budget, reader: PiSessionReader): Promise<Row[]> {
+  const scan = scanOf(budget, sessions, undefined);
+  const directories = folders.map((folder) => join(sessions, folder));
+  const files = scan === null ? [] : sessionFiles(scan, directories);
+  const scope = JSON.stringify(directories.map((directory) => resolve(directory)));
+  reader.retain(scope, files.map((file) => file.real));
+  if (scan === null) return [];
+  const deadline = performance.now() + reader.listingDeadlineMs;
+  const headerDeadline = performance.now() + Math.max(PI_HEADER_DEADLINE_MS, reader.listingDeadlineMs);
+  const rows: Row[] = [];
+  const selected: Array<{ index: number; file: Found; header: NonNullable<PiLabel["header"]> }> = [];
+  let incomplete = false;
+  let unfinishedHeaders = 0;
+  let cacheTouches = 0;
+  const headerCacheLimit = Math.floor(PI_CACHE_ENTRIES * 3 / 4);
+  // Establish rows before a large transcript can consume the label budget. Header work has
+  // both byte and elapsed-time bounds; an unknown header must never imply an empty store.
+  for (const file of files) {
+    // Every retained entry touch counts, with a quarter of the cache capacity left in reserve.
+    // Label scans revisit this same set, so one traversal cannot evict its own checkpoints.
+    if (rows.length >= MAX_ROWS) break;
+    if (unfinishedHeaders >= MAX_ROWS || cacheTouches >= headerCacheLimit) { incomplete = true; break; }
+    let rejected = false;
+    let retainedHeaderless = false;
+    try {
+      const label = await reader.read((checkActive) => openPiChecked(budget, file, checkActive), headerDeadline, {
+        path: file.real, scope,
+        headerless: () => { retainedHeaderless = true; },
+        // Reject ineligible headers before caching them, and spend folder-identity checks once.
+        acceptHeader: (header) => {
+          rejected = !PI_VERSIONS.has(header.version) || header.id === "" || header.cwd === "" || !cwdMatches(budget, header.cwd, cwds);
+          return !rejected;
+        },
+      }, "header");
+      const header = label?.header;
+      if (label && header) {
+        rows.push(row("pi", header.id, { title: label.title, firstMessage: label.firstMessage, startedAt: iso(header.timestamp), updatedAt: new Date(file.mtimeMs).toISOString() }));
+        // A row already labelled is complete; rescanning it would spend the label deadline
+        // ahead of the unfinished rows after it on every open.
+        if (label.title === null && label.firstMessage === null) selected.push({ index: rows.length - 1, file, header });
+      } else if (label) { incomplete = true; unfinishedHeaders++; }
+      else rejected = !retainedHeaderless;
+    } catch (error) {
+      if (!(error instanceof PiMetadataBusy) || error.reason === "stopped" || error.reason === "queue") throw error;
+      incomplete = true;
+    } finally {
+      // Only rejected and single-chunk headerless files are uncached and free.
+      if (!rejected) cacheTouches++;
+    }
+  }
+  if (rows.length === 0 && incomplete) throw new PiMetadataBusy();
+  // A slow header pass must not starve labels on every open: keep a quarter of the listing
+  // deadline for label reads, so each listing still makes bounded progress.
+  const labelDeadline = Math.max(deadline, performance.now() + reader.listingDeadlineMs / 4);
+  for (const { index, file, header: checked } of selected) {
+    try {
+      const label = await reader.read((checkActive) => openPiChecked(budget, file, checkActive), labelDeadline, { path: file.real, scope });
+      const header = label?.header;
+      // The header pass already proved eligibility, even if it spent the last identity checks.
+      // A changed identity must not replace that established row during this listing.
+      if (!label || !header || header.id !== checked.id || header.cwd !== checked.cwd || header.version !== checked.version) continue;
+      rows[index] = row("pi", header.id, { title: label.title, firstMessage: label.firstMessage, startedAt: iso(header.timestamp), updatedAt: new Date(file.mtimeMs).toISOString() });
+    } catch (error) {
+      if (!(error instanceof PiMetadataBusy) || error.reason === "stopped") throw error;
+      if (error instanceof PiMetadataDeadline || error.reason === "queue") break;
+    }
+  }
+  return rows;
 }
 
 function piFamily(agent: SessionHistoryAgent, sessions: string, folders: readonly string[], cwds: readonly string[], budget: Budget, read: SessionHistoryOptions["readHead"], idFromName = false): Row[] {
@@ -849,6 +947,63 @@ function opencodeSessions(cwds: readonly string[], storeDir: string, path: strin
   }) ?? [];
 }
 
+/**
+ * The children Hermes lists as conversations of their own, each opened by `hermes --resume <its id>`:
+ * a /branch and a gateway reset (hermes-agent 354724fb, hermes_state_common.py _LISTABLE_CHILD_SQL;
+ * scripts/hermes-history-schema-probe.ts recorded it in server/fixtures/hermes-history/evidence.json).
+ * A marker counts only when it names the row's own parent: a compression continuation inherits its
+ * parent's model_config, markers included (as Hermes's own _non_continuation_child_sql reads them).
+ * An older row with no marker key is a branch when its parent ended "branched" before it started, or
+ * a reset when its parent ended at a reset and both carry the same routing key. Delegated runs, tool
+ * sessions, continuations and any child whose model_config is no JSON or holds another marker value
+ * stay hidden. Hermes's own list is looser (it shows a continuation that inherited a branch marker).
+ * A child is listed only when `hermes --resume` opens it as itself. resolve_resume_session_id first
+ * follows the compression chain (get_compression_tip: an unmarked, non-reset child of a row that
+ * ended "compression"), then walks the newest unmarked child at each step, through rows with no
+ * messages, to the deepest one with messages. So an older branch branched again, or a legacy branch
+ * Hermes compressed later, is left out: it resumes as another row. A /branch or a reset compressed
+ * later stays listed and opens there, before the compression: its continuation inherits the marker,
+ * which the chain step skips.
+ * Children are listed only from a store whose schema_version the probe proved, or an older one; a
+ * newer store lists its roots until the probe is run against that release.
+ */
+const HERMES_PROVEN_SCHEMA = 31;
+/**
+ * How many of the folder's newest roots and admitted children the resume walk examines: the walk runs
+ * on these alone, never on every row of the store. When more of them than MAX_ROWS resume as another
+ * row, the list is shorter than MAX_ROWS.
+ */
+export const HERMES_CANDIDATES = MAX_ROWS * 4;
+const HERMES_CHILD_COLUMNS = ["parent_session_id", "model_config", "source", "session_key", "started_at", "ended_at", "end_reason"];
+const HERMES_RESET_END_REASONS = ["session_reset", "session_switch", "idle", "daily", "suspended", "resume_pending_expired"];
+const hermesConfig = "(CASE WHEN json_valid(s.model_config) THEN s.model_config ELSE NULL END)";
+const hermesMarker = (name: string) => `json_type(${hermesConfig}, '$.${name}')`;
+/** a root, or a child Hermes lists as a branch or a reset of its parent */
+const HERMES_ADMITTED = `(s.parent_session_id IS NULL OR (coalesce(s.source, '') != 'tool' AND EXISTS (
+  SELECT 1 FROM sessions p WHERE p.id = s.parent_session_id AND (
+    (${hermesMarker("_delegate_from")} IS NULL AND (
+      (${hermesMarker("_branched_from")} = 'text' AND json_extract(${hermesConfig}, '$._branched_from') = p.id)
+      OR (${hermesMarker("_reset_from")} = 'text' AND json_extract(${hermesConfig}, '$._reset_from') = p.id)))
+    OR ((s.model_config IS NULL OR (json_type(${hermesConfig}) = 'object'
+        AND ${hermesMarker("_branched_from")} IS NULL AND ${hermesMarker("_reset_from")} IS NULL AND ${hermesMarker("_delegate_from")} IS NULL))
+      AND ((p.end_reason = 'branched' AND s.started_at >= p.ended_at)
+        OR (p.end_reason IN (${HERMES_RESET_END_REASONS.map((reason) => `'${reason}'`).join(", ")})
+          AND coalesce(s.session_key, '') != '' AND s.session_key = p.session_key))))
+)))`;
+/** a root, or a child `hermes --resume` opens as itself: no compression continuation to follow, and nothing past it in the walk has messages */
+const HERMES_RESUMES_ITSELF = `(s.parent_session_id IS NULL OR NOT EXISTS (
+  WITH RECURSIVE walk(id, depth) AS (
+    SELECT s.id, 0
+    UNION ALL
+    SELECT (SELECT c.id FROM sessions c WHERE c.parent_session_id = walk.id AND coalesce(c.source, '') != 'tool'
+        AND ${["_branched_from", "_delegate_from", "_reset_from"].map((name) => `json_extract(CASE WHEN json_valid(c.model_config) THEN c.model_config ELSE '{}' END, '$.${name}') IS NULL`).join(" AND ")}
+        AND NOT EXISTS (SELECT 1 FROM sessions r WHERE r.id = c.parent_session_id AND r.end_reason IN (${HERMES_RESET_END_REASONS.map((reason) => `'${reason}'`).join(", ")})
+          AND coalesce(c.session_key, '') != '' AND c.session_key = r.session_key)
+        ORDER BY c.started_at DESC, c.id DESC LIMIT 1), depth + 1
+    FROM walk WHERE walk.id IS NOT NULL AND depth < 31)
+  SELECT 1 FROM walk w WHERE w.depth > 0 AND w.id IS NOT NULL
+    AND ((w.depth = 1 AND s.end_reason = 'compression') OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id = w.id))))`;
+
 function hermesSessions(cwds: readonly string[], hermesHome: string, budget: Budget): Row[] {
   return withDatabase(budget, hermesHome, join(hermesHome, "state.db"), (db) => {
     if (!tableExists(db, "sessions")) return [];
@@ -856,11 +1011,21 @@ function hermesSessions(cwds: readonly string[], hermesHome: string, budget: Bud
     if (!columns.has("cwd")) return [];
     const spellings = spellingsOf(cwds);
     const updated = ["last_activity_at", "ended_at"].filter((name) => columns.has(name));
-    const updatedAt = `coalesce(${[...updated, "started_at"].join(", ")})`;
-    const sessions = db.query<{ id: string; title: string | null; started: number; updated: number }, string[]>(
-      `SELECT id, ${columns.has("title") ? `substr(title, 1, ${TITLE_CHARS * 4})` : "NULL"} AS title, started_at AS started, ${updatedAt} AS updated
-       FROM sessions WHERE cwd IN (${placeholders(spellings)})${columns.has("parent_session_id") ? " AND parent_session_id IS NULL" : ""}
-       ORDER BY updated DESC LIMIT ${MAX_ROWS}`,
+    const updatedAt = `coalesce(${[...updated, "started_at"].map((name) => `s.${name}`).join(", ")})`;
+    // a store of an unproven schema, or without every column the children are told apart by, lists its roots alone
+    const schema = tableExists(db, "schema_version") ? db.query<{ version: number | null }, []>("SELECT max(version) AS version FROM schema_version").get()?.version ?? null : null;
+    const proven = typeof schema === "number" && schema <= HERMES_PROVEN_SCHEMA && HERMES_CHILD_COLUMNS.every((name) => columns.has(name)) && tableExists(db, "messages");
+    const title = columns.has("title") ? `substr(s.title, 1, ${TITLE_CHARS * 4})` : "NULL";
+    const folder = `FROM sessions s WHERE s.cwd IN (${placeholders(spellings)})`;
+    // the resume walk runs on the newest HERMES_CANDIDATES admitted rows of the folder, after its cheap rules
+    const sessions = db.query<{ id: string; title: string | null; started: number; updated: number }, string[]>(proven
+      ? `SELECT s.id AS id, s.title AS title, s.started AS started, s.updated AS updated FROM (
+           SELECT s.id AS id, s.parent_session_id AS parent_session_id, s.end_reason AS end_reason, ${title} AS title, s.started_at AS started, ${updatedAt} AS updated
+           ${folder} AND ${HERMES_ADMITTED} ORDER BY updated DESC LIMIT ${HERMES_CANDIDATES}) s
+         WHERE ${HERMES_RESUMES_ITSELF} ORDER BY s.updated DESC LIMIT ${MAX_ROWS}`
+      : `SELECT s.id AS id, ${title} AS title, s.started_at AS started, ${updatedAt} AS updated
+         ${folder}${columns.has("parent_session_id") ? " AND s.parent_session_id IS NULL" : ""}
+         ORDER BY updated DESC LIMIT ${MAX_ROWS}`,
     ).all(...spellings);
     const first = tableExists(db, "messages")
       ? db.query<{ content: string | null }, [string]>(`SELECT substr(content, 1, ${HEAD_BYTES}) AS content FROM messages WHERE session_id = ? AND role = 'user' ORDER BY id LIMIT 1`)
@@ -945,9 +1110,13 @@ function agySessions(cwds: readonly string[], home: string, budget: Budget, read
  * The earlier sessions of `agent` in the folder `cwd`, newest first, from the agent's own store.
  * An absent, unreadable or foreign store lists nothing.
  */
-export function listSessions(agent: SessionHistoryAgent, cwd: string, options: SessionHistoryOptions = {}): Row[] {
+export function listSessions(agent: "pi", cwd: string, options?: SessionHistoryOptions): Promise<Row[]>;
+export function listSessions(agent: Exclude<SessionHistoryAgent, "pi">, cwd: string, options?: SessionHistoryOptions): Row[];
+export function listSessions(agent: SessionHistoryAgent, cwd: string, options?: SessionHistoryOptions): Row[] | Promise<Row[]>;
+export function listSessions(agent: SessionHistoryAgent, cwd: string, options: SessionHistoryOptions = {}): Row[] | Promise<Row[]> {
   const env = options.env ?? process.env;
-  const home = options.home ?? homedir();
+  // the OS's answer when the environment names no home, as before: never a relative store path
+  const home = options.home ?? (environmentHome(env, options.platform ?? process.platform) || homedir());
   const read = options.readHead;
   const budget = new Budget(options.stat ?? ((path, bigint) => bigint ? statSync(path, { bigint: true }) : statSync(path)), options.platform ?? process.platform, options.resolve, options.lstat, options.fstat, options.opendir, options.opened);
   budget.used = options.spent ?? 0;
@@ -961,13 +1130,13 @@ export function listSessions(agent: SessionHistoryAgent, cwd: string, options: S
   // omp and gjc key by paths relative to home and the temp dir, each canonical as omp resolves it
   const spellings = (path: string) => [...new Set([path, budget.canonical(path, realpath)])];
   const ompFolders = () => ompSessionFolders(cwds, spellings(home), spellings(options.tmpdir ?? tmpdir()), budget.platform);
-  const rows = ((): Row[] => {
+  const rows = ((): Row[] | Promise<Row[]> => {
     switch (agent) {
       case "claude": return claudeSessions(cwds, home, env, budget, read);
       case "codex": return codexSessions(cwds, options.codexHome ?? (env["CODEX_HOME"] || join(home, ".codex")), budget, read);
       case "pi": {
         const sessions = env["PI_CODING_AGENT_SESSION_DIR"] || join(env["PI_CODING_AGENT_DIR"] || join(home, ".pi", "agent"), "sessions");
-        return piFamily("pi", sessions, keys((spelling) => piSessionFolder(spelling, budget.platform)), cwds, budget, read);
+        return piSessions(sessions, keys((spelling) => piSessionFolder(spelling, budget.platform)), cwds, budget, options.piReader ?? defaultPiSessionReader);
       }
       case "omo": {
         // senpi takes the first of these that is set (server/omo.ts omoAgentDir)
@@ -983,11 +1152,12 @@ export function listSessions(agent: SessionHistoryAgent, cwd: string, options: S
         const data = join(env["XDG_DATA_HOME"] || join(home, ".local", "share"), "opencode");
         return opencodeSessions(cwds, named ? dirname(named) : data, named ?? opencodeDatabasePath(env, home), budget);
       }
-      case "hermes": return hermesSessions(cwds, options.hermesHome ?? (env["HERMES_HOME"] || join(home, ".hermes")), budget);
+      case "hermes": return hermesSessions(cwds, options.hermesHome ?? hermesHome(home, env, budget.platform, (path) => budget.stat(path) !== null), budget);
       case "devin": return devinSessions(cwds, join(env["XDG_DATA_HOME"] || join(home, ".local", "share"), "devin", "cli", "sessions.db"), budget);
       case "grok": return grokSessions(cwds, home, env, budget, read);
       case "agy": return agySessions(cwds, home, budget, read);
     }
   })();
-  return rows.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, MAX_ROWS);
+  const sorted = (rows: Row[]) => rows.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, MAX_ROWS);
+  return rows instanceof Promise ? rows.then(sorted) : sorted(rows);
 }

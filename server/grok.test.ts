@@ -5,8 +5,8 @@ import * as fs from "node:fs";
 import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { forgetTranscriptState, HistoryChanged, transcriptPage } from "./conversation.ts";
-import { grokToolOutput, grokProjection, GrokUnavailable, parseGrokTranscript } from "./grok.ts";
+import { ConversationReadPending, forgetTranscriptState, HistoryChanged, transcriptPage, transcriptToolOutput } from "./conversation.ts";
+import { grokImage, grokToolOutput, grokProjection, GrokUnavailable, parseGrokTranscript } from "./grok.ts";
 import { darwinProcess } from "./claude-store.ts";
 import { grokHeldSessionsFromLsof, grokHomeFromEnvironment, grokLsofEvidence, grokPaneProcesses, grokTranscriptPath, isGrokExecutable, resolveGrokStore } from "./grok-store.ts";
 import * as herdr from "./herdr/client.ts";
@@ -22,7 +22,8 @@ const update = (output: string, id = "call-1") => event({ sessionUpdate: "tool_c
 type Tool = Extract<ConversationPart, { kind: "tool" }>;
 let root: string, path: string;
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "herdr-grok-unit-"));
+  // canonical, as grokImage requires of a session path (macOS tmpdir() is under the /var link)
+  root = realpathSync(mkdtempSync(join(tmpdir(), "herdr-grok-unit-")));
   path = join(root, "sessions", "%2Ffiction", session, "updates.jsonl");
   mkdirSync(join(path, ".."), { recursive: true });
   forgetTranscriptState();
@@ -57,6 +58,61 @@ describe("Grok native event adapter", () => {
     expect(JSON.parse(part.input).variant).toBe("Bash");
     expect(part.output).toBe("FICTIONAL_TOOL_OUTPUT\n");
     expect(page().turns.at(-1)!.parts.at(-1)).toEqual({ kind: "text", text: "FICTIONAL_AFTER_TOOL", phase: "final_answer" });
+  });
+  test("names the pictures a recorded 1.0.67 session sent and read, and reads each back by its digest", async () => {
+    const recorded = readFileSync(new URL("./fixtures/grok/pictures-1.0.67.jsonl", import.meta.url), "utf8");
+    const red = "grok-image:db47bba5fe6470a832370fa0ca3cbfd9194dd1e36eaa3d67fdd33bea01d4b66a";
+    const blue = "grok-image:c75fe07b33afb7b182fa53cd500727a7cfa1699443a17d87d053d6536ad65438";
+    const own = join(root, "sessions", "%2Ftmp%2Fgrok-proj", "01a19135-9ed8-7802-9f7f-c2c74a10a956", "updates.jsonl");
+    mkdirSync(dirname(own), { recursive: true });
+    writeFileSync(own, recorded);
+    const turns = transcriptPage("grok-transcript", own).turns;
+    expect(turns.map((turn) => turn.role)).toEqual(["user", "assistant"]);
+    expect(turns[0]!.parts.slice(1)).toEqual([{ kind: "image", media_type: "image/png", ref: red }]);
+    expect(turns[1]!.parts.find((part) => part.kind === "tool")).toMatchObject({ name: "read_file", images: [{ media_type: "image/png", ref: blue }] });
+    for (const ref of [red, blue]) {
+      const image = await grokImage(own, ref);
+      expect(image?.mediaType).toBe("image/png");
+      expect(new Bun.CryptoHasher("sha256").update(image!.bytes).digest("hex")).toBe(ref.slice("grok-image:".length));
+    }
+    expect(await grokImage(own, `grok-image:${"0".repeat(64)}`)).toBeNull();
+    // escaped JSON names the same picture, and the endpoint finds it as the parser does
+    // Grok only appends: a rewrite here starts the reader afresh
+    writeFileSync(own, recorded.replace('"content":{"type":"image","data"', '"content":{"type":"im\\u0061ge","data"'));
+    forgetTranscriptState();
+    expect(transcriptPage("grok-transcript", own).turns[0]!.parts.slice(1)).toEqual([{ kind: "image", media_type: "image/png", ref: red }]);
+    expect((await grokImage(own, red))?.mediaType).toBe("image/png");
+    writeFileSync(own, recorded);
+    forgetTranscriptState();
+    // a prompt rewound while the lookup reads is not served
+    const rewound = JSON.stringify({ timestamp: 1700000000, method: "_x.ai/session/update", params: { sessionId: "01a19135-9ed8-7802-9f7f-c2c74a10a956", update: { sessionUpdate: "rewind_marker", target_prompt_index: 0 } } }) + "\n";
+    const reading = grokImage(own, red);
+    appendFileSync(own, rewound);
+    expect(await reading).toBeNull();
+    writeFileSync(own, recorded);
+    forgetTranscriptState();
+    // a file moved into the path while the lookup reads is not the one it read: nothing is served
+    const swapping = grokImage(own, red);
+    writeFileSync(`${own}.next`, recorded.replace(/"type":"image","data":"[^"]*","mimeType":"image\/png"/, '"type":"text","text":"gone"'));
+    renameSync(`${own}.next`, own);
+    expect(await swapping).toBeNull();
+    writeFileSync(own, recorded);
+    forgetTranscriptState();
+    // a prompt rewound away leaves the active history: its picture is no longer served
+    appendFileSync(own, JSON.stringify({ timestamp: 1700000000, method: "_x.ai/session/update", params: { sessionId: "01a19135-9ed8-7802-9f7f-c2c74a10a956", update: { sessionUpdate: "rewind_marker", target_prompt_index: 0 } } }) + "\n");
+    expect(await grokImage(own, red)).toBeNull();
+  });
+  test("serves a real session file's picture but not a symlinked session file's", async () => {
+    const recorded = readFileSync(new URL("./fixtures/grok/pictures-1.0.67.jsonl", import.meta.url), "utf8")
+      .replaceAll("01a19135-9ed8-7802-9f7f-c2c74a10a956", session);
+    const ref = "grok-image:db47bba5fe6470a832370fa0ca3cbfd9194dd1e36eaa3d67fdd33bea01d4b66a";
+    const real = join(realpathSync(dirname(path)), "real.jsonl");
+    writeFileSync(real, recorded);
+    symlinkSync(real, path);
+    const image = await grokImage(real, ref);
+    expect(image?.mediaType).toBe("image/png");
+    expect(new Bun.CryptoHasher("sha256").update(image!.bytes).digest("hex")).toBe(ref.slice("grok-image:".length));
+    expect(await grokImage(path, ref)).toBeNull();
   });
   test("text chunks, hidden boundaries and synthetic prompts", () => {
     const turns = parseGrokTranscript(user(0, "hello ") + user(0, "world") + answer("one ") + answer("two") + user(1, "hidden", { hideFromScrollback: true }) + answer("separate answer") + user(2, "visible", { syntheticPrompt: true }));
@@ -180,6 +236,90 @@ describe("shared pager projection", () => {
     expect(page().turns.at(-1)!.parts).toEqual([{ kind: "text", text: "hello 🌍" }]);
     expect(page().metadata.model).toBe("fictional-model");
   });
+  test("projects nothing from another session that a folder swap puts at the path around the projection's open", () => {
+    writeFileSync(path, user(0, "the pane's prompt") + answer("the pane's answer"));
+    const folder = dirname(path);
+    const elsewhere = join(root, "elsewhere");
+    const away = join(root, "away");
+    mkdirSync(elsewhere);
+    writeFileSync(join(elsewhere, "updates.jsonl"), user(0, "FOREIGN prompt...") + answer("FOREIGN answer..."));
+    // only the first open of the path, the projection's, meets the other session's folder
+    let opens = 0;
+    const real = fs.openSync;
+    const spy = spyOn(fs, "openSync").mockImplementation(((...args: Parameters<typeof fs.openSync>) => {
+      if (args[0] !== path || opens++ > 0) return real(...args);
+      renameSync(folder, away);
+      renameSync(elsewhere, folder);
+      try { return real(...args); }
+      finally {
+        renameSync(folder, elsewhere);
+        renameSync(away, folder);
+      }
+    }) as typeof fs.openSync);
+    let answered: unknown;
+    try { answered = page(); } catch (error) { answered = error; } finally { spy.mockRestore(); }
+    expect(opens).toBeGreaterThan(0);
+    expect(JSON.stringify(answered)).not.toContain("FOREIGN");
+    expect(answered).toBeInstanceOf(ConversationReadPending);
+  });
+  test("keeps no failure on the transcript's index from another session's bytes a folder swap shows an unbound projection", () => {
+    writeFileSync(path, user(0, "the pane's prompt") + answer("the pane's answer"));
+    const folder = dirname(path);
+    const elsewhere = join(root, "elsewhere");
+    const away = join(root, "away");
+    mkdirSync(elsewhere);
+    writeFileSync(join(elsewhere, "updates.jsonl"), "{ not a record\n");
+    // a lookup outside any page (an image, a tool output) projects while the other folder is in place for its open
+    let swaps = 0;
+    const real = fs.openSync;
+    const spy = spyOn(fs, "openSync").mockImplementation(((...args: Parameters<typeof fs.openSync>) => {
+      if (args[0] !== path || swaps++ > 0) return real(...args);
+      renameSync(folder, away);
+      renameSync(elsewhere, folder);
+      try { return real(...args); }
+      finally {
+        renameSync(folder, elsewhere);
+        renameSync(away, folder);
+      }
+    }) as typeof fs.openSync);
+    try { expect(() => grokProjection(path, statSync(path))).toThrow(GrokUnavailable); } finally { spy.mockRestore(); }
+    expect(swaps).toBe(1);
+    // the pane's own file reads as it is
+    expect(page().turns.flatMap((turn) => turn.parts)).toEqual([{ kind: "text", text: "the pane's prompt" }, { kind: "text", text: "the pane's answer" }]);
+  });
+  test("serves no tool output from another session that a folder swap puts at the path around the lookup's opens after its first", () => {
+    writeFileSync(path, user(0) + tool() + update("own ".repeat(1500)));
+    const ref = lastTool().output_ref!;
+    const folder = dirname(path);
+    const elsewhere = join(root, "elsewhere");
+    const away = join(root, "away");
+    mkdirSync(elsewhere);
+    // the same records and length: only the output's bytes tell the files apart
+    writeFileSync(join(elsewhere, "updates.jsonl"), user(0) + tool() + update("FRGN".repeat(1500)));
+    expect(transcriptToolOutput("grok-transcript", path, ref)).toBe("own ".repeat(1500));
+    forgetTranscriptState();
+    // a cold lookup: the path names the pane's own file when it begins and at its first open, the projection's
+    // (verified); the later open that reads the output meets the other folder
+    let opens = 0;
+    let swaps = 0;
+    const real = fs.openSync;
+    const spy = spyOn(fs, "openSync").mockImplementation(((...args: Parameters<typeof fs.openSync>) => {
+      if (args[0] !== path || opens++ === 0) return real(...args);
+      swaps++;
+      renameSync(folder, away);
+      renameSync(elsewhere, folder);
+      try { return real(...args); }
+      finally {
+        renameSync(folder, elsewhere);
+        renameSync(away, folder);
+      }
+    }) as typeof fs.openSync);
+    let answered: string | null;
+    try { answered = transcriptToolOutput("grok-transcript", path, ref); } finally { spy.mockRestore(); }
+    expect(opens).toBeGreaterThan(1);
+    expect(swaps).toBeGreaterThan(0);
+    expect(answered).toBeNull();
+  });
   test("truncation resets history and tool refs; refs cannot cross stores", () => {
     writeFileSync(path, user(0) + tool() + update("a".repeat(6000)));
     const first = page(); const ref = lastTool().output_ref!;
@@ -290,9 +430,12 @@ describe("exact store lookup", () => {
         held.push(nested);
       }
       const fds = held.map((file) => openSync(file, "r"));
-      const child = spawn(executable, ["-e", "process.stdin.resume()"], {
-        stdio: ["pipe", "ignore", "ignore", ...fds], env: { ...process.env, HOME: "/bridge-home", GROK_HOME: home },
+      // The child says so once its own script runs: Bun's "spawn" event can come before the exec,
+      // while /proc still shows this runtime's executable, environment and descriptors.
+      const child = spawn(executable, ["-e", "process.stdout.write('running\\n'); process.stdin.resume()"], {
+        stdio: ["pipe", "pipe", "ignore", ...fds], env: { ...process.env, HOME: "/bridge-home", GROK_HOME: home },
       });
+      const running = once(child.stdout!, "data", { signal: AbortSignal.timeout(10_000) });
       const pane: HerdrPane = {
         pane_id: "grok-fixture", agent: "grok", agent_status: "ready", focused: false,
         revision: 0, tab_id: "tab-fixture", terminal_id: "terminal-fixture", workspace_id: "workspace-fixture",
@@ -318,7 +461,7 @@ describe("exact store lookup", () => {
         },
       }));
       try {
-        await once(child, "spawn", { signal: AbortSignal.timeout(2000) });
+        await running;
         if (scenario.change === "unlink") unlinkSync(other);
         else if (scenario.change === "rename") renameSync(other, `${other}.old`);
         else if (scenario.change === "rename-away") renameSync(other, join(dirname(other), "old-events.jsonl"));

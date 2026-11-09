@@ -1,3 +1,4 @@
+import type { AccountOs } from "../../shared/account-asker.ts";
 import type { RemoteAccess } from "../../shared/protocol.ts";
 
 /** What the page knows about its own address. */
@@ -7,6 +8,8 @@ export interface PageLocation {
   origin: string;
   /** window.isSecureContext */
   secure: boolean;
+  /** the hosted relay shell (app.ovis.sh): its address is the shell's front page, never this PC's */
+  shell?: boolean;
 }
 
 /** What Settings → Phone shows: an address to open, a command to run, or what is in the way. */
@@ -27,13 +30,20 @@ export function isLoopbackHost(hostname: string): boolean {
 }
 
 export function phonePlan(page: PageLocation, access: RemoteAccess | null): PhonePlan {
-  if (page.protocol === "https:" && page.secure && !isLoopbackHost(page.hostname)) return { kind: "here", url: page.origin };
+  if (page.protocol === "https:" && page.secure && !page.shell && !isLoopbackHost(page.hostname)) return { kind: "here", url: page.origin };
   if (access === null) return { kind: "unknown" };
   const tailscale = access.tailscale;
   if (tailscale.state !== "running") return { kind: tailscale.state };
   if (tailscale.serving_url !== null) return { kind: "served", url: tailscale.serving_url };
   if (tailscale.serve_command !== null) return { kind: "command", command: tailscale.serve_command, url: tailscale.serve_url };
   return { kind: "unknown" };
+}
+
+/** The system a browser runs on, as the account service names it (shared/account-asker.ts), or null. */
+export function deviceOs(userAgent: string, maxTouchPoints = 0): AccountOs | null {
+  const ua = userAgent;
+  return /iPhone|iPad/.test(ua) || (/Macintosh/.test(ua) && maxTouchPoints > 1) ? "ios" : /Android/.test(ua) ? "android" : /Macintosh/.test(ua) ? "macos"
+    : /Windows/.test(ua) ? "windows" : /CrOS/.test(ua) ? "chromeos" : /Linux/.test(ua) ? "linux" : null;
 }
 
 /** A name for this device to pair under, from its user agent: "iPhone · Safari", "Windows · Chrome". */

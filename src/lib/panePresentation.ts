@@ -10,10 +10,10 @@ type ConversationProof = { source: ConversationResponse["source"] | undefined; h
 
 function finalAnswer(conversation: ConversationProof): ConversationTurn | undefined {
   let index = conversation.turns.length - 1;
-  // These Claude notices do not start another model turn. Runtime wakes and real prompts do.
+  // These Claude notices, and an OmO goal's wait, do not start another model turn. Runtime wakes and real prompts do.
   while (index >= 0) {
     const turn = conversation.turns[index];
-    if (turn?.role !== "user" || turn.parts.length === 0 || !turn.parts.every((part) =>
+    if (turn?.role !== "user" || turn.parts.length === 0 || !turn.parts.every((part) => part.kind === "goal_wait" ||
       part.kind === "notice" && (part.source === "informational" || part.source === "local-command"))) break;
     index--;
   }
@@ -70,10 +70,16 @@ export class ConversationFinishEvidence {
     const known = stored && stored.id > (remembered?.id ?? 0) ? stored : remembered ?? stored;
     if (known) {
       if (id < known.id) return false;
-      if (id === known.id && known.answer !== undefined) return answer === known.answer;
+      const previous = known.answer === undefined ? undefined : completedProof(known.answer), current = completedProof(answer);
+      if (id === known.id && known.answer !== undefined) {
+        if (answer === known.answer) return true;
+        // Codex dates the answer again when its task_complete lands later: the same answer, still this
+        // finish's. Only a native start time tells that turn from an older reply with the same text.
+        const started = finalAnswer(conversation)?.ts;
+        return typeof started === "string" && started !== "" && previous !== undefined && previous.identity === current?.identity;
+      }
       if (answer === known.answer) return false;
       if (known.answer !== undefined) {
-        const previous = completedProof(known.answer), current = completedProof(answer);
         if (!previous || !current || current.identity === previous.identity || current.time <= previous.time) return false;
       }
     }
@@ -96,9 +102,9 @@ export class ConversationFinishEvidence {
 export const conversationFinishEvidence = new ConversationFinishEvidence();
 
 /** Retained phone siblings keep their suggestions, but invisible content covers no pane. */
-export function paneCovered(): boolean {
-  return [...document.querySelectorAll(PANE_COVER_SELECTOR)].some((node) =>
-    !node.closest('[hidden],[inert],[aria-hidden="true"],.is-hidden')
+export function paneCovered(exclude?: string, selector = PANE_COVER_SELECTOR): boolean {
+  return [...document.querySelectorAll(selector)].some((node) =>
+    (!exclude || !node.matches(exclude)) && !node.closest('[hidden],[inert],[aria-hidden="true"],.is-hidden')
       && node.getClientRects().length > 0 && getComputedStyle(node).visibility === "visible");
 }
 

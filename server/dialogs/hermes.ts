@@ -1,5 +1,6 @@
 import type { DialogReader } from "./registry.ts";
-import { ANSI_RE, onePerPass, type AnswerStep, KEY, type ParsedPrompt, findLastIndex, finishPrompt, keySteps, navigationKeys } from "./shared.ts";
+import { ANSI_RE, onePerPass, type AnswerStep, KEY, type ParsedPrompt, type PromptDraft, findLastIndex, finishPrompt, keySteps, navigationKeys, own } from "./shared.ts";
+import type { NativeSteps } from "./step-navigate.ts";
 
 /**
  * Hermes's clarify question, as its Ink TUI draws it (ui-tui/src/components/prompts.tsx):
@@ -19,9 +20,53 @@ export const HERMES_HINT_RE = /^(\d+)\/(\d+) answered · /;
 
 const HERMES_ASK_RE = /^ask \d+ questions?$/;
 
+// the batch's hint while Tab moves the open question (ui-tui i18n/en/overlays.ts clarify.hint)
+const HERMES_SWITCH_RE = /· Tab\/Shift\+Tab switch question ·/;
+
 const HERMES_ROW_RE = /^(▸ )?(\[[ x]\] )?(\d+)\. (.+)$/;
 
 const HERMES_OTHER = "Other (type your answer)";
+
+/**
+ * A batch's questions as the card's steps, each line `✓` answered, `▸` open now, `·` waiting,
+ * the question wrapped at its own indent. Tab and Shift+Tab move the open one (ui-tui
+ * prompts.tsx), but an answered question shows `✓` even while Tab is on it, so nothing tells it
+ * is there: the card goes only to open questions with none answered on the way.
+ *
+ * The batch is named by all it draws of itself: every question's text, which are answered and the
+ * answer drawn under each. Hermes draws a question's options only while it is open, so nothing on
+ * the screen names the options of the question a key moves to: a move is one key, and each one is
+ * asked for anew against the card it leaves (whose id holds the open question and its options).
+ */
+function hermesNavigation(block: string[], base: number, current: number, switches: boolean): Pick<PromptDraft, "steps" | "can_step_back" | "can_step_next"> & { nativeSteps?: NativeSteps } {
+  const indent = (line: string) => line.length - line.trimStart().length;
+  const questions: { label: string; answered: boolean; current: boolean }[] = [];
+  const drawn: string[][] = [];
+  for (const [index, line] of block.entries()) {
+    const text = line.trim();
+    if (indent(line) !== base) {
+      // an answered question's answer, drawn under it; the open one's rows change as it moves
+      if (questions.at(-1)?.answered) drawn.at(-1)!.push(text);
+      continue;
+    }
+    if (/^[▸·✓] /.test(text)) {
+      questions.push({ label: text.slice(2), answered: text.startsWith("✓"), current: index === current });
+      drawn.push([]);
+    } else if (questions.length > 0) questions.at(-1)!.label += ` ${text}`;
+  }
+  const at = questions.findIndex((question) => question.current);
+  if (questions.length < 2 || at < 0) return {};
+  // while an answer is typed the hint drops "Tab/Shift+Tab switch question", and Tab does nothing
+  if (!switches) return { steps: questions };
+  // the question next to the open one, itself still open
+  const reachable = (to: number) => Math.abs(to - at) === 1 && questions[to] !== undefined && !questions[to].answered;
+  return {
+    steps: questions.map((question, index) => ({ ...question, ...(reachable(index) ? { can_navigate: true } : {}) })),
+    can_step_back: reachable(at - 1),
+    can_step_next: reachable(at + 1),
+    nativeSteps: { identity: JSON.stringify(questions.map((question, index) => [question.label, question.answered, drawn[index]])), index: at, count: questions.length, next: KEY.tab, previous: KEY.backtab },
+  };
+}
 
 function parseHermesClarify(screen: string): ParsedPrompt | null {
   const lines = screen.replace(ANSI_RE, "").split(/\r?\n/).map((line) => line.trimEnd());
@@ -41,16 +86,20 @@ function parseHermesClarify(screen: string): ParsedPrompt | null {
   const member: string[] = [];
   for (let i = end; i < block.length && indent(block[i]!) > base; i += 1) member.push(block[i]!.trim());
   const [answered, total] = lines[hintIndex]!.trim().match(HERMES_HINT_RE)!.slice(1).map(Number);
-  const body = total! > 1 ? `${answered}/${total} answered` : null;
+  const body = total! > 1 ? own("{answered}/{total} answered", { answered: answered!, total: total! }) : null;
   // text already on the `>` line (typed in the terminal, or a typed answer Tab brought back)
   // would join the answer: the line is emptied first, after the cursor and before it (its
   // TextInput's ctrl+k and ctrl+u, on every platform)
   const typed = (text: string): AnswerStep[] => [...keySteps(["ctrl+k", "ctrl+u"]), { text }, ...keySteps([KEY.enter])];
+  const switches = HERMES_SWITCH_RE.test(lines[hintIndex]!);
   if (member[0]?.startsWith(">")) {
+    const { nativeSteps, ...navigation } = hermesNavigation(block, base, at, switches);
     return finishPrompt("hermes", {
-      kind: "question", title: "Question", question, body,
-      options: [{ label: "Type your answer", description: null }], multi_select: false, custom_option_index: 0,
+      kind: "question", title: own("Question"), question, body,
+      options: [{ label: own("Type your answer"), description: null }], multi_select: false, custom_option_index: 0,
+      ...navigation,
     }, {
+      ...(nativeSteps ? { nativeSteps } : {}),
       responder: "hermes-input", menuLabels: [], selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: 0,
       rejectWithEscapeIndex: null, customSteps: typed,
     });
@@ -70,12 +119,15 @@ function parseHermesClarify(screen: string): ParsedPrompt | null {
   const multi = choices.every((row) => row.box);
   if (!multi && choices.some((row) => row.box)) return null;
   const checked = choices.flatMap((row, index) => row.checked ? [index] : []);
+  const { nativeSteps, ...navigation } = hermesNavigation(block, base, at, switches);
   return finishPrompt("hermes", {
-    kind: "question", title: "Question", question, body,
+    kind: "question", title: own("Question"), question, body,
     options: choices.map((row) => ({ label: row.label.replace(/ \(Recommended\)$/i, ""), description: null })),
     // typed text on a multi-select question joins the ticks, which the card has no way to say
     multi_select: multi, custom_option_index: multi ? null : choices.length,
+    ...navigation,
   }, {
+    ...(nativeSteps ? { nativeSteps } : {}),
     responder: "hermes-question", menuLabels: rows.map((row) => row.label), selectedIndex,
     checkedOptionIndices: checked, customMenuIndex: multi ? null : choices.length, rejectWithEscapeIndex: null,
     // Enter on the Other row opens its `>` line
@@ -116,19 +168,6 @@ function parseHermesClarify(screen: string): ParsedPrompt | null {
  * A result counts only when it is complete: its layout's own lines are all there, and the CLI has
  * moved on, back at its idle `❯` prompt or on to the next command's echo.
  */
-export interface HermesResult {
-  /** the reader whose layout it is */
-  reader: HermesResultReader;
-  /** the command as echoed */
-  command: string;
-  /** the screen line of the echo */
-  echoLine: number;
-  /** the block under the echo, as shown */
-  lines: string[];
-  /** a reload that succeeded */
-  catalogChanged?: true;
-}
-
 type HermesResultReader = "hermes-help" | "hermes-status" | "hermes-version" | "hermes-profile" | "hermes-reload-skills";
 
 export const HERMES_ECHO_RE = /^⚙\uFE0F?\s+(\/\S+)$/;
@@ -222,17 +261,6 @@ function blockAt(lines: string[], start: number, layout: (typeof HERMES_LAYOUTS)
 
 const screenLines = (screen: string): string[] => screen.replace(ANSI_RE, "").split(/\r?\n/);
 
-/** Every complete result block on a Hermes screen, top to bottom. */
-export function hermesResults(screen: string): HermesResult[] {
-  const lines = screenLines(screen);
-  return lines.flatMap((line, echoLine) => {
-    const command = HERMES_ECHO_RE.exec(line.trimEnd())?.[1];
-    const layout = HERMES_LAYOUTS.find((candidate) => command !== undefined && candidate.names.includes(command));
-    const block = layout ? blockAt(lines, echoLine + 1, layout) : null;
-    return layout && block ? [{ reader: layout.reader, command: command!, echoLine, ...block }] : [];
-  });
-}
-
 /**
  * A result reader is given what is below this send's own echo (server/outcome.ts) and the text sent:
  * the block must start there. Its card shows what Hermes printed and closes with Dismiss, which
@@ -248,7 +276,7 @@ function parseHermesResult(below: string, sent: string | null, reader: HermesRes
   return {
     ...finishPrompt("hermes", {
       kind: "menu", title: command, question: command, body: text,
-      options: [{ label: "Dismiss", description: null }], multi_select: false, custom_option_index: null,
+      options: [{ label: own("Dismiss"), description: null }], multi_select: false, custom_option_index: null,
     }, {
       responder: reader, menuLabels: ["Dismiss"], selectedIndex: 0, checkedOptionIndices: [], customMenuIndex: null,
       rejectWithEscapeIndex: null, optionSteps: [[]],

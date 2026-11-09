@@ -1,6 +1,7 @@
 import { paneStorageId } from "../../shared/machines.ts";
 import { composerDrafts } from "./composerDraft.ts";
 import { restoreDraft } from "./draft.ts";
+import { paneLifetimes } from "./paneLifetime.ts";
 import { readTerminalDraft } from "./terminalDraft.ts";
 import { sameTarget, type SplitTarget } from "./split.ts";
 
@@ -19,8 +20,8 @@ export function followsHerdrFocus(input: {
   machineId: string;
   paneId: string;
   selection: { machineId: string; paneId: string | null };
-  /** the split's other half, while it is drawn */
-  splitOther: SplitTarget | null;
+  /** the panes the split's other slots show, while they are drawn */
+  splitOthers: readonly SplitTarget[];
   linkPending: boolean;
   /** this device is in use: following would drop the keyboard, close what is open or leave an unsent message (#1470) */
   busy: boolean;
@@ -29,7 +30,7 @@ export function followsHerdrFocus(input: {
 }): boolean {
   if (!input.enabled || input.linkPending || input.busy || input.ownMove) return false;
   if (input.machineId !== input.selection.machineId || input.paneId === input.selection.paneId) return false;
-  return !sameTarget(input.splitOther, { machineId: input.machineId, paneId: input.paneId });
+  return !input.splitOthers.some((other) => sameTarget(other, { machineId: input.machineId, paneId: input.paneId }));
 }
 
 /** This device's requests that move herdr's focus, still unanswered, by PC. */
@@ -93,7 +94,7 @@ const draftsHere: PaneDrafts = {
   line: (owner) => readTerminalDraft(owner),
   held: (owner) => {
     let raw: string | null = null;
-    try { raw = localStorage.getItem(`ovis:terminal-draft:${owner}`); } catch { /* private mode */ }
+    try { raw = paneLifetimes.paneStorage.getItem(`ovis:terminal-draft:${owner}`); } catch { /* private mode */ }
     return restoreDraft(raw, Date.now()).text;
   },
 };

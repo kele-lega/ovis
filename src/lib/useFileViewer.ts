@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { outsideSettings } from "./settingsHistory.ts";
+import { FILE_PREVIEW_KEY, WEB_PANEL_BELOW_KEY, webPagesBelow, withoutWebPanel } from "./historyKeys.ts";
 import type { FilePresentation } from "./filePresentation.ts";
+import { backUnderCurrentEntry } from "./historyNavigation.ts";
 
 interface FilePreview {
   path: string;
@@ -8,7 +10,7 @@ interface FilePreview {
   machineId: string;
   presentation?: FilePresentation;
 }
-const HISTORY_KEY = "ovis:file-preview";
+const HISTORY_KEY = FILE_PREVIEW_KEY;
 
 function previewFromState(state: unknown): FilePreview | null {
   if (state === null || typeof state !== "object") return null;
@@ -23,32 +25,26 @@ function previewFromState(state: unknown): FilePreview | null {
 }
 
 /**
- * Back to the entry under the preview's, where the system Back button goes. A page the viewer
- * frames (an HTML file) that navigates inside its frame (a click on an anchor to #details, a
- * script setting location.hash once it has loaded) puts entries of its own above the preview's in
- * the session history: history.back() then steps the frame, and this window gets no popstate
- * (#1203). The Navigation API lists this window's own entries alone, so the one under the current
- * entry is the chat's whatever the frame did, and the browser works out the steps to it. A browser
- * without it (Safari before 26.2, Firefox before 147) steps back one, as before.
+ * The file open in the viewer, held in its own history entry. Android Back traverses history: a
+ * preview must be an entry above the chat, not just a modal. Back closes it, Forward and a reload
+ * restore it from the entry, and a tab switch releases it, or hides it with its entry kept (#3179).
  */
-function backUnderPreview(): Promise<unknown> | undefined {
-  const navigation = window.navigation as Navigation | undefined;
-  const index = navigation?.currentEntry?.index ?? 0;
-  const below = navigation?.entries()[index - 1];
-  if (navigation === undefined || below === undefined) { window.history.back(); return undefined; }
-  return navigation.traverseTo(below.key).committed;
-}
-
-/** Android Back traverses history: a preview must be an entry above the chat, not just a modal. */
 export function useFileViewer() {
   const [viewing, setViewing] = useState(() => previewFromState(window.history.state));
   const closing = useRef(false);
+  // the file shown is the one a Back or Forward restored (a reload's too), not one opened since: the
+  // pop's number, 0 for none, so a later pop is told apart from one already handled
+  const pops = useRef(viewing !== null ? 1 : 0);
+  const popped = useRef(pops.current);
 
   useEffect(() => {
     const onPop = (event: PopStateEvent): void => {
       closing.current = false;
       // Forward restores the preview with its original PC/pane, including after reload.
-      setViewing(previewFromState(event.state));
+      const preview = previewFromState(event.state);
+      if (preview !== null) pops.current += 1;
+      popped.current = preview !== null ? pops.current : 0;
+      setViewing(preview);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -57,10 +53,16 @@ export function useFileViewer() {
   const openFile = useCallback((preview: FilePreview, replace = false) => {
     if (closing.current) return;
     // a preview opened over Settings is no entry of Settings: a reload on it closes Settings and keeps the file
-    const state = { ...outsideSettings(window.history.state), [HISTORY_KEY]: preview };
+    const current = outsideSettings(window.history.state);
+    const state = { ...withoutWebPanel(current), [HISTORY_KEY]: preview };
     // Choosing a different file inside an open preview must not add another Back step.
-    if (replace || previewFromState(window.history.state)) window.history.replaceState(state, "");
-    else window.history.pushState(state, "");
+    if (replace || previewFromState(window.history.state)) {
+      // a docked file taking over the entry of a page stacked on the web panel's other entries keeps
+      // their count: closing it goes back past them too, or the page under it would show again (#3058)
+      const below = webPagesBelow(current);
+      window.history.replaceState(below > 0 ? { ...state, [WEB_PANEL_BELOW_KEY]: below } : state, "");
+    } else window.history.pushState(state, "");
+    popped.current = 0;
     setViewing(preview);
   }, []);
 
@@ -70,8 +72,8 @@ export function useFileViewer() {
       closing.current = true;
       // X, Escape and scrim clicks consume the same entry as the system Back button. A traversal
       // the browser refuses lands nowhere and fires no popstate: the latch is let go for the next click.
-      backUnderPreview()?.catch(() => { closing.current = false; });
-    } else setViewing(null);
+      backUnderCurrentEntry(1 + webPagesBelow(outsideSettings(window.history.state)))?.catch(() => { closing.current = false; });
+    } else { popped.current = 0; setViewing(null); }
   }, []);
 
   const setPresentation = useCallback((presentation: FilePresentation) => {
@@ -82,12 +84,24 @@ export function useFileViewer() {
     setViewing(next);
   }, []);
 
-  /** Hands the file's entry to a move to another pane: the file leaves it without a traversal, and the viewer closes. */
+  /**
+   * Hands the file's entry to a move to another pane, or to a web page that takes its place: the file
+   * leaves it without a traversal, and the viewer closes. The count of the web panel's entries under it
+   * stays, so a page taking the entry over still goes back past them on closing.
+   */
   const releaseFile = useCallback(() => {
     const { [HISTORY_KEY]: _, ...rest } = (window.history.state ?? {}) as Record<string, unknown>;
     window.history.replaceState(rest, "");
+    popped.current = 0;
     setViewing(null);
   }, []);
 
-  return { viewing, openFile, closeFile, setPresentation, releaseFile };
+  /**
+   * Hides the file when a tab switch leaves it behind and Settings asks for it again on return
+   * (#3179): its entry keeps it, so Back to that tab shows it again, and the move pushes its own.
+   */
+  const hideFile = useCallback(() => { popped.current = 0; setViewing(null); }, []);
+  const fileFromPop = useCallback(() => popped.current, []);
+
+  return { viewing, openFile, closeFile, setPresentation, releaseFile, hideFile, fileFromPop };
 }

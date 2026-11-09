@@ -229,6 +229,19 @@ describe("voice transcribe", () => {
     expect((form.get("file") as File).name).toBe("audio.webm");
   });
 
+  it("keeps the provider form within 32 fields when the pane has many hints", async () => {
+    handler = transcriptAnswer;
+    const hints = Array.from({ length: 50 }, (_, i) => `/command-${i}`);
+    const response = await transcribe(service({ OVIS_OPENAI_API_KEY: KEY }), clipForm({ keywords: JSON.stringify(hints), language: "vi" }));
+    expect(response.status).toBe(200);
+
+    const form = requests[0]!.init.body as FormData;
+    expect([...form.keys()]).toHaveLength(32);
+    expect(form.getAll("languages[]")).toEqual(["vi", "en"]);
+    expect(form.get("prompt")).toMatch(/\S/);
+    expect(form.getAll("keywords[]")).toEqual(hints.slice(0, 26));
+  });
+
   it("adds the polished text when asked", async () => {
     handler = (url, init) => {
       if (url.endsWith("/audio/transcriptions")) return transcriptAnswer();
@@ -257,6 +270,26 @@ describe("voice transcribe", () => {
     voice.update({ polish_model: "gpt-4.1-mini" });
     await events(await transcribe(voice, clipForm({ polish: "1" })));
     expect(body).toMatchObject({ model: "gpt-4.1-mini", temperature: 0 });
+    expect("reasoning_effort" in body).toBe(false);
+  });
+
+  it("reads the model past a provider prefix such as OpenRouter's", async () => {
+    let body: Record<string, unknown> = {};
+    handler = (url, init) => {
+      if (url.endsWith("/audio/transcriptions")) return transcriptAnswer();
+      body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return Response.json({ choices: [{ message: { content: "tidy" } }] });
+    };
+    const voice = service({ OVIS_OPENAI_API_KEY: KEY, OVIS_OPENAI_BASE_URL: "https://openrouter.ai/api/v1" });
+    for (const model of ["openai/gpt-6-luna", "openai/gpt-5.1"]) {
+      voice.update({ polish_model: model });
+      await events(await transcribe(voice, clipForm({ polish: "1" })));
+      expect(body).toMatchObject({ model, reasoning_effort: "none" });
+      expect("temperature" in body).toBe(false);
+    }
+    voice.update({ polish_model: "openai/gpt-4.1-mini" });
+    await events(await transcribe(voice, clipForm({ polish: "1" })));
+    expect(body).toMatchObject({ model: "openai/gpt-4.1-mini", temperature: 0 });
     expect("reasoning_effort" in body).toBe(false);
   });
 

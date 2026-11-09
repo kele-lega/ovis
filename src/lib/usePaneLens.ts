@@ -1,11 +1,13 @@
-import { useCallback, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type Dispatch, type SetStateAction } from "react";
 import type { HerdrPane } from "../../shared/protocol.ts";
 import { paneStorageId } from "../../shared/machines.ts";
+import { prefetchPaneConversation } from "./api.ts";
 import { PaneLenses } from "./paneLens.ts";
+import { paneLifetimes } from "./paneLifetime.ts";
 import type { PaneView } from "./actions.ts";
 import { notificationViewForPane, type NotificationTarget } from "./notificationTarget.ts";
 import type { TerminalPeek } from "./terminalPeek.ts";
-import type { Settings } from "./settings.ts";
+import { HISTORY_PROMPTS, type Settings } from "./settings.ts";
 
 /**
  * The lens a pane opens in: the one picked for it by hand, remembered per pane, else its default
@@ -15,19 +17,30 @@ import type { Settings } from "./settings.ts";
  * notice, so a remembered choice there is not worth keeping. A mirrored PC counts as having a
  * terminal.
  */
-/** `hasAgent`: herdr leaves `agent` out for a shell, so callers compare with `!= null` */
-export function storedView(lenses: PaneLenses, picks: ReadonlyMap<string, PaneView>, paneId: string, machineId: string, hasAgent: boolean | null, terminalAttach: boolean): PaneView {
+/**
+ * Whose a lens is in this page: the pane under the herdr its PC is drawn under (lib/paneLifetime.ts),
+ * so a pane ID a new herdr gave out again keeps no lens picked or settled for the last one's pane.
+ */
+export function lensOwner(machineId: string, paneId: string): string {
+  const lifetime = paneLifetimes.generation(machineId);
+  const pane = paneStorageId(machineId, paneId);
+  return typeof lifetime === "string" ? `${lifetime}\u0000${pane}` : pane;
+}
+
+/** `hasAgent`: herdr leaves `agent` out for a shell, so callers compare with `!= null`; `keep` false only asks (a press, not a pick) */
+export function storedView(lenses: PaneLenses, picks: ReadonlyMap<string, PaneView>, paneId: string, machineId: string, hasAgent: boolean | null, terminalAttach: boolean, keep = true): PaneView {
   if (!terminalAttach) return "chat";
-  const key = paneStorageId(machineId, paneId);
+  const key = lensOwner(machineId, paneId);
   const picked = picks.get(key);
   if (picked !== undefined) return picked;
   try {
-    const stored = window.localStorage.getItem(`ovis:view:${key}`);
+    const stored = paneLifetimes.paneStorage.getItem(`ovis:view:${paneStorageId(machineId, paneId)}`);
     if (stored === "chat" || stored === "terminal") return stored;
   } catch {
     /* private mode */
   }
-  return lenses.of(key, hasAgent, window.matchMedia?.("(pointer: coarse)").matches === true);
+  const coarse = window.matchMedia?.("(pointer: coarse)").matches === true;
+  return keep ? lenses.of(key, hasAgent, coarse) : lenses.peek(key, hasAgent, coarse);
 }
 
 export function usePaneLensState() {
@@ -37,14 +50,17 @@ export function usePaneLensState() {
   return { lens, setLens, viewPicks, setViewPicks };
 }
 
-export function usePaneLens({ settings, selectedPaneId, selectedMachineId, selectedPane, selectedAgent, terminalAttach, notificationViewTarget, lens, setLens, viewPicks, terminalPeek, setTerminalPeek }: {
+export function usePaneLens({ settings, selectedPaneId, selectedMachineId, selectedPane, selectedAgent, terminalAttach, attachOn, notificationViewTarget, setNotificationViewTarget, lens, setLens, viewPicks, terminalPeek, setTerminalPeek }: {
   settings: Settings;
   selectedPaneId: string | null;
   selectedMachineId: string;
   selectedPane: HerdrPane | null;
   selectedAgent: HerdrPane["agent"] | null;
   terminalAttach: boolean;
+  /** terminalAttach for any PC, the one selected or not */
+  attachOn: (machineId: string) => boolean;
   notificationViewTarget: NotificationTarget | null;
+  setNotificationViewTarget: Dispatch<SetStateAction<NotificationTarget | null>>;
   lens: { key: string; view: PaneView };
   setLens: Dispatch<SetStateAction<{ key: string; view: PaneView }>>;
   viewPicks: ReadonlyMap<string, PaneView>;
@@ -56,8 +72,20 @@ export function usePaneLens({ settings, selectedPaneId, selectedMachineId, selec
   // layout effect, and an attach in the previous pane's lens resized a pane whose lens is chat
   // a new Settings default is a new start for every pane's lens
   const lenses = useMemo(() => new PaneLenses(settings.defaultView), [settings.defaultView]);
-  const lensKey = JSON.stringify([selectedPaneId, selectedMachineId, selectedPane !== null, selectedAgent !== null, terminalAttach, settings.defaultView]);
-  const notificationView = notificationViewForPane(notificationViewTarget, selectedMachineId, selectedPaneId);
+  // another herdr behind the PC is a new start for its panes' lenses, in the render that draws it
+  const lifetime = useSyncExternalStore(paneLifetimes.subscribe, () => paneLifetimes.generation(selectedMachineId));
+  const lensKey = JSON.stringify([selectedPaneId, selectedMachineId, lifetime ?? null, selectedPane !== null, selectedAgent !== null, terminalAttach, settings.defaultView]);
+  // a link's or an alert's lens was for the pane it named under the herdr then: a pane ID another
+  // herdr gave out again is not that pane, so the lens it named goes with that herdr
+  const drawnUnder = useRef({ machineId: selectedMachineId, lifetime });
+  const replaced = drawnUnder.current.machineId === selectedMachineId && typeof drawnUnder.current.lifetime === "string"
+    && typeof lifetime === "string" && drawnUnder.current.lifetime !== lifetime;
+  useEffect(() => {
+    if (replaced) setNotificationViewTarget(null);
+    // reads that named no herdr in between leave the one it last named
+    if (drawnUnder.current.machineId !== selectedMachineId || typeof lifetime === "string") drawnUnder.current = { machineId: selectedMachineId, lifetime };
+  }, [replaced, selectedMachineId, lifetime, setNotificationViewTarget]);
+  const notificationView = replaced ? null : notificationViewForPane(notificationViewTarget, selectedMachineId, selectedPaneId);
   let view = lens.view;
   if (lens.key !== lensKey) {
     if (selectedPaneId !== null) view = storedView(lenses, viewPicks, selectedPaneId, selectedMachineId, selectedPane ? selectedAgent !== null : null, terminalAttach);
@@ -69,7 +97,12 @@ export function usePaneLens({ settings, selectedPaneId, selectedMachineId, selec
   // its lens picked by hand) the pane is back on the lens it had. A shell has no conversation to
   // show (storedView), so its alert opens its own lens; until the snapshot says, it counts as an agent
   if (notificationView !== null && !(notificationView === "chat" && selectedPane !== null && selectedAgent === null)) view = notificationView;
-  return { lenses, view };
+  // a press on an agent pane's tab or sidebar row starts its chat's first read before the pick renders
+  // it, when the lens a pick gives it (asked, not kept) is the chat
+  const pressPane = (machineId: string, paneId: string): void => {
+    if (storedView(lenses, viewPicks, paneId, machineId, true, attachOn(machineId), false) === "chat") prefetchPaneConversation(paneId, machineId, HISTORY_PROMPTS);
+  };
+  return { lenses, view, pressPane };
 }
 
 export function usePaneViewPicks({ setViewPicks, setNotificationViewTarget, setTerminalPeek, setLens, setAutoSelected, selectedPaneId, selectedMachineId }: {
@@ -82,10 +115,10 @@ export function usePaneViewPicks({ setViewPicks, setNotificationViewTarget, setT
   selectedMachineId: string;
 }) {
   const pickView = useCallback((machineId: string, paneId: string, next: PaneView) => {
-    const key = paneStorageId(machineId, paneId);
+    const key = lensOwner(machineId, paneId);
     setViewPicks((current) => current.get(key) === next ? current : new Map(current).set(key, next));
     try {
-      window.localStorage.setItem(`ovis:view:${key}`, next);
+      paneLifetimes.paneStorage.setItem(`ovis:view:${paneStorageId(machineId, paneId)}`, next);
     } catch {
       /* private mode: the lens is still picked for this page */
     }

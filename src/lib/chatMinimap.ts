@@ -13,12 +13,12 @@ export interface MinimapTurn {
   readonly preview: string;
 }
 
-/** One tick per message the user sent; a compaction, a runtime notice or a task report is no turn of theirs. */
+/** One tick per message the user sent; a compaction, a runtime notice, a task report or a goal's wait is no turn of theirs. */
 export function minimapTurns(turns: readonly ConversationTurn[]): MinimapTurn[] {
   const result: MinimapTurn[] = [];
   turns.forEach((turn, row) => {
-    if (turn.role !== "user" || turn.parts.some((part) => part.kind === "compact" || part.kind === "notice" || part.kind === "task_result")) return;
-    const text = turn.parts.map((part) => part.kind === "text" ? part.text : "").join(" ").replace(/\s+/g, " ").trim();
+    if (turn.role !== "user" || turn.parts.some((part) => part.kind === "compact" || part.kind === "notice" || part.kind === "task_result" || part.kind === "goal_wait")) return;
+    const text = turn.parts.map((part) => part.kind === "text" ? part.text : part.kind === "shell" ? `!${part.command}` : "").join(" ").replace(/\s+/g, " ").trim();
     result.push({ row, preview: text.length > 120 ? `${text.slice(0, 119)}…` : text });
   });
   return result;
@@ -44,11 +44,12 @@ export function minimapCurrent(turnRows: readonly number[], firstVisible: number
 /**
  * How many ticks a rail this tall draws for `count` turns: one per turn while they sit
  * MINIMAP_TICK_MIN_PX apart, else one per slot of that size, so a long history loaded into the
- * chat adds no buttons once the rail is full.
+ * chat adds no buttons once the rail is full. A rail too short for MINIMAP_MIN_TURNS ticks gets
+ * fewer, never closer ones.
  */
 export function minimapSlots(count: number, railPx: number): number {
   if (!(railPx > 0)) return count;
-  return Math.max(Math.min(count, MINIMAP_MIN_TURNS), Math.min(count, Math.floor(railPx / MINIMAP_TICK_MIN_PX) + 1));
+  return Math.min(count, Math.floor(railPx / MINIMAP_TICK_MIN_PX) + 1);
 }
 
 /** The first turn of a slot: turns are shared out evenly, the last slot ending at the last turn. */

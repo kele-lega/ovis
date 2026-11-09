@@ -4,8 +4,27 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { socketAddress } from "../server/herdr/client.ts";
-import { windowsProcessTable } from "../server/windows-processes.ts";
+import { descendantProcesses, windowsProcessTable } from "../server/windows-processes.ts";
 import { updateStateDir } from "../server/update-state.ts";
+
+/**
+ * Removes a fixture's scratch folder, again while Windows still holds something in it: a process the
+ * test started, or a scan of an executable it copied there, can keep a handle open for a moment
+ * after the process is gone (#1907). Still fails, with the last error, once 10 s have passed.
+ */
+async function removeScratch(scratch: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    try {
+      rmSync(scratch, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (!["EPERM", "EBUSY", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      if (Date.now() > deadline) throw error;
+    }
+    await Bun.sleep(100);
+  }
+}
 
 it.skipIf(process.platform !== "win32")("runs the Windows launcher with executable and npm shim installations in literal percent paths", async () => {
   const scratch = mkdtempSync(join(tmpdir(), "ovis bun shim "));
@@ -56,7 +75,7 @@ it.skipIf(process.platform !== "win32")("runs the Windows launcher with executab
       }
     }
   } finally {
-    rmSync(scratch, { recursive: true, force: true });
+    await removeScratch(scratch);
   }
 }, 70_000);
 
@@ -195,8 +214,10 @@ it.skipIf(process.platform !== "win32")("starts after its launcher exits, stops 
     expect(updates.current_revision).toMatch(/^[a-f0-9]{40}$/);
     const pid = Number(readFileSync(join(state, "server.pid"), "utf8").trim());
     const rows = await windowsProcessTable(30_000);
-    const owned = new Set([pid]);
-    for (const parent of owned) for (const row of rows) if (row.parent === parent) owned.add(row.pid);
+    // Windows keeps a dead parent's number on its children and hands that number on: a plain parent
+    // walk can reach unrelated processes (this test's own runner among them) that never exit
+    const owned = new Set([pid, ...descendantProcesses(rows, pid).map(member => member.pid)]);
+    const birth = new Map(rows.map(row => [row.pid, row.started]));
     expect(owned.size).toBeGreaterThanOrEqual(3);
     for (let attempt = 0; attempt < 3; attempt++) await run("start"); // fast successful exits keep their exit code
     expect(Number(readFileSync(join(state, "server.pid"), "utf8"))).toBe(pid);
@@ -216,6 +237,14 @@ it.skipIf(process.platform !== "win32")("starts after its launcher exits, stops 
     while (remaining.length > 0 && Date.now() < deadline) {
       await Bun.sleep(50);
       remaining = stillOwned();
+    }
+    if (remaining.length > 0) {
+      // a number Windows handed to a new process after the stop is no longer the owned member
+      const now = new Map((await windowsProcessTable(30_000)).map(row => [row.pid, row.started]));
+      remaining = stillOwned().filter(member => {
+        const before = birth.get(member), after = now.get(member);
+        return before === undefined || after === undefined || before === after;
+      });
     }
     expect(remaining, "control: wait up to ten seconds for the Windows-owned process tree to disappear").toEqual([]);
     expect(existsSync(join(state, "server.pid"))).toBe(false);
@@ -274,6 +303,6 @@ it.skipIf(process.platform !== "win32")("starts after its launcher exits, stops 
   } finally {
     if (existsSync(join(state, "server.pid"))) await run("stop");
     await new Promise<void>(resolve => peer.close(() => resolve()));
-    rmSync(scratch, { recursive: true, force: true });
+    await removeScratch(scratch);
   }
 }, 90_000);

@@ -2,7 +2,8 @@
 
 How the chat lists an agent's `/` commands and skills, sends them, and says what became of them.
 It covers every agent the bridge knows (Claude Code, Codex, OpenCode, pi, omp, OmO, gjc, Hermes,
-Grok, Antigravity, Devin CLI and Command Code) and is written for people who change that code.
+Grok, Antigravity, Devin CLI, Command Code and GitHub Copilot CLI) and is written for people who
+change that code.
 For what a user sees, read the [user guide](guide.md#features); for skill status inside an
 answer, read [Skill activity in chat](chat-skill-activity.md).
 
@@ -50,7 +51,7 @@ catalog; the bridge does not query its SDK broker.
 | Claude Code | the official commands reference, 2.1.301 | user, project and plugin `skills/` and `commands/`, `skillOverrides` | none | MCP prompts a server declares only at run time |
 | Codex | `codex-rs` rust-v0.163.0 slash table | `.codex/skills` of each ancestor, `$CODEX_HOME/skills`, `~/.agents/skills`, system and admin roots, plugin skills as `namespace:name`, to depth 6; custom prompts only before 0.118.0 | skills from a running app-server daemon's `skills/list`, 0.157 or later, never on Windows ([`codex-daemon.ts`](../server/codex-daemon.ts)) | none known |
 | OpenCode | shared builtins pinned to 1.19.3 (so unverified on v2); the rows only one version has are checked against 1.19.3 or 2.0.32, by major.minor | v1 `command/` and `commands/`; v2 skills as `@id`, both command dirs, loose `.md` skills | v2 only: `GET /api/command` and `GET /api/skill` of the service its `service.json` names, checked by pid and version, never started ([`opencode-native.ts`](../server/opencode-native.ts)) | plugin commands on v1 |
-| pi | `earendil-works/pi` slash-commands at 5c1736f8 | agent dir, `~/.agents`, `settings.json` skills, project roots that pi's trust allows | none | extension and package commands |
+| pi | `earendil-works/pi` slash-commands at 5c1736f8 | agent dir, `~/.agents`, `settings.json` skills, project roots that pi's trust allows | extension and package commands from the running pi's `pi.getCommands()`, through the web UI's pi extension when it is installed (`GET /v1/commands` on its socket), never on Windows ([`pi.ts`](../server/pi.ts)) | extension and package commands without that extension |
 | omp | `oh-my-pi` builtin registry at 53a0377d (18.12.3) | omp's skill providers, namespaced on a clash, `disabledProviders` and `enabledProviders` | none | extension and plugin commands |
 | OmO | Senpi 46d15a1c and OmO b6230fcd tables | bundled skills minus the `disabled_skills` union of user, project and profile config | none | extension commands not in the pinned tables |
 | gjc | `builtin-registry.ts` v0.18.12 | bundled workflow skills, `.gjc/commands` of the project and the active profile | none | runtime-only skills not present in scanned roots |
@@ -59,6 +60,7 @@ catalog; the bridge does not query its SDK broker.
 | Antigravity | the recorded agy 1.4.0 palette | `~/.gemini/config/skills` and the two loaded builtin skills | none | none known |
 | Devin CLI | 3000.11.92, checked against its changelog | native roots, plus Claude, Windsurf, Copilot and Cursor roots unless `read_config_from` turns them off | none | MCP prompts not declared on disk |
 | Command Code | its bundled reference at 1.84.0 | `skills/`, nested `commands/`, bundled skills | none | none known |
+| GitHub Copilot CLI | its own `/` menu at 1.0.105, with `copilot help commands` descriptions | `.github`, `.agents` and `.claude` `skills/` of each folder up to the repository root (outside one, up to the home folder or `/`), `$COPILOT_HOME/skills` (default `~/.copilot`), `~/.agents/skills` and `skillDirectories` (a relative one from the pane's folder), recursive, the first of a name winning; files without frontmatter, `disabledSkills`, `user-invocable: false` and names a builtin takes are left out | none | plugin skills, custom agents (`/agent`) |
 
 A command typed by hand that no row lists (an extension command, an undeclared MCP prompt) still
 sends, and a leading command is still tracked. Its outcome stays `accepted` and ends as
@@ -188,7 +190,13 @@ Recognized Hermes informational result cards remain available.
   the exact text; a `model_change`, `thinking_level_change` or `compaction` record in pi, omp, gjc
   and OmO sessions (omp's `/handoff` writes a compaction with method `handoff`); a `compacted`
   record for Codex `/compact`. Records are claimed in send order, so two equal sends never share
-  one, and a rewritten transcript drops what it no longer holds.
+  one, and a rewritten transcript drops what it no longer holds. Known limit: a pi-family send the
+  agent dropped without a record takes the record of a later equal send on the same branch, and
+  that later send ends as unknown. In pi, only the session's active
+  branch counts: a send stays with the branch it was sent on, also after the session goes to
+  another branch and `/tree` comes back to it, unless meanwhile something was written under that
+  branch's last entry or a record a result could be was written elsewhere (`resumedBranch` in
+  [`server/conversation.ts`](../server/conversation.ts)); then the send ends as unknown.
 - `dialog`: a card answered from Chat, counted only for the send that raised that card.
 - `recognized-result`: a reader of kind `result` matched a complete, recorded layout that appeared
   after this send's own echo and was not on screen when it was sent. Hermes `/help`, `/status`,
@@ -214,7 +222,7 @@ program name), it stays with the next session herdr reports in the same terminal
 agent, or under the label herdr gave the pane at the send (herdr names an OmO pane `pi`). A send to
 a restarted agent while herdr still shows the session of the process before waits up to a minute
 (`STALE_SESSION_LAG_MS`) for the agent's own session. Known limits, all of which hide a row rather
-than show a wrong result, except the last:
+than show a wrong result, except the last two:
 
 - That minute is counted when Chat next asks. A session that appeared within it while no Chat was
   open is taken for a later one, and the row is hidden.
@@ -238,15 +246,39 @@ move it, how it commits, and when it gives up to the terminal. Running a plan al
 screen again before the committing key and refuses when the prompt changed; `rereadMoves`, set
 for `each-move` readers and for list readers, adds a check after each move as well.
 
+Claude Code's `/effort` card (`claude-effort` in [`claude.ts`](../server/dialogs/claude.ts))
+offers the five levels, low to max. A level's row moves the slider with ←/→ and presses `s`, never
+Enter (Enter saves the level as the default for new sessions), so the level holds for this session
+only. Since 2.1.284 Ultracode is no level but a switch the slider draws beside itself in a pane of
+70 columns or more, and on two lines of its own under itself in a narrower one; while it is on,
+Claude writes "Ultracode: dynamic workflows on every task" under the level names. The reader takes
+either layout, with the switch on or off. Where the slider names Tab as the switch's key, the card
+has one more row, **Turn Ultracode on** or **Turn Ultracode off** ("Keeps the effort level, for
+this session only"; "Ultracode" stays English in every language). It presses Tab, then `s` once the
+slider, read again, shows the switch flipped with ▲ still on the same level: Claude applies
+Ultracode with that level for this session and writes nothing to its settings. Otherwise no `s`
+goes out and the answer is refused with `prompt_changed`; Claude keeps the unapplied flip in its
+dialog until Esc. A level's row, too, presses `s` only while the switch still shows the state the
+card was read with. A model without Ultracode (one without xhigh) or dynamic workflows turned off
+leaves only the level rows, at every level including max, where Claude writes max's description
+right under the level names. Another key bound to the switch also leaves only the level rows, and
+so does a key unbound in `keybindings.json` (`"tab": null` in the `EffortSlider` context): Claude
+then draws the switch's state with no "… to toggle" line. A key without its state, a switch drawn
+twice or both beside and under the slider, and a line under the level names that does not match
+the switch (Claude's Ultracode line while it is on, a blank line while it is off, no Ultracode line
+without a switch) give no card, and neither does a pane of about 44 columns or fewer, where Claude
+cuts the level names. Known limit: the switch row applies the level ▲ stands over in Claude's
+dialog, so a level moved in the terminal and not applied goes with it, and a level row likewise
+applies a flip left unapplied there.
+
 Readers that show results in Chat today include Claude Code's `/goal` status card,
 Hermes's informational results, and the steps of omp's `/handoff` that can be
 answered from a card. A step that needs an editor or native editing ends as `terminal-required`
 and keeps the draft.
 
-A message with Claude Code, grok or Antigravity offers **Rewind in terminal**. It opens the
-pane's terminal with a hint to run the agent's own `/rewind`, sends nothing and keeps drafts.
-Rewind dialogs are answered only in the terminal. Chat follows the native transcript's active
-branch when the agent records it; Claude Code records that branch on the next prompt or command.
+Messages in Chat carry no rewind action. For an agent with its own `/rewind` (Claude Code, grok,
+Antigravity), run it in the pane's terminal, where its dialog is answered. Chat follows the native transcript's active branch when the agent
+records it; Claude Code records that branch on the next prompt or command.
 
 ## Earlier sessions
 
@@ -259,21 +291,42 @@ only where that flag is cited in the code; a row without one has no Resume butto
 ## Starting an agent with a first message
 
 New workspace and New tab can pass a model and an effort only where the agent's launch takes them:
-Claude Code (`--model`, `--effort`) and Codex (`--model`, `-c model_reasoning_effort=`). Every
-other agent starts with its own configuration. Any agent can get a first message. Codex takes the
-message as its own argument after `--`, so a message such as `logout` is never read as a
-subcommand. Claude Code and every other agent get it through the bridge's pending record
-(`first_message` on the create request): it is queued for the pane and sent once when the agent
-is ready, like any queued message, and it can be discarded or sent now. Only the page that sent the
-request (`first_message_connection`) types it on its own, while it has the pane attached; if that page
-disconnects or leaves the pane first, the message is held until someone sends it now or discards it,
-and the pane's other messages go at their turn. A pane holds one first message, bound to the agent
-the launch brought up: its process (the one a shell-started agent's launch saw come up) and session,
-as known when the message is queued and as learned at each event of the pane after. A `/resume`,
-another process of the same kind, or that agent ending before the message went holds it with
-`pending_target_changed`, at the pane's next event. First messages live in the
-bridge's memory, so a restart drops the ones not sent yet. The bridge checks launch arguments by the
-dialog's rules in `shared/launch-rules.ts`.
+Claude Code (`--model`, and `--effort` low, medium, high, xhigh or max) and Codex (`--model`,
+`-c model_reasoning_effort=`). Every other agent starts with its own configuration.
+
+Claude Code also gets an Ultracode switch. On, it adds `--settings '{"ultracode":true}'` after the
+effort, which it keeps; off adds nothing, so Claude Code's own settings decide. Claude Code applies
+the setting for that session only. On a Windows PC the bridge passes the same text as the path of a
+file holding it ([`claude-settings-file.ts`](../server/claude-settings-file.ts)): Windows
+PowerShell 5.1 strips the JSON's quotes on the way through the `claude.ps1` shim of an npm install,
+and a path arrives intact (if the file cannot be written, the JSON goes as it is). The file is in
+`%LOCALAPPDATA%\ovis\claude settings`, a folder only that Windows user and the administrators
+reach, where `%TEMP%` can be one other accounts write to; the space in its name has PowerShell
+quote the path, so a profile folder holding `&` (`R&D`) still starts on herdr-core. Ultracode needs Claude Code 2.1.284 or
+later (Claude Code's settings reference says an older one runs the session at xhigh), a model with
+xhigh and dynamic workflows turned on; otherwise Claude Code ignores it without an error, and the
+dialog cannot tell. The bridge still takes `--effort ultracode` from other clients, which Claude
+Code reads as xhigh with Ultracode on. A resumed session, from herdr's own auto-resume or from
+Resume in Earlier sessions, starts with the agent's resume flag alone, so no launch argument is
+applied again, Ultracode included.
+
+Any agent can get a first message. Codex takes the message as its own argument after `--`, so a
+message such as `logout` is never read as a subcommand. Claude Code and every other agent get it
+through the bridge's pending record (`first_message` on the create request): it is queued for the
+pane and sent once when the agent is ready, like any queued message, and it can be discarded or sent
+now. Only the page that sent the request (`first_message_connection`) types it on its own, while it
+has the pane attached; if that page disconnects or leaves the pane first, the message is held until
+someone sends it now or discards it, and the pane's other messages go at their turn. A request that
+names no page connection (a script or CLI) gets its message held from the start, and the answer says
+so: `first_message: { id, held: "first_message_unattended" }`. A pane holds
+one first message, bound to the agent the launch brought up: its process (the one a shell-started
+agent's launch saw come up) and session, as known when the message is queued and as learned at each
+event of the pane after. A `/resume` or another process of the same kind holds it with
+`pending_target_changed`, and that agent ending before the message went holds it with
+`first_message_launch_ended`, at the pane's next event; Send now then answers the same code to a
+client whose `pending-action` frame says `launch_ended`, and `pending_target_changed` to an older
+one. First messages live in the bridge's memory, so a restart drops the ones not sent yet. The
+bridge checks launch arguments by the dialog's rules in `shared/launch-rules.ts`.
 
 ## Adding a command form or a reader
 
@@ -288,7 +341,10 @@ To add a reader:
    `wide` (`omp-handoff-18.8.7-done-narrow.txt`). A set of result screens may get its own folder
    (`server/fixtures/hermes-results/help-120.txt`).
 2. Add the reader to `server/dialogs/<agent>.ts`, with an interaction plan if it moves a cursor,
-   or `kind: "result"` if it recognizes a finished result.
+   or `kind: "result"` if it recognizes a finished result. Words the card gets from the bridge
+   rather than from the screen (a title, the Close an Esc is offered as) go in as `own("…")`, with
+   their English key added to `shared/card-text.ts` and translated in `src/lib/i18n/composer.*.ts`:
+   the client shows them in the user's language (`own_text`), and the agent's own text as drawn.
 3. Switch the form to `dialog` with that reader's id.
 4. Test the reader against its fixtures in the agent's test file.
 

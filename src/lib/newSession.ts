@@ -7,36 +7,44 @@
  * one send: nothing is typed by this page afterwards.
  */
 import type { CreateTabRequest, CreateWorkspaceRequest, WorkspaceCreated } from "../../shared/protocol.ts";
-import type { AgentLaunchSettings } from "./agentLaunchMode.ts";
-import { agentCommand, firstPromptDelivery, launchAgent, launchChoiceFault } from "./agentLaunchMode.ts";
+import type { ClaudeLaunchMode, CodexLaunchMode } from "./agentLaunchMode.ts";
+import { firstPromptDelivery, launchAgent, launchCapabilities, launchChoiceFault } from "./agentLaunchMode.ts";
 
 export interface NewSessionFields {
   /** the agent kind; "" is a plain shell */
   agent: string;
   model: string;
   effort: string;
+  /** Claude Code's Ultracode switch; absent or false adds nothing */
+  ultracode?: boolean;
   prompt: string;
 }
 
 export type FirstPrompt = { text: string; via: "positional" | "pending" };
 
 export type NewSessionLaunch =
-  | { agent: ReturnType<typeof launchAgent>; prompt: FirstPrompt | null }
-  | { fault: "model" | "effort" | "prompt" };
+  | { agent: { kind: string; args?: string[] } | null; prompt: FirstPrompt | null }
+  | { fault: "model" | "effort" | "ultracode" | "prompt" };
 
 /** The create request's agent for the fields, or the first choice the launch does not take. */
-export function newSessionLaunch(fields: NewSessionFields, modes: AgentLaunchSettings): NewSessionLaunch {
-  const command = agentCommand(fields.agent, modes);
-  // A full command owns every launch option. Stale hidden model/effort choices cannot refuse it,
-  // and its parser is unknown: even Codex's first message always uses the bridge's pending path.
-  const fault = command === null ? launchChoiceFault(fields.agent, fields) : null;
+export function newSessionLaunch(fields: NewSessionFields, modes: { claudeLaunchMode: ClaudeLaunchMode; codexLaunchMode: CodexLaunchMode }): NewSessionLaunch {
+  const fault = launchChoiceFault(fields.agent, fields);
   if (fault !== null) return { fault };
+  const via = firstPromptDelivery(fields.agent, fields.prompt);
   const text = fields.prompt.trim();
-  const via = command !== null ? (text ? "pending" : null) : firstPromptDelivery(fields.agent, fields.prompt);
   return {
-    agent: launchAgent(fields.agent, modes, { model: fields.model, effort: fields.effort, prompt: via === "positional" ? text : "" }),
+    agent: launchAgent(fields.agent, modes, { model: fields.model, effort: fields.effort, ultracode: fields.ultracode, prompt: via === "positional" ? text : "" }),
     prompt: via === null ? null : { text, via },
   };
+}
+
+/**
+ * The dialog's launch for its fields: a switch the agent's launch does not take is not shown, so it neither
+ * blocks Start nor goes with the launch. The agent list can move the kind past the picker's resets, as when a
+ * remembered Claude Code the PC no longer offers gives way to a shell with Ultracode left on.
+ */
+export function dialogLaunch(fields: NewSessionFields, modes: { claudeLaunchMode: ClaudeLaunchMode; codexLaunchMode: CodexLaunchMode }): NewSessionLaunch {
+  return newSessionLaunch({ ...fields, ultracode: fields.ultracode && launchCapabilities(fields.agent).ultracode }, modes);
 }
 
 /** The request's `first_message`: the prompt the bridge queues, or null when there is none or the agent takes it itself. */

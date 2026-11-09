@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
-import { formatWorkDuration, splitTurn, todoGroups, visibleWorkParts, workFailed, workStartsOpen, workSummary, type ToolPart } from "./workBlocks.ts";
-import type { ConversationPart } from "../../shared/protocol.ts";
+import { foldedRequestsMatch, formatWorkDuration, runNames, splitTurn, todoGroups, turnSegments, visibleWorkParts, workBlockStartsOpen, workFailed, workStartsOpen, workSummary, type ToolPart } from "./workBlocks.ts";
+import type { ConversationPart, ConversationTurn } from "../../shared/protocol.ts";
 
 const tool = (name: string, summary = name): Extract<ConversationPart, { kind: "tool" }> => ({ kind: "tool", name, summary, input: "{}", output: "" });
 const text = (value: string): Extract<ConversationPart, { kind: "text" }> => ({ kind: "text", text: value });
@@ -45,6 +45,86 @@ describe("splitTurn", () => {
   });
 });
 
+describe("turnSegments", () => {
+  it("keeps words written before a tool above it, and each run of work where it happened", () => {
+    const parts = [thinking("hm"), text("I'll check."), tool("eval"), tool("eval"), text("  \n"), text("Found it."), tool("edit"), text("Done.")];
+    expect(turnSegments(parts)).toEqual([
+      { kind: "work", start: 0, parts: [thinking("hm")] },
+      { kind: "answer", start: 1, parts: [text("I'll check.")] },
+      { kind: "work", start: 2, parts: [tool("eval"), tool("eval")] },
+      { kind: "answer", start: 5, parts: [text("Found it.")] },
+      { kind: "work", start: 6, parts: [tool("edit")] },
+      { kind: "answer", start: 7, parts: [text("Done.")] },
+    ]);
+  });
+
+  it("names each run by its first part, so a run that splits keeps the later run's name", () => {
+    const before = turnSegments([tool("A"), text(""), tool("B"), text("between"), tool("C")]);
+    const after = turnSegments([tool("A"), text("arrived"), tool("B"), text("between"), tool("C")]);
+    const runs = (segments: typeof before) => segments.flatMap((segment) => segment.kind === "work" ? [segment.start] : []);
+    expect(runs(before)).toEqual([0, 4]);
+    expect(runs(after)).toEqual([0, 2, 4]);
+  });
+
+  it("keeps commentary inside its run of work and a tools-then-answer turn as one run", () => {
+    const narration = { ...text("looking\u2026"), phase: "commentary" as const };
+    expect(turnSegments([tool("read"), narration, tool("edit"), text("done")])).toEqual([
+      { kind: "work", start: 0, parts: [tool("read"), narration, tool("edit")] },
+      { kind: "answer", start: 3, parts: [text("done")] },
+    ]);
+    expect(turnSegments([])).toEqual([]);
+  });
+});
+
+describe("foldedRequestsMatch", () => {
+  const failed = (value: string): Extract<ConversationPart, { kind: "text" }> => ({ kind: "text", text: `Error: ${value}`, failed: true });
+  const turn: ConversationTurn = { role: "assistant", ts: "2026-11-06T01:00:00Z", parts: [
+    text("Retrying the request."), failed("401 unauthorized"), failed("Connection error."), tool("bash"), failed("Overloaded"), text("Done: the token was renewed."),
+  ] };
+
+  it("names the folded row of failed requests a search's match is in, by its first part", () => {
+    expect(foldedRequestsMatch(turn, "unauthorized")).toBe(1);
+    expect(foldedRequestsMatch(turn, "connection error")).toBe(1);
+    // the error's own prefix, which the row leaves out of each line, is still in that row
+    expect(foldedRequestsMatch(turn, "Error: 401")).toBe(1);
+    expect(foldedRequestsMatch(turn, "overloaded")).toBe(4);
+  });
+
+  it("names none for a match drawn outside the rows, or none at all", () => {
+    expect(foldedRequestsMatch(turn, "token was renewed")).toBeNull();
+    expect(foldedRequestsMatch(turn, "Retrying")).toBeNull();
+    expect(foldedRequestsMatch(turn, "nowhere")).toBeNull();
+    // the first match decides, as the search's snippet does: here it is in the answer before the rows
+    expect(foldedRequestsMatch({ ...turn, parts: [text("An unauthorized call."), failed("401 unauthorized")] }, "unauthorized")).toBeNull();
+    // a user's words are never a failed request
+    expect(foldedRequestsMatch({ role: "user", ts: null, parts: [failed("401 unauthorized")] }, "unauthorized")).toBeNull();
+  });
+});
+
+describe("runNames", () => {
+  // what Turn keeps between draws: each part's run name, by part index
+  const draw = (parts: ConversationPart[], previous: ReadonlyMap<number, string>) => {
+    const runs = turnSegments(parts).flatMap((segment) => segment.kind === "work" ? [segment] : []);
+    const names = runNames(runs, new Map(parts.map((part, index) => [part, index])), previous);
+    return { names, next: new Map(runs.flatMap((run, index) => run.parts.map((part) => [parts.indexOf(part), names[index]!] as const))) };
+  };
+
+  it("names a run by its first part the first time, and keeps the name while its parts change", () => {
+    const narration = { ...text("Checking."), phase: "commentary" as const };
+    const first = draw([text("Checking."), tool("ls")], new Map());
+    expect(first.names).toEqual(["work:1"]);
+    expect(draw([narration, tool("ls")], first.next).names).toEqual(["work:1"]);
+  });
+
+  it("gives a split run's first part the old name and never hands a shown name to a new run", () => {
+    const shown = draw([tool("A"), text(""), tool("B"), text("between"), tool("C")], new Map());
+    expect(shown.names).toEqual(["work:0", "work:4"]);
+    expect(draw([tool("A"), text("arrived"), tool("B"), text("between"), tool("C")], shown.next).names).toEqual(["work:0", "work:2", "work:4"]);
+    // the run named work:0 now starts at 2; a new run at 0 must not take its name
+    expect(draw([tool("new"), text("between"), tool("A")], new Map([[2, "work:0"]])).names).toEqual(["work:0+", "work:0"]);
+  });
+});
+
 describe("workStartsOpen", () => {
   const commentary = (value: string) => ({ ...text(value), phase: "commentary" as const });
   const final = (value: string) => ({ ...text(value), phase: "final_answer" as const });
@@ -83,6 +163,33 @@ describe("workStartsOpen", () => {
     expect(workStartsOpen(false, [])).toBe(false);
     expect(workStartsOpen(false, [thinking("hm")])).toBe(false);
     expect(workStartsOpen(false, [tool("bash"), text("  ")])).toBe(false);
+  });
+});
+
+describe("workBlockStartsOpen", () => {
+  const commentary = (value: string) => ({ ...text(value), phase: "commentary" as const });
+  const running = { live: true, waiting: false, last: true };
+  const settled = { live: false, waiting: false, last: true };
+  const endsInWords = [tool("exec_command"), commentary("Still investigating")];
+
+  it("starts as it always has while Collapse work is off", () => {
+    expect(workBlockStartsOpen(running, [tool("bash")], false)).toBe(true);
+    expect(workBlockStartsOpen({ ...running, waiting: true }, [tool("bash")], false)).toBe(true);
+    expect(workBlockStartsOpen(settled, [tool("read"), text("done")], false)).toBe(false);
+    expect(workBlockStartsOpen(settled, endsInWords, false)).toBe(true);
+    // a run before the turn's last part: what follows it is still to read
+    expect(workBlockStartsOpen({ ...settled, last: false }, endsInWords, false)).toBe(false);
+    expect(workBlockStartsOpen({ ...running, live: false, last: false }, [tool("bash")], false)).toBe(false);
+  });
+
+  it("folds every block with Collapse work on, the running one and one ending in the agent's words included (#2228)", () => {
+    expect(workBlockStartsOpen(running, [tool("bash")], true)).toBe(false);
+    expect(workBlockStartsOpen(settled, endsInWords, true)).toBe(false);
+    expect(workBlockStartsOpen(settled, [tool("read"), text("done")], true)).toBe(false);
+  });
+
+  it("keeps the block that waits on the user open with Collapse work on: it may hold what they answer", () => {
+    expect(workBlockStartsOpen({ ...running, waiting: true }, [tool("bash")], true)).toBe(true);
   });
 });
 
@@ -136,6 +243,15 @@ it("keeps an approval-blocked assistant turn live, including with a last-activit
   expect(isLiveWorkTurn(turn, false, "blocked")).toBe(false);
   expect(isLiveWorkTurn(turn, true, "idle")).toBe(false);
   expect(isLiveWorkTurn({ ...turn, role: "user" }, true, "blocked")).toBe(false);
+});
+
+it("does not title a turn that ended on its final answer as running when the agent begins another by itself", async () => {
+  const { isLiveWorkTurn } = await import("./workBlocks.ts");
+  const answered = { role: "assistant" as const, ts: null, parts: [tool("Glob"), { kind: "text" as const, text: "The subagent is still running.", phase: "final_answer" as const }] };
+  // a background task ended: herdr says working, the new turn has no row yet, and nothing was sent from here
+  expect(isLiveWorkTurn(answered, true, "working")).toBe(false);
+  // words that are no final answer yet are the running turn's own
+  expect(isLiveWorkTurn({ ...answered, parts: [answered.parts[0]!, { kind: "text" as const, text: "Let me look." }] }, true, "working")).toBe(true);
 });
 
 it("does not title a finished turn as running after a message was sent over it", async () => {

@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState, type PointerEvent, type RefObject } from "react";
 import type { HerdrTab, TabMoved } from "../../shared/protocol.ts";
-import { adjacentTabBoundary, movedTabOrder, tabDropBoundary } from "./tabOrder.ts";
+import { adjacentTabBoundary, drawnTabBoundary, movedTabOrder, tabDropBoundary } from "./tabOrder.ts";
 
 type Drag = { tabId: string; boundary: number | null };
 type Press = { tabId: string; pointerId: number; element: HTMLElement; x: number; y: number; startX: number; startY: number; started: boolean };
@@ -14,8 +14,13 @@ export interface TabDragOut {
   cancel: () => void;
 }
 
-/** A drag previews only an insertion line. Herdr's next snapshot owns the actual order. */
-export function useTabReorder({ owner, tabs, strip, moveTab, failed, stale, outside }: {
+/**
+ * A drag previews only an insertion line. Herdr's next snapshot owns the actual order.
+ * `fixed`: the order is not this client's to change (the Herdr app's window lays the PC out,
+ * lib/machineContext.tsx AppLayoutContext): no insertion line and no move, as among one tab; a
+ * drag can still leave the strip (`outside`).
+ */
+export function useTabReorder({ owner, tabs, strip, moveTab, failed, stale, outside, fixed = false }: {
   owner: string;
   tabs: HerdrTab[];
   strip: RefObject<HTMLDivElement | null>;
@@ -23,13 +28,14 @@ export function useTabReorder({ owner, tabs, strip, moveTab, failed, stale, outs
   failed: (error: unknown) => void;
   stale: () => void;
   outside?: TabDragOut;
+  fixed?: boolean;
 }) {
   const [drag, setDrag] = useState<Drag | null>(null);
   const [moving, setMoving] = useState(false);
   const ids = tabs.map((tab) => tab.tab_id);
   const key = JSON.stringify(ids);
-  const current = useRef({ owner, key, ids, moveTab, failed, stale, outside });
-  current.current = { owner, key, ids, moveTab, failed, stale, outside };
+  const current = useRef({ owner, key, ids, moveTab, failed, stale, outside, fixed });
+  current.current = { owner, key, ids, moveTab, failed, stale, outside, fixed };
   const press = useRef<Press | null>(null);
   const operation = useRef<Operation | null>(null);
   const suppressClick = useRef(false);
@@ -72,7 +78,7 @@ export function useTabReorder({ owner, tabs, strip, moveTab, failed, stale, outs
   }, [owner]);
 
   const requestMove = (tabId: string, boundary: number): void => {
-    if (operation.current || !movedTabOrder(current.current.ids, tabId, boundary)) return;
+    if (operation.current || current.current.fixed || !movedTabOrder(current.current.ids, tabId, boundary)) return;
     cancelDrag();
     const saved = current.current;
     const op: Operation = { expected: null, settled: false };
@@ -106,9 +112,12 @@ export function useTabReorder({ owner, tabs, strip, moveTab, failed, stale, outs
   };
   const boundaryAt = (held: Press): number | null => {
     const row = strip.current;
-    if (!row || !overStrip(held) || current.current.ids.length < 2) return null;
-    const rects = [...row.querySelectorAll<HTMLElement>(".tab-strip-item")].map((item) => item.getBoundingClientRect());
-    return tabDropBoundary(rects, held.x);
+    if (!row || !overStrip(held) || current.current.ids.length < 2 || current.current.fixed) return null;
+    const items = [...row.querySelectorAll<HTMLElement>(".tab-strip-item")];
+    const shown = tabDropBoundary(items.map((item) => item.getBoundingClientRect()), held.x);
+    // a row that leaves tabs out (TabStrip's More) names each drawn tab's place among them all
+    const places = items.map((item, index) => Number(item.dataset["tabIndex"] ?? index));
+    return drawnTabBoundary(places, shown);
   };
   const paintDrag = (held: Press): void => {
     const boundary = boundaryAt(held);
@@ -130,7 +139,7 @@ export function useTabReorder({ owner, tabs, strip, moveTab, failed, stale, outs
     // Touch keeps its native swipe scroll; its menu offers the same adjacent moves.
     if (event.pointerType !== "mouse" || event.button !== 0 || event.ctrlKey || !event.isPrimary) return;
     suppressClick.current = false;
-    if (operation.current || (current.current.ids.length < 2 && !current.current.outside)) return;
+    if (operation.current || ((current.current.ids.length < 2 || current.current.fixed) && !current.current.outside)) return;
     event.preventDefault(); // dragging an inactive tab must not steal terminal or keyboard focus
     const element = event.currentTarget;
     press.current = { tabId, pointerId: event.pointerId, element, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, started: false };

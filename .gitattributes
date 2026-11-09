@@ -3,5 +3,5 @@
 # core.autocrlf=true gets CRLF scripts, and sh stops at `set -u\r` ("set: Illegal option -").
 * text=auto eol=lf
 
-# Unified-diff blank context lines are a single space; preserve the pinned patch bytes.
-patches/herdr-atomic-command-launch.patch whitespace=-blank-at-eol,-blank-at-eof
+# raw terminal output recorded from real CLIs: kept byte for byte, carriage returns included
+server/fixtures/**/*.pty -text

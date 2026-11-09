@@ -7,3 +7,57 @@
 .files-dialog .modal-body {
   min-height: calc(var(--control-h) * 8);
 }
+
+/*
+ * Beside the pane (Settings: Files beside the pane, a wide window): the docked file panel's column
+ * (FileViewer.css .file-panel), its header one compact row on a hairline like the docked viewer's,
+ * and the list filling the rest of the height.
+ */
+/* a docked file or web page has its place: kept out of the row, not unmounted */
+.files-panel[hidden] {
+  display: none;
+}
+
+.files-dialog-docked {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.files-dialog-docked .modal-header {
+  min-height: calc(var(--control-h) + var(--space-2));
+  padding: 0 var(--space-2) 0 var(--space-3);
+}
+
+.files-dialog-docked .modal-title {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+}
+
+.files-dialog-docked .modal-body {
+  min-height: 0;
+  padding: var(--space-3);
+}
+
+/* with Documents, four tabs do not fit beside the title and Close on
+   a phone or a narrow panel: they take the row under them, each an equal share of it */
+@media (max-width: 480px) {
+  .files-dialog .modal-header:has(.files-dialog-tabs > :nth-child(4)) { flex-wrap: wrap; }
+  .files-dialog .files-dialog-tabs:has(> :nth-child(4)) { order: 1; flex: 1 1 100%; display: flex; }
+  .files-dialog .files-dialog-tabs:has(> :nth-child(4)) > button { flex: 1 1 auto; min-width: 0; padding-inline: var(--space-1); overflow: hidden; }
+}
+
+@container file-panel (max-width: 480px) {
+  .files-dialog-docked .modal-header:has(.files-dialog-tabs > :nth-child(4)) { flex-wrap: wrap; padding-block: var(--space-1); }
+  .files-dialog-docked .files-dialog-tabs:has(> :nth-child(4)) { order: 1; flex: 1 1 100%; display: flex; }
+  .files-dialog-docked .files-dialog-tabs:has(> :nth-child(4)) > button { flex: 1 1 auto; min-width: 0; padding-inline: var(--space-1); overflow: hidden; }
+  /* the title gives way below 360px: Close keeps the row's end */
+  .files-dialog-docked .modal-header:has(.files-dialog-tabs > :nth-child(4)) > .icon-button:last-child { margin-left: auto; }
+}
+
+/* the narrowest panel keeps the tabs and Close; the palette's folder search waits for a wider one */
+@container file-panel (max-width: 360px) {
+  .files-dialog-docked .modal-title,
+  .files-dialog-docked .files-dialog-tabs + .icon-button:not(:last-child) { display: none; }
+}

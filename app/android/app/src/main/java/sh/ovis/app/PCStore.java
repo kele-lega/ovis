@@ -15,6 +15,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -26,6 +27,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 /**
  * The PCs this app knows, kept in SharedPreferences, as PCStore in the iOS app keeps them in
@@ -36,6 +39,46 @@ final class PCStore {
 
     /** The address to open instead of the bare origin until a PC page loads: a pairing link keeps its code through Try again. In memory only, as it can hold that code. */
     static String pendingStart;
+
+    /** A PC's page on the hosted shell the app was opened with (appLink), until the connect screen takes it. In memory only, as it can hold a pairing offer's code. */
+    static volatile String link;
+
+    private static final Pattern PC_SCOPE = Pattern.compile("/s/([0-9a-f]{32})/?");
+
+    /**
+     * `data` when an intent of `action` is a view of a PC on the hosted shell
+     * (`https://app.ovis.sh/s/<server_id>/`, within the manifest's verified link), whatever its
+     * fragment or query, else null: a link to another page of the hosted shell is not taken, so it
+     * does not close the page that is open.
+     */
+    static String appLink(String action, String data) {
+        if (!"android.intent.action.VIEW".equals(action) || data == null) return null;
+        return appScope(data) == null ? null : data;
+    }
+
+    /** The scope key (`https://app.ovis.sh/s/<server_id>/`) of a PC's link on the hosted shell, or null. */
+    static String appScope(String link) {
+        URI uri;
+        try {
+            uri = new URI(link);
+        } catch (URISyntaxException notAnAddress) {
+            return null;
+        }
+        boolean hostedShell = "https".equalsIgnoreCase(uri.getScheme()) && "app.ovis.sh".equalsIgnoreCase(uri.getHost()) && (uri.getPort() == -1 || uri.getPort() == 443);
+        Matcher scope = PC_SCOPE.matcher(uri.getRawPath() == null ? "" : uri.getRawPath());
+        return hostedShell && scope.matches() ? "https://app.ovis.sh/s/" + scope.group(1) + "/" : null;
+    }
+
+    /**
+     * Whether an app link is one to pair from: the PC's scope alone or with its pairing offer, which
+     * the connect screen checks as it does a scanned QR code (app/web/shell.js relayLink). Any other
+     * fragment or query is a view of the PC (a file, a pane), which opens only a PC already saved.
+     */
+    static boolean pairingLink(String link) {
+        URI uri = URI.create(link);
+        String fragment = uri.getRawFragment();
+        return uri.getRawQuery() == null && (fragment == null || fragment.isEmpty() || fragment.startsWith("offer="));
+    }
 
     /** Why the PC's page failed, for the error page: WebView's reason, or the HTTP status it answered. */
     static volatile String failure;
@@ -75,7 +118,12 @@ final class PCStore {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
 
-    /** Origins opened before, the latest first. */
+    /**
+     * PCs opened before, the latest first, each by its key: the origin of a PC opened at its own
+     * address, or the scope of one opened through the Ovis relay (`https://app.ovis.sh/s/<server_id>/`),
+     * as every relay PC shares the hosted shell's origin. Entries saved before relay PCs are origins
+     * and stay as they are.
+     */
     static List<String> saved(Context context) {
         List<String> list = new ArrayList<>();
         try {
@@ -91,7 +139,27 @@ final class PCStore {
         prefs(context).edit().putString("saved", new JSONArray(list).toString()).apply();
     }
 
-    /** The PC the app opens at launch, an origin; null shows the connect screen. */
+    /** Labels of saved PCs by key, from a relay pairing offer's name. */
+    static JSONObject names(Context context) {
+        try {
+            return new JSONObject(prefs(context).getString("names", "{}"));
+        } catch (JSONException damaged) {
+            return new JSONObject();
+        }
+    }
+
+    static void setName(Context context, String key, String name) {
+        JSONObject names = names(context);
+        try {
+            if (name == null) names.remove(key);
+            else names.put(key, name);
+        } catch (JSONException notStored) {
+            return;
+        }
+        prefs(context).edit().putString("names", names.toString()).apply();
+    }
+
+    /** The PC the app opens at launch, a key (see saved); null shows the connect screen. */
     static String current(Context context) {
         return prefs(context).getString("current", null);
     }
@@ -105,28 +173,119 @@ final class PCStore {
         return prefs(context).getString("last", null);
     }
 
-    /** Makes origin the PC to open; it joins the saved PCs only once a page of it loads (remember). */
-    static void open(Context context, String origin, String start) {
-        prefs(context).edit().putString("current", origin).putString("last", origin).apply();
+    /** Makes the PC `key` the one to open; it joins the saved PCs only once a page of it loads (remember). */
+    static void open(Context context, String key, String start) {
+        prefs(context).edit().putString("current", key).putString("last", key).apply();
         pendingStart = start;
     }
 
-    /** Puts origin first in the saved PCs: a page of it has loaded, so an address that never answered is not kept. */
-    static void remember(Context context, String origin) {
+    /** Puts the PC `key` first in the saved PCs: a page of it has loaded, so an address that never answered is not kept. */
+    static void remember(Context context, String key) {
         List<String> list = saved(context);
-        list.remove(origin);
-        list.add(0, origin);
+        list.remove(key);
+        list.add(0, key);
         setSaved(context, list);
     }
 
-    static void forget(Context context, String origin) {
+    static void forget(Context context, String key) {
         List<String> list = saved(context);
-        list.remove(origin);
+        list.remove(key);
         setSaved(context, list);
+        setName(context, key, null);
         SharedPreferences.Editor edit = prefs(context).edit();
-        if (origin.equals(current(context))) edit.remove("current");
-        if (origin.equals(last(context))) edit.remove("last");
+        if (key.equals(current(context))) edit.remove("current");
+        if (key.equals(last(context))) edit.remove("last");
         edit.apply();
+    }
+
+    /**
+     * The key of a PC opened through the Ovis relay: `scope`, when it is an http or https origin with a
+     * path ending in `/` and `url` is on that origin within that path; null otherwise.
+     */
+    static String scopeKey(String scope, String url) {
+        String origin = origin(scope);
+        String path = rawPath(scope);
+        if (origin == null || !origin.equals(origin(url)) || path.length() < 2 || !path.endsWith("/")) return null;
+        return scope.equals(origin + path) && belongs(url, scope) ? scope : null;
+    }
+
+    /**
+     * Whether `url` is a page of the PC `key`: on its origin, and for a relay PC within its scope, path
+     * segment by path segment (`/s/A/` is not within `/s/AB/`) and only as a browser would load it
+     * (cleanPath): `<scope>../<other>/` resolves to another PC. A PC saved by its origin takes any page of it.
+     */
+    static boolean belongs(String url, String key) {
+        String origin = origin(url);
+        if (origin == null || !origin.equals(origin(key))) return false;
+        String scope = rawPath(key);
+        if (scope.isEmpty() || scope.equals("/")) return true;
+        String path = cleanPath(rawPath(url));
+        return path != null && cleanPath(scope) != null && scope.endsWith("/") && (path.endsWith("/") ? path : path + "/").startsWith(scope);
+    }
+
+    /**
+     * `path` (percent-encoded, as a URL carries it) when a browser loads it as written, else null: no
+     * `.` or `..` segment, plain or percent-encoded (once or twice), no encoded `/` and no `\`, which a
+     * browser reads as `/`. A page within a scope never needs any of them.
+     */
+    static String cleanPath(String path) {
+        if (path == null || path.indexOf('\\') >= 0) return null;
+        String lower = path.toLowerCase(Locale.ROOT);
+        if (lower.contains("%2f") || lower.contains("%5c")) return null;
+        String decoded = percentDecoded(path);
+        if (decoded == null || decoded.indexOf('\\') >= 0) return null;
+        String twice = decoded.toLowerCase(Locale.ROOT);
+        if (twice.contains("%2e") || twice.contains("%2f") || twice.contains("%5c")) return null;
+        for (String segment : decoded.split("/", -1)) {
+            if (segment.equals(".") || segment.equals("..")) return null;
+        }
+        return path;
+    }
+
+    /** `text` with its percent escapes read as UTF-8, or null for a malformed escape or malformed UTF-8. */
+    private static String percentDecoded(String text) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c != '%') {
+                byte[] bytes = String.valueOf(c).getBytes(StandardCharsets.UTF_8);
+                out.write(bytes, 0, bytes.length);
+                continue;
+            }
+            if (i + 2 >= text.length()) return null;
+            int high = Character.digit(text.charAt(i + 1), 16), low = Character.digit(text.charAt(i + 2), 16);
+            if (high < 0 || low < 0 || text.charAt(i + 1) > 'f' || text.charAt(i + 2) > 'f') return null;
+            out.write(high * 16 + low);
+            i += 2;
+        }
+        try {
+            return StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(out.toByteArray()))
+                .toString();
+        } catch (java.nio.charset.CharacterCodingException malformed) {
+            return null;
+        }
+    }
+
+    /** The path, query and fragment the PC `key` opens at: a pairing link's on the PC's origin, else the PC's scope or root. */
+    static String startPath(String start, String key) {
+        String origin = origin(key);
+        if (start == null || origin == null || !origin.equals(origin(start))) {
+            String scope = rawPath(key);
+            return scope.isEmpty() ? "/" : scope;
+        }
+        return startOn(origin, start).substring(origin.length());
+    }
+
+    private static String rawPath(String text) {
+        try {
+            String path = new URI(text).getRawPath();
+            return path == null ? "" : path;
+        } catch (URISyntaxException e) {
+            return "";
+        }
     }
 
     /**
@@ -197,6 +356,20 @@ final class PCStore {
             else if (https || publicHttp(hop)) return hop;
         }
         return null;
+    }
+
+    /**
+     * The origin on the way from the address being opened (`from`) to a held-back redirect's `target`
+     * that the app refuses to go to on its own, or null. With `ovis`, the Ovis server ovisOrigin found
+     * over `path`, it is judged by that whole way (insecureHop). Without one the target is taken for a
+     * sign-in in front of the PC, which loads without the bridge: judged by the target's own origin,
+     * as the probe's later hops are not where the WebView goes; a target with no origin this class can
+     * read (an underscore in its host) is refused as it is.
+     */
+    static String refusedHop(String from, String target, String ovis, List<String> path) {
+        if (ovis != null) return insecureHop(from, path);
+        String next = origin(target);
+        return next == null ? target : insecureHop(from, Collections.singletonList(next));
     }
 
     private static final Pattern IPV4 = Pattern.compile("^(0|[1-9]\\d{0,2})\\.(0|[1-9]\\d{0,2})\\.(0|[1-9]\\d{0,2})\\.(0|[1-9]\\d{0,2})$");

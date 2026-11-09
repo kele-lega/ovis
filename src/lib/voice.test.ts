@@ -8,6 +8,7 @@ import {
   createSpeechGate,
   createVoiceEngine,
   dictationLocale,
+  pickVoiceEngine,
   insertAtCaret,
   levelFromRms,
   micErrorReason,
@@ -180,6 +181,25 @@ describe("replaceIfUnchanged", () => {
   });
 });
 
+describe("pickVoiceEngine", () => {
+  it("prefers the key on auto and falls back to the browser", () => {
+    expect(pickVoiceEngine("auto", true, true, true)).toEqual({ engine: "server", unavailableReason: null });
+    expect(pickVoiceEngine("auto", false, true, true)).toEqual({ engine: "browser", unavailableReason: null });
+    expect(pickVoiceEngine("auto", false, true, false)).toEqual({ engine: null, unavailableReason: "not_configured" });
+  });
+
+  it("holds to the browser even with a key saved", () => {
+    expect(pickVoiceEngine("browser", true, true, true)).toEqual({ engine: "browser", unavailableReason: null });
+    expect(pickVoiceEngine("browser", true, true, false)).toEqual({ engine: null, unavailableReason: "unsupported" });
+  });
+
+  it("holds to the key and never falls back to the browser", () => {
+    expect(pickVoiceEngine("server", true, true, true)).toEqual({ engine: "server", unavailableReason: null });
+    expect(pickVoiceEngine("server", false, true, true)).toEqual({ engine: null, unavailableReason: "not_configured" });
+    expect(pickVoiceEngine("server", true, false, true)).toEqual({ engine: null, unavailableReason: "unsupported" });
+  });
+});
+
 describe("dictationLocale", () => {
   it("maps the UI language to a recognition locale when the browser names none", () => {
     expect(dictationLocale("auto", "system", "ko", [])).toBe("ko-KR");
@@ -235,6 +255,7 @@ describe("error reasons and keywords", () => {
     expect(micErrorReason("NotFoundError")).toBe("no_mic");
     expect(speechErrorReason("no-speech")).toBeNull();
     expect(speechErrorReason("not-allowed")).toBe("permission");
+    expect(speechErrorReason("service-not-allowed")).toBe("speech_unavailable");
     expect(speechErrorReason("audio-capture")).toBe("no_mic");
     expect(speechErrorReason("network")).toBe("network");
   });

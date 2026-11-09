@@ -26,6 +26,15 @@ const touch = (cdp: CDPSession, type: "touchStart" | "touchMove" | "touchEnd", p
 
 /** A finger moves after the row lifts, or immediately for a quick scroll stroke. */
 async function stroke(page: Page, cdp: CDPSession, from: { x: number; y: number }, to: { x: number; y: number }, holdMs: number, during?: () => Promise<void>): Promise<void> {
+  // the demo's timeline raises a finish droplet over the top of a phone's screen at its own moment, where the first
+  // row sits: a person dismisses it before pressing the row under it
+  if (holdMs > 0) {
+    const dismiss = page.locator(".droplet-close");
+    if (await dismiss.isVisible()) {
+      await dismiss.tap();
+      await page.locator(".droplet").waitFor({ state: "detached" });
+    }
+  }
   await touch(cdp, "touchStart", from);
   if (holdMs > 0) await page.locator(".workspace.is-lifted").waitFor({ timeout: 5_000 });
   const steps = 12;
@@ -132,6 +141,16 @@ const waitOrder = (page: Page, want: readonly string[], label: string) => page.w
 const logCount = (page: Page, kind: string) => page.evaluate((kind) => ((window as unknown as { __herdrDemoOrder: { log(): { kind: string }[] } }).__herdrDemoOrder.log()).filter((entry) => entry.kind === kind).length, kind);
 const waitLog = (page: Page, kind: string, count: number) => page.waitForFunction(([kind, count]) =>
   ((window as unknown as { __herdrDemoOrder: { log(): { kind: string }[] } }).__herdrDemoOrder.log()).filter((entry) => entry.kind === kind).length >= (count as number), [kind, count] as const, { timeout: 10_000 });
+/**
+ * The page reads the roster now and counts that read, as a tab coming back does (useMachineRoster's
+ * visibilitychange). A case must not wait on a refetch it did not start: one debounced after an earlier
+ * move may already have come, and with the stream open the next poll is 30 s away.
+ */
+async function readRoster(page: Page): Promise<void> {
+  const reads = await logCount(page, "read-start");
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await waitLog(page, "read-start", reads + 1);
+}
 let markerStatus: "working" | "idle" = "idle";
 /**
  * A pane-status patch after a delivery: once its badge shows, every frame before it was drawn. The
@@ -279,9 +298,8 @@ async function checkRefusedMoves(browser: Browser, url: string): Promise<unknown
   await demo(page, "deliverSse", stale);
   await demo(page, "cacheNextGet", stale);
   await demo(page, "holdGets", false);
-  const reads = await logCount(page, "read-start");
   await demo(page, "releaseAllGets");
-  await waitLog(page, "read-start", reads + 1);
+  await readRoster(page);
   await drawn(page);
   assert.deepEqual(await localTop(page), P, "a pre-move roster by SSE and as a cached GET cannot undo the confirmed move");
   assert.deepEqual((await drawnOrders(page)).slice(settled), [], "nothing was drawn after herdr's order");
@@ -380,10 +398,9 @@ async function checkUnseenRetiredEra(browser: Browser, url: string): Promise<unk
   assert.deepEqual(await localTop(page), X, "an unseen first-lifetime SSE roster cannot restore O; the current proof keeps the guard");
   assert.equal(await logCount(page, "verify-start"), starts + 1, "the mismatch asked once");
   await demo(page, "cacheNextGet", unseen);
-  const reads = await logCount(page, "read-start");
   await demo(page, "holdGets", false);
   await demo(page, "releaseAllGets");
-  await waitLog(page, "read-start", reads + 1);
+  await readRoster(page);
   await drawn(page);
   assert.deepEqual(await localTop(page), X, "an unseen first-lifetime cached GET cannot restore O");
   // immediate-load variant: settlement's load is held, the unseen roster arrives by SSE and invalidates it
@@ -589,8 +606,7 @@ async function checkOrderEvidence(browser: Browser, url: string): Promise<{ happ
   // the held pre-restart roster, by SSE and as a cached GET, cannot bring the old order back
   await demo(page, "deliverSse", beforeRestart);
   await demo(page, "cacheNextGet", beforeRestart);
-  const polls = await logCount(page, "read-start");
-  await waitLog(page, "read-start", polls + 1);
+  await readRoster(page);
   await drawn(page);
   assert.deepEqual(await localTop(page), S, "a retired epoch's SSE roster and cached GET change nothing");
   assert.deepEqual((await drawnOrders(page)).slice(settledMark), [], "nothing was drawn after the new server's order");

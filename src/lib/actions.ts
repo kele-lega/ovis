@@ -5,8 +5,11 @@
  */
 
 import type { SplitPaneDirection } from "../../shared/protocol.ts";
-import type { MachineSetupInitial } from "../../shared/tailnet.ts";
 import type { ZoomMode } from "./layoutMap.ts";
+import type { Machine } from "../../shared/machines.ts";
+
+/** what Add a connection → SSH fills the Add PC dialog with: the address to connect to and, where known, a name */
+export interface AddPcPreset { destination: string; name?: string }
 
 export type PaneView = "chat" | "terminal";
 
@@ -20,6 +23,12 @@ export interface AppActions {
   selectPane: (paneId: string) => void;
   /** the previous/next pane in sidebar order; wraps around */
   selectAdjacentPane: (direction: -1 | 1) => void;
+  /** the previous/next tab of the selected pane's workspace in tab strip order; wraps around */
+  selectAdjacentTab: (direction: -1 | 1) => void;
+  /** the selected pane's workspace's tab at `number` (1-based) in tab strip order, as herdr's prefix+1..9; nothing past the last */
+  selectTabNumber: (number: number) => void;
+  /** the previous/next workspace of the selected PC in sidebar order (pins, worktree groups); wraps around */
+  selectAdjacentWorkspace: (direction: -1 | 1) => void;
   setView: (view: PaneView) => void;
   toggleView: () => void;
   /** Focus the selected pane's mounted input without sending any text or keys. */
@@ -31,6 +40,8 @@ export interface AppActions {
    * else the selected pane's. Nothing happens without a workspace to add the tab to.
    */
   openNewTab: (target?: { machineId: string; workspaceId: string }) => void;
+  /** The inline name field of the selected pane's tab, as the tab menu's Rename opens it; nothing while the tab strip is not drawn. */
+  renameTab: () => void;
   /**
    * A shell tab in the same workspace, at once and with no dialog, as herdr's own new tab: the
    * new pane opens unless another one was opened meanwhile. Rejects with herdr's refusal.
@@ -57,9 +68,13 @@ export interface AppActions {
   agentStarted: (machineId: string, paneId: string) => void;
   openFind: () => void;
   openSettings: () => void;
-  /** the Add PC dialog, from Settings → Remote PCs and the palette; Settings closes first */
-  openAddPc: (initial?: MachineSetupInitial) => void;
+  /** the Add PC dialog, from Settings → Devices and PCs and the palette; Settings closes first. `preset` fills its address (Add a connection → SSH) */
+  openAddPc: (preset?: AddPcPreset) => void;
+  /** a PC's own setup dialog (Connect on a PC saved in herdr), from Settings → Devices and PCs; Settings closes first */
+  connectPc: (machine: Machine) => void;
   toggleSidebar: () => void;
+  /** the sidebar's Filter field, focused, with the drawer or the sidebar opened first: drawn even where Settings → Appearance leaves it out */
+  openSidebarFilter: () => void;
   /** flips dark/light (a `system` setting becomes the opposite of the resolved theme) */
   toggleTheme: () => void;
   /** Sign out of token/device authentication; null for automatic local/Tailscale access. */
@@ -69,6 +84,10 @@ export interface AppActions {
   refresh: () => void;
   /** null without a pane: the files of its folder, each opened in the file viewer */
   openFiles: (() => void) | null;
+  /** a page this PC serves (lib/webPanel.ts localPageAddress) in the web panel; null unless Web links open in the app */
+  openLocalPage: ((url: string) => void) | null;
+  /** Search conversation over the selected pane's chat; null where it shows no chat, or its PC's bridge does not search */
+  searchConversation: (() => void) | null;
   /**
    * herdr's split beside the selected pane (its prefix+v and prefix+-), null without a pane. The
    * selection stays on this pane, as herdr's --no-focus keeps its focus, unless `focus` asks for
@@ -80,4 +99,9 @@ export interface AppActions {
    * lib/layoutMap.ts): its tab shows it alone, or every pane again; null without a pane
    */
   zoomPane: ((mode: ZoomMode) => void) | null;
+  /**
+   * The Zoom pane shortcut: zooms the selected pane, or unzooms it where its tab shows it alone;
+   * nothing for a pane alone in its tab. null where zoomPane is
+   */
+  toggleZoom: (() => void) | null;
 }

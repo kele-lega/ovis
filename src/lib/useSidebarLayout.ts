@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppLink } from "./deepLink.ts";
 import { watchDrawerSwipe } from "./edgeSwipe.ts";
 import { FILE_PANEL_DOCK_QUERY, storedFilePanelWidth } from "./filePanelWidth.ts";
@@ -21,13 +21,15 @@ export function useSidebarLayout({ initialLink }: SidebarLayoutParams) {
   // on a phone the drawer follows a swipe in from the left edge, and a swipe back (lib/edgeSwipe.ts)
   useEffect(() => watchDrawerSwipe(() => drawerOpenRef.current, setDrawerOpen), []);
   // Escape puts the open drawer away and goes no further: in the capture phase, so a terminal that kept the
-  // focus never receives it. A dialog, an IME composition or a search field with words in it (the sidebar's
-  // filter clears them first) on top keeps its own Escape
+  // focus never receives it. A dialog (an alert dialog such as Remove PC's confirm too), an open row menu (its popover
+  // closes first, between a phone's width and the desktop's), an IME composition, a search field with words in it (the sidebar's
+  // filter clears them first) or a field marked data-own-escape (a PC's name being edited) keeps its own Escape
   useEffect(() => {
     const onEscape = (event: KeyboardEvent): void => {
       if (event.key !== "Escape" || !drawerOpenRef.current || event.isComposing || event.keyCode === 229) return;
-      if (document.querySelector('[role="dialog"]')) return;
+      if (document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')) return;
       if (event.target instanceof HTMLInputElement && event.target.type === "search" && event.target.value !== "") return;
+      if (event.target instanceof Element && event.target.closest("[data-own-escape]") !== null) return;
       event.preventDefault();
       event.stopPropagation();
       setDrawerOpen(false);
@@ -41,5 +43,13 @@ export function useSidebarLayout({ initialLink }: SidebarLayoutParams) {
   const [sidebarWidth, setSidebarWidth] = useState(storedSidebarWidth);
   const filePanelAvailable = useMediaQuery(FILE_PANEL_DOCK_QUERY);
   const [filePanelWidth, setFilePanelWidth] = useState(storedFilePanelWidth);
-  return { drawerOpen, setDrawerOpen, drawerOpenRef, wideScreen, sidebarCollapsed, setSidebarCollapsed, sidebarWidth, setSidebarWidth, filePanelAvailable, filePanelWidth, setFilePanelWidth };
+  // the palette's Filter workspaces and agents: the drawer or the sidebar comes out, and the sidebar shows its
+  // field and focuses it on each new count (components/MachineSidebar.tsx)
+  const [sidebarFilterRequest, setSidebarFilterRequest] = useState(0);
+  const openSidebarFilter = useCallback(() => {
+    if (window.matchMedia("(max-width: 768px)").matches) setDrawerOpen(true);
+    else setSidebarCollapsed(false);
+    setSidebarFilterRequest((count) => count + 1);
+  }, []);
+  return { drawerOpen, setDrawerOpen, drawerOpenRef, wideScreen, sidebarCollapsed, setSidebarCollapsed, sidebarWidth, setSidebarWidth, filePanelAvailable, filePanelWidth, setFilePanelWidth, sidebarFilterRequest, openSidebarFilter };
 }

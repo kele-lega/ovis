@@ -1,7 +1,7 @@
 import type { DialogReader } from "./registry.ts";
 import { type InteractivePrompt } from "../../shared/protocol.ts";
 import { createHash } from "node:crypto";
-import { ANSI_RE, type AnswerStep, KEY, type MenuRow, NUMBERED_OPTION_RE, type NumberedRow, type ParsedPrompt, SELECTED_RE, cleanLine, findLastIndex, finishPrompt, isDivider, keySteps, navigationKeys, normalizeText, parseNumberedRows, parsedByPublicPrompt, publicPrompt, sequentialRows } from "./shared.ts";
+import { ANSI_RE, type AnswerStep, type CardWords, KEY, type MenuRow, NUMBERED_OPTION_RE, type NumberedRow, type ParsedPrompt, SELECTED_RE, cleanLine, englishOf, findLastIndex, finishPrompt, isDivider, keySteps, navigationKeys, normalizeText, own, parseNumberedRows, publicPrompt, sequentialRows, parsedByPublicPrompt } from "./shared.ts";
 
 /**
  * The last resort, for a pane herdr reports blocked that none of the readers above know (a
@@ -51,6 +51,18 @@ const NOT_PROMPT_TEXT_RE = /^(?:[❯›>"'“]|\$ )/;
 const WORKING_LINE_RE = /^[·✢✳✶✻✽*] (\S(?:.*\S)?…) \((?:\d+h )?(?:\d+m )?\d+s · [↑↓] [\d.,]+[kKmM]? tokens( · esc to interrupt)?\)$/u;
 
 /**
+ * The ticking start of omp's status row under its panel while a question waits, in every status-line preset its fixtures
+ * hold (omp 18.12-18.13): a spinner frame, braille or the ascii preset's `/-\|`, and the elapsed time, or `π` at rest.
+ * The separator and segments after it are the user's choice (" · ⬢ …", " > ⬢ … ▶──6%", " > [M] …", Nerd Font gaps)
+ * and stay in the id, as do the model, folder and context they name (#3412, #3416). It may follow the Nerd Font
+ * band's powerline cap or the box shape's top border (`╭── `). A braille frame and a time is omp's alone and needs nothing
+ * more, as the user may have turned the context segment off; the ascii preset's frame or the resting `π` also needs
+ * the context gauge every preset draws (`◫ 5.7%`, `▶──6%`, `>--6%`, `──6%`), so a question's "- 5s delay" or
+ * "| 30s timeout" is no status row.
+ */
+const OMP_STATUS_ROW_RE = /^((?:[\ue0b0-\ue0d4] |╭─+ )?)(?:[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:\d+h )?(?:\d+m )?\d+s( +\S.*)|(?:[/\\|-] (?:\d+h )?(?:\d+m )?\d+s|π)( +\S.*(?:◫ |[─-])\d+(?:\.\d+)?%.*))$/u;
+
+/**
  * How a fallback card's id reads a line of the screen. Claude Code keeps its working line on the
  * screen while it waits on a prompt, and the line's spinner, time and token count change every
  * second or so. An id that took them in refused each answer tapped after a tick as stale (#365).
@@ -64,11 +76,20 @@ const WORKING_LINE_RE = /^[·✢✳✶✻✽*] (\S(?:.*\S)?…) \((?:\d+h )?(?:\
  * "Deleting production…".
  */
 function steadyReader(agent: string, shown: string[]): SteadyReader {
-  const working = agent === "claude" ? shown.flatMap((line, at) => WORKING_LINE_RE.test(line) ? [at] : []) : [];
+  const pattern = agent === "claude" ? WORKING_LINE_RE : agent === "omp" ? OMP_STATUS_ROW_RE : null;
+  // omp draws its status row last, under the panel: a status-shaped line anywhere else is read as written, and a
+  // row whose exact text another shown line also has is not blanked at all, as `read` goes by the text (#3412)
+  const last = shown.at(-1);
+  const working = pattern === null ? []
+    : agent === "omp" ? (last !== undefined && pattern.test(last) && shown.indexOf(last) === shown.length - 1 ? [shown.length - 1] : [])
+    : shown.flatMap((line, at) => pattern.test(line) ? [at] : []);
   const [at] = working;
   if (working.length !== 1 || at === undefined) return { read: (other) => other, working: null };
   const line = shown[at]!;
-  const steady = line.replace(WORKING_LINE_RE, (_all, doing: string, hint: string | undefined) => `* ${doing} (<time> · <tokens>${hint ?? ""})`);
+  const steady = agent === "omp"
+    // the spinner and the elapsed time, or the resting π, are omp's ticking part; the model, folder and context stay (#3412)
+    ? line.replace(OMP_STATUS_ROW_RE, (_all, lead: string, braille: string | undefined, gauged: string | undefined) => `${lead}<status>${braille ?? gauged}`)
+    : line.replace(WORKING_LINE_RE, (_all, doing: string, hint: string | undefined) => `* ${doing} (<time> · <tokens>${hint ?? ""})`);
   return { read: (other) => other === line ? steady : other, working: at };
 }
 
@@ -101,7 +122,7 @@ export function parseFallbackPrompt(agent: string, screen: string): InteractiveP
     return screenCard(lines, shown, steady, finishPrompt(agent, {
       // the body is every other line above the rows, so a changed command above a same-looking
       // menu is another card; the display cap applies after the hash
-      kind: "menu", fallback: true, title: "Waiting for your answer", question: question ?? "The agent is waiting for your answer.",
+      kind: "menu", fallback: true, title: own("Waiting for your answer"), question: question ?? own("The agent is waiting for your answer."),
       body,
       options: choices.map(({ label }) => ({ label, description: null })),
       multi_select: false, custom_option_index: null,
@@ -141,7 +162,7 @@ export function parseFallbackPrompt(agent: string, screen: string): InteractiveP
     ];
     const body = withoutLine(above, question);
     return screenCard(lines, dialogShown, steady, finishPrompt(agent, {
-      kind: "menu", fallback: true, title: "Waiting for your answer", question: question ?? "The agent is waiting for your answer.",
+      kind: "menu", fallback: true, title: own("Waiting for your answer"), question: question ?? own("The agent is waiting for your answer."),
       body,
       options: choices.map(({ label }) => ({ label, description: null })),
       multi_select: false, custom_option_index: customIndex,
@@ -159,20 +180,20 @@ export function parseFallbackPrompt(agent: string, screen: string): InteractiveP
   // a (y/n) letter is offered only for the prompt at the screen's end, never for a mention
   // above it; it is typed without an Enter: a program reading a whole line still waits for
   // one, and the card that follows offers it
-  const choices: { label: string; steps: AnswerStep[] }[] = [
-    ...(hints.some((line) => YES_NO_RE.test(line)) ? [{ label: "Yes (y)", steps: [{ text: "y" }] }, { label: "No (n)", steps: [{ text: "n" }] }] : []),
+  const choices: { label: CardWords; steps: AnswerStep[] }[] = [
+    ...(hints.some((line) => YES_NO_RE.test(line)) ? [{ label: own("Yes (y)"), steps: [{ text: "y" }] }, { label: own("No (n)"), steps: [{ text: "n" }] }] : []),
     ...(hints.some((line) => ARROWS_RE.test(line)) ? [{ label: "↑", steps: keySteps([KEY.up]) }, { label: "↓", steps: keySteps([KEY.down]) }] : []),
     { label: "Enter", steps: keySteps([KEY.enter]) },
     { label: "Esc", steps: keySteps([KEY.escape]) },
   ];
   const body = withoutLine(last, question);
   return screenCard(lines, shown, steady, finishPrompt(agent, {
-    kind: "menu", fallback: true, title: "Waiting for input", question: question ?? "The agent is waiting for input.",
+    kind: "menu", fallback: true, title: own("Waiting for input"), question: question ?? own("The agent is waiting for input."),
     body,
     options: choices.map(({ label }) => ({ label, description: null })),
     multi_select: false, custom_option_index: null,
   }, {
-    responder: "fallback-keys", menuLabels: choices.map(({ label }) => label), selectedIndex: 0,
+    responder: "fallback-keys", menuLabels: choices.map(({ label }) => englishOf(label)), selectedIndex: 0,
     checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null,
     optionSteps: choices.map(({ steps }) => steps),
   }, steadyFields(question, body, steady.read)));

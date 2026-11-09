@@ -399,8 +399,8 @@ try {
       console.log("PASS observer");
 
       // the terminal is disposed while a replayed OSC is open in it: four other tabs push its pane out
-      // of the cached ones (paneTabCache.ts). A cached terminal has let go of its attach, so no frame can
-      // still be queued then; the disposed terminal keeps no flag, and nothing copies.
+      // of the cached ones (paneTabCache.ts). Eviction releases the attach; the disposed terminal
+      // keeps no flag, and nothing copies.
       await page.locator(`.workspace-select[data-pane="${panes.shell}"]`).click();
       await page.locator(`.pane-frame.is-current[data-layout-pane="${panes.shell}"] .pane-terminal`).waitFor({ state: "attached" });
       await resetCase(page);
@@ -446,7 +446,9 @@ try {
       // parsed: the frame gate (lib/inputRow.ts FrameGate) forgets it, so the new output's frames settle
       { name: "a frame opening a synchronized update queued", steps: [L("pending"), L(`${ESC}[?2026hhalf a frame`)], replayOscOpen: false },
     ];
-    const context = await newContext(browser, url);
+    // These cases exercise retirement on detach. The alongside-herdr setting still detaches
+    // on a pane switch; terminal-switch-regression covers the default live cache.
+    const context = await newContext(browser, url, { extra: { releasePaneAway: true } });
     try {
       const page = await openPage(context, url);
       const acked = (): Promise<string[]> => fixture(page, (state) => state.acks.map((ack) => `${ack.socket}:${ack.stream_id}:${ack.offset}`));
@@ -524,10 +526,13 @@ try {
         const held = await hold(PENDING[0]!.steps);
         const detaches = await page.evaluate((paneId) => window.replayFixture.sent.filter((frame) => frame.type === "detach" && frame.pane_id === paneId).length, panes.shell);
         // the roster is read again on session-changed, and now says herdr could not restore the pane
+        // (a server tells that on its machine events too; the demo's pane socket alone does not, so
+        // the page is asked to read the roster now instead of at its open stream's 30-second backstop)
         await page.evaluate((paneId) => {
           const state = window.replayFixture;
           state.unrestored = paneId;
           state.sockets.at(-1)!.push({ type: "session-changed" });
+          document.dispatchEvent(new Event("visibilitychange"));
         }, panes.shell);
         await page.waitForFunction(([paneId, count]) => window.replayFixture.sent.filter((frame) => frame.type === "detach" && frame.pane_id === paneId).length > count, [panes.shell, detaches] as const);
         const reset = await host.evaluate((element) => ({ mounted: element.isConnected, probe: (element as unknown as { outputProbe(): Probe }).outputProbe() }));
@@ -548,6 +553,7 @@ try {
           const state = window.replayFixture;
           state.unrestored = null;
           state.sockets.at(-1)!.push({ type: "session-changed" });
+          document.dispatchEvent(new Event("visibilitychange"));
         });
         await page.waitForFunction(([paneId, count]) => window.replayFixture.sent.filter((frame) => frame.type === "attach" && frame.pane_id === paneId).length > count, [panes.shell, attaches] as const);
         console.log("PASS pending write at reset");

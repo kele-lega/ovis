@@ -129,14 +129,21 @@ describe("demo transport", () => {
    * (server to server, or behind a state the demo never reaches).
    */
   const DEMO_404: Record<string, string> = {
+    "/api/account/enroll": "account linking: no screen of the app asks for it yet (the account screens come with their own demo answers)",
+    "/api/updates/cancel": "a connection server asks a PC's own Ovis to stop its update; the demo's browser never does",
+    "/api/account/introduce": "account linking: no screen of the app asks for it yet (the account screens come with their own demo answers)",
+    "/api/account/introduction": "account linking: no screen of the app asks for it yet (the account screens come with their own demo answers)",
+    "/api/account/link": "account linking: no screen of the app asks for it yet (the account screens come with their own demo answers)",
+    "/api/account/records": "account linking: no screen of the app asks for it yet (the account screens come with their own demo answers)",
+    "/api/account/relay-account": "relay pass: named by a signed-in owner's account screen, which the demo never reaches (no sign-in there)",
+    "/api/devices/pair/cancel": "called by the plugin's terminal `link --code` only (scripts/plugin-link.ts); no screen of the app asks for it",
     "/api/auth": "the demo is never locked (/api/health says authenticated), so neither the token form nor sign-out runs",
     "/api/bridge": "a remote PC's bridge endpoint, asked by another server, never by the browser",
-    "/api/direct/trust": "SSH-authenticated direct bridge trust control, called by the connection server for a configured remote PC, never by the browser",
+    "/api/runtime": "switching the runtime: the demo's health carries no herdr_runtime, so Settings offers no Switch",
     "/api/event": "OpenCode v2's own service's event stream, read by this server (opencode-service.ts), never by the browser",
     "/api/info": "OpenCode v2's own service's identity, checked by this server (opencode-service.ts), never by the browser",
-    "/api/devices": "Settings → Devices: the demo pairs no devices (listed when this guard was added)",
     "/api/devices/pair": "pairing a device: the demo is never locked, so the pairing form does not run",
-    "/api/devices/pair/start": "Settings → Devices: the demo pairs no devices (listed when this guard was added)",
+    "/api/relay/pairings": "the waiting relay pairings, read by `plugin.ts pair --approve` in the PC's terminal; the browser hears of them on its event stream",
     "/api/pane/conversation/image": "an image in a chat turn: the demo's transcripts carry none (listed when this guard was added)",
     "/api/pane/conversation/tool-output": "a tool call's full output: not part of the demo (listed when this guard was added)",
     "/api/pane/image": "pasting an image: the demo stores no files (listed when this guard was added)",
@@ -144,10 +151,14 @@ describe("demo transport", () => {
     "/api/pane/selection": "copying a selection across screens: not part of the demo (listed when this guard was added)",
     "/api/updates/check": "the demo's /api/updates says managed: false, so Settings offers no check",
     "/api/updates/install": "the demo's /api/updates says managed: false, so Settings offers no install",
+    "/api/workspace/git/branches": "a repository's history, for API clients: no screen of the app asks for it yet",
+    "/api/workspace/git/log": "a repository's history, for API clients: no screen of the app asks for it yet",
+    "/api/workspace/git/show": "a repository's history, for API clients: no screen of the app asks for it yet",
   };
   /** Client frames the demo needs no case for, each with its reason; any other frame gets a case in site/demo/transport.ts. */
   const DEMO_IGNORES: Record<string, string> = {
     "pty-ack": "the demo has no output flow control to release; its switch's default branch drops it",
+    "prompt-watch": "the demo does not advertise the prompt-watch feature, and the browser never sends it; its switch's default branch drops it",
   };
 
   it("answers every /api route the server handles", () => {
@@ -190,7 +201,10 @@ describe("names from before Ovis", () => {
     "server/pty/host.test.ts": "tests that both PTY hosts keep the token from the command under either name",
     "server/remote-host.ts": "a remote bundle published before the rename reads the old name",
     "install.sh": "reads the old settings of an earlier install",
+    "scripts/install-herdr-core.test.ts": "tests that install.sh replaces an earlier install's runtime under its old name",
     "install.ps1": "reads the old settings of an earlier install",
+    "app/windows/src/Setup.cs": "reads the token of an earlier install's settings, as install.ps1 does",
+    "app/windows/tests/SetupTests.cs": "tests that read",
     "docs/guide.md": "tells users the old names still work",
     "shared/telemetry.ts": "pinned to the deployed telemetry Worker, so not even a comment changes",
   };

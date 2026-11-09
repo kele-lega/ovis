@@ -1,18 +1,73 @@
-import { describe, expect, it } from "bun:test";
-import { agentFault } from "./agent-launch.ts";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
-describe("agent launch selection", () => {
-  it("retains standard argument validation without requiring atomic capability", () => {
-    expect(agentFault({ kind: "claude" })).toBeNull();
-    expect(agentFault({ kind: "claude", args: ["--model", "fixture-model"] })).toBeNull();
-    expect(agentFault({ kind: "claude", args: ["--model", "two words"] })).not.toBeNull();
+import * as herdr from "./herdr/client.ts";
+import * as runtime from "./herdr-core/runtime.ts";
+import { agentLaunch } from "./agent-launch.ts";
+import { launchedAgents } from "./launched-agents.ts";
+
+const ULTRACODE = JSON.stringify({ ultracode: true });
+const PANE = "agent-launch-test-pane";
+
+describe("agentLaunch", () => {
+  /** what herdr's agent.start was asked, without a herdr */
+  const starts: Parameters<typeof herdr.agentStart>[0][] = [];
+  const roots: string[] = [];
+  afterEach(() => {
+    starts.length = 0;
+    launchedAgents.forget(PANE);
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   });
-  it("recognizes custom commands without altering them or accepting an args fallback", () => {
-    const command = "  wrapper --model 'two words'  ";
-    const agent = { kind: "claude", command };
-    expect(agentFault(agent, "linux")).toBeNull(); expect(agent.command).toBe(command);
-    expect(agentFault({ ...agent, args: [] }, "linux")).toContain("mutually exclusive");
-    expect(agentFault(agent, "win32")).toContain("not supported on Windows");
-    expect(agentFault({ kind: "claude", command: undefined })).not.toBeNull();
+  const settingsDir = (): string => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "ovis-agent-launch-")));
+    roots.push(root);
+    return join(root, "claude-settings");
+  };
+  const launch = async (kind: string, args: string[], options: { platform: string; settingsDir: string }) => {
+    const start = spyOn(herdr, "agentStart").mockImplementation(async (params) => { starts.push(params); return {}; });
+    try {
+      expect(await agentLaunch(PANE, { kind, name: `${kind}-launch-test`, args }, undefined, undefined, options)).toEqual({ agent_started: true });
+    } finally {
+      start.mockRestore();
+    }
+    expect(starts).toHaveLength(1);
+    return starts[0]!;
+  };
+
+  it("starts Claude Code on Windows with its inline JSON --settings as a file's path", async () => {
+    const dir = settingsDir();
+    const args = ["--effort", "medium", "--settings", ULTRACODE];
+    const started = await launch("claude", args, { platform: "win32", settingsDir: dir });
+    expect(started).toMatchObject({ name: "claude-launch-test", kind: "claude", paneId: PANE });
+    expect(started.args!.slice(0, 3)).toEqual(["--effort", "medium", "--settings"]);
+    expect(dirname(started.args![3]!)).toBe(dir);
+    expect(readFileSync(started.args![3]!, "utf8")).toBe(ULTRACODE);
+    // the request's own args are left as they came
+    expect(args).toEqual(["--effort", "medium", "--settings", ULTRACODE]);
+  });
+
+  it("hands the args on as they came off Windows, and another agent's on Windows", async () => {
+    const dir = settingsDir();
+    const claude = ["--effort", "medium", "--settings", ULTRACODE];
+    expect((await launch("claude", claude, { platform: "linux", settingsDir: dir })).args).toBe(claude);
+    starts.length = 0;
+    const codex = ["--settings", ULTRACODE];
+    expect((await launch("codex", codex, { platform: "win32", settingsDir: dir })).args).toBe(codex);
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it("refuses a shell-started agent on another machine of the core, typing nothing into its shell", async () => {
+    const machine = spyOn(runtime, "hcMachine").mockReturnValue({ name: "lab", id: "lab-id" });
+    const typed = spyOn(herdr, "paneSendText").mockImplementation(async () => ({}) as never);
+    try {
+      const answer = await agentLaunch(PANE, { kind: "gjc" });
+      expect(answer).toMatchObject({ agent_started: false, error: { code: "other_machine" } });
+      expect(typed).not.toHaveBeenCalled();
+    } finally {
+      machine.mockRestore();
+      typed.mockRestore();
+    }
   });
 });

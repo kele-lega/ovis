@@ -21,11 +21,14 @@ export const turnText = "/deploy staging";
 export const chips = ["/deploy"];
 export const widths = [1280, 390, 320] as const;
 export const schemes = ["light", "dark"] as const;
+// a phone's Return breaks the line: the 390 phone sends with Send, the 320 one chose Enter sends
+export const enterSendsAt = [320] as const;
 const TERMINAL_ROWS = ["config", "cost", "doctor", "help", "resume", "status", "terminal-setup"];
 
 export const expect = async ({ page, width, scheme, box, menu, scenario, clear, rowNames, menuFits, rowsBrief, submits }: CaseRun): Promise<void> => {
   const tag = `${scheme}-${width}`;
   const send = page.getByRole("button", { name: "Send message", exact: true });
+  const returnSends = width > 480 || (enterSendsAt as readonly number[]).includes(width);
   // the Chat lens, and a terminal command's peek over it: the chat stays mounted under the grid
   const chat = page.locator(".terminal-stack.is-chat:not(.is-peek)");
   const peek = page.locator(".terminal-stack.is-chat.is-peek");
@@ -38,13 +41,20 @@ export const expect = async ({ page, width, scheme, box, menu, scenario, clear, 
   await scenario(`terminal group at ${tag}`, `group-${tag}.png`, async (capture) => {
     await box.fill("/");
     await menu.locator(".menu-item").first().waitFor();
+    assert.deepEqual(await menu.locator(".menu-heading").allTextContents(), ["Built in", "Project skills", "Terminal commands"]);
+    // the terminal group is listed last, each row with its badge; the hidden row is nowhere
     const groups = menu.locator(".composer-menu-group");
     const last = groups.nth((await groups.count()) - 1);
     assert.deepEqual(await last.locator(".menu-item-main").allTextContents(), TERMINAL_ROWS.map((name) => `/${name}`));
-    assert.equal(await last.locator(".composer-menu-badge").count(), TERMINAL_ROWS.length);
+    assert.equal(await last.locator(".menu-item .composer-menu-badge").count(), TERMINAL_ROWS.length);
+    assert.deepEqual(await last.locator(".composer-menu-badge").allTextContents(), TERMINAL_ROWS.map(() => "Terminal"));
+    assert.equal(await menu.locator(".composer-menu-badge").count(), TERMINAL_ROWS.length);
     assert.deepEqual((await rowNames()).sort(), commands.filter((command) => command.visibility !== "agent-hidden").map(({ name }) => name).sort());
     await menuFits("terminal group");
     await rowsBrief("terminal group");
+    // the badge stands whole beside the name: neither is cut, whatever the width
+    const cut = await menu.locator(".composer-menu-badge").evaluateAll((badges) => badges.filter((badge) => badge.scrollWidth > badge.clientWidth + 1).length);
+    assert.equal(cut, 0, "no badge is cut");
     await menu.evaluate((node) => { node.scrollTop = node.scrollHeight; });
     await capture();
   });
@@ -53,6 +63,10 @@ export const expect = async ({ page, width, scheme, box, menu, scenario, clear, 
     await clear();
     await box.fill("/conf");
     await menu.locator(".menu-item").first().waitFor();
+    // /config by its name first; /terminal-setup follows, found by its description ("Configure ")
+    const listed = await rowNames();
+    assert.equal(listed[0], "config");
+    assert.equal(await menu.locator(".menu-item .composer-menu-badge").count(), listed.filter((name) => TERMINAL_ROWS.includes(name)).length, "a typed query keeps the badge on the rows");
     await box.press("Enter");
     assert.equal(await box.inputValue(), "/config ");
     assert.deepEqual(await submits(), []);
@@ -60,8 +74,9 @@ export const expect = async ({ page, width, scheme, box, menu, scenario, clear, 
     await capture();
   });
 
-  await scenario(`Enter sends then opens a peek at ${tag}`, `terminal-${tag}.png`, async (capture) => {
-    await box.press("Enter");
+  await scenario(`${returnSends ? "Enter" : "Send"} sends then opens a peek at ${tag}`, `terminal-${tag}.png`, async (capture) => {
+    if (returnSends) await box.press("Enter");
+    else await send.click();
     await hint.waitFor();
     assert.equal(await chat.count(), 0);
     assert.equal(await peek.count(), 1, "the terminal shows over the chat, which stays mounted");

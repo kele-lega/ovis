@@ -1,10 +1,12 @@
 import { constants, fstatSync, closeSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync } from "node:fs";
+import { uptime } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { HerdrPane } from "../shared/protocol.ts";
 import { herdrRpc } from "./herdr/client.ts";
 import { recentProcessTable } from "./gjc-runtime.ts";
-import { processStartedAt } from "./process-start.ts";
+import { processStartedAt, processStartedAtAsync } from "./process-start.ts";
 import { descendantProcesses, type ProcessRow } from "./windows-processes.ts";
+import { userHome } from "./user-home.ts";
 
 const OMO_PROCESS = /(^|\/)omo(\.js)?$|\/omo-ai\//;
 /** node and bun run a script: the program is then the script, the first word that is not a flag */
@@ -51,7 +53,8 @@ function isPathList(word: string): boolean {
   return word.replace(/^[A-Za-z]:\//, "").includes(":");
 }
 
-export interface OmoCandidate { path: string; id: string; createdAt: number | null; store?: string }
+/** `identity`: the exact dev:ino of the descriptor the header was read through (candidate) */
+export interface OmoCandidate { path: string; id: string; createdAt: number | null; store?: string; identity?: string }
 export interface OmoRuntime {
   paneId: string;
   startedAt: number | null;
@@ -126,13 +129,14 @@ function candidate(path: string, roots: readonly string[], cwd: string): OmoCand
     const root = roots.find((root) => inStore(canonical, root));
     if (!canonical.endsWith(".jsonl") || root === undefined) return null;
     fd = openSync(canonical, constants.O_RDONLY | constants.O_NONBLOCK);
-    if (!fstatSync(fd).isFile()) return null;
+    const opened = fstatSync(fd, { bigint: true });
+    if (!opened.isFile()) return null;
     const bytes = Buffer.alloc(4096);
     const length = readSync(fd, bytes, 0, bytes.length, 0);
     const header = JSON.parse(bytes.subarray(0, length).toString("utf8").split("\n")[0]!);
     if (header?.type !== "session" || header.cwd !== cwd || typeof header.id !== "string") return null;
     const timestamp = typeof header.timestamp === "string" ? Date.parse(header.timestamp) : NaN;
-    return { path: canonical, id: header.id, createdAt: Number.isFinite(timestamp) ? timestamp : null, store: root };
+    return { path: canonical, id: header.id, createdAt: Number.isFinite(timestamp) ? timestamp : null, store: root, identity: `${opened.dev}:${opened.ino}` };
   } catch { return null; }
   finally { if (fd !== undefined) closeSync(fd); }
 }
@@ -195,11 +199,12 @@ export function omoProcessIdentity(
   cwd: string,
   home: string,
   environOf: (pid: number) => readonly string[] | null = processEnviron,
+  startOf: (pid: number) => number | null = processStartedAt,
 ): { agentDir: string; heldIds: string[]; custom: boolean; held: boolean } | null {
   const dir = processCwd(process, cwd);
   const environ = environOf(process.pid);
   const agentDir = omoAgentDir(environ, home, dir);
-  const startedAt = processStartedAt(process.pid);
+  const startedAt = startOf(process.pid);
   if (isOmoProcess(process.argv ?? [])) {
     const heldIds = heldSessionIds(sessionDir(dir, agentDir), process.pid, startedAt);
     // a holder counts only while this pid's start is readable: without it (Windows) a crashed omo's
@@ -223,17 +228,35 @@ export function omoSessionFolder(cwd: string): string {
 }
 const sessionDir = (cwd: string, agentDir: string) => join(agentDir, "sessions", omoSessionFolder(cwd));
 
-// A holder's start is floored to the second (as `ps -o lstart`), ours is in clock ticks.
+// A holder's start is floored to the second (as `ps -o lstart`), ours is in clock ticks. omo
+// derives it from its own clock (now minus its runtime's uptime), and a runtime that comes up
+// late on a busy machine reads a start seconds after the kernel's (7 s seen, #2281). A reused
+// pid's leftover always starts earlier, so a record may start up to a minute late, but only when
+// it names this host's boot as its own (`bootAtMs`, which omo reads as we do here): a record from
+// another host sharing the store, from before a clock step, or without a boot keeps the 3 s bound
+// both ways.
 const HOLDER_START_TOLERANCE_MS = 3000;
+const HOLDER_START_LATE_MS = 60_000;
+
+/** This host's boot instant as omo records it: the wall clock minus uptime, in whole seconds. null if unreadable. */
+export function hostBootAt(now = Date.now()): number | null {
+  try {
+    return Math.round((now - uptime() * 1000) / 1000) * 1000;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * omo keeps no descriptor on its session file, but every process with a session open
  * publishes <session dir>/session-holders/<encoded id>/<pid>.json and removes it on
  * release (/new, /resume, exit). A crashed process leaves its record behind, so one
  * counts only for the live pid it names and, where our start time is readable, only
- * if it started when that pid did: a reused pid starts later.
+ * if it started when that pid did: a reused pid starts later than the crashed holder,
+ * so a record from before this pid's start is refused, and one up to a minute after it
+ * is this process's own, read late, when it was written on this host since its boot.
  */
-export function heldSessionIds(dir: string, pid: number, startedAt: number | null, cwd?: string): string[] {
+export function heldSessionIds(dir: string, pid: number, startedAt: number | null, cwd?: string, bootAt: number | null = hostBootAt()): string[] {
   const holders = join(dir, "session-holders");
   let names: string[] = [];
   try { names = readdirSync(holders); } catch { return []; }
@@ -243,7 +266,12 @@ export function heldSessionIds(dir: string, pid: number, startedAt: number | nul
       const record = JSON.parse(readFileSync(join(holders, name, `${pid}.json`), "utf8"));
       if (record?.pid !== pid) continue;
       if (cwd !== undefined && record.cwd !== cwd) continue;
-      if (startedAt !== null && !(typeof record.processStartedAtMs === "number" && Math.abs(record.processStartedAtMs - startedAt) <= HOLDER_START_TOLERANCE_MS)) continue;
+      if (startedAt !== null) {
+        if (typeof record.processStartedAtMs !== "number") continue;
+        const thisBoot = bootAt !== null && typeof record.bootAtMs === "number" && Math.abs(record.bootAtMs - bootAt) <= HOLDER_START_TOLERANCE_MS;
+        const lag = record.processStartedAtMs - startedAt;
+        if (lag < -HOLDER_START_TOLERANCE_MS || lag > (thisBoot ? HOLDER_START_LATE_MS : HOLDER_START_TOLERANCE_MS)) continue;
+      }
       ids.push(decodeURIComponent(name));
     } catch { /* this pid holds nothing here, or the record is unreadable */ }
   }
@@ -344,6 +372,43 @@ const processInfo = async (paneId: string): Promise<ProcessInfo> => {
   return withOmoDescendants(info, rows);
 };
 
+/**
+ * When each foreground process of `infos` started, read before the checks that compare it, without holding the
+ * event loop: on macOS each read is the kernel's process record (processStartedAtAsync), a few at a time. Every OmO status refresh, and
+ * so every snapshot a pending message is checked against, reads these (#1545).
+ */
+async function processStarts(infos: Iterable<ProcessInfo>): Promise<(pid: number) => number | null> {
+  const pids = [...new Set([...infos].flatMap((info) => (info?.process_info?.foreground_processes ?? []).map((entry) => entry.pid)))];
+  const starts = new Map<number, number | null>();
+  for (let at = 0; at < pids.length; at += 8) {
+    await Promise.all(pids.slice(at, at + 8).map(async (pid) => { starts.set(pid, await processStartedAtAsync(pid)); }));
+  }
+  return (pid) => starts.get(pid) ?? null;
+}
+
+/**
+ * The foreground OmO process that holds a session, as typing picks it (paneProcessRoots), or null: an argv-silent
+ * custom OmO is known only by its holder, and its bundled Claude SDK child, listed after it, looks like omo by its path
+ * but comes and goes with each turn. `prefer` (the process a send is already bound to) wins while it holds one, so two
+ * holders that herdr lists in another order keep the one a send went to (#2190). A process herdr gives no cwd for is
+ * placed in the pane's, as discovery places it (macOS has no /proc to ask). Starts are read without holding the event
+ * loop; `started` is the start its holder record was checked against, so a pid reused after the check is not taken
+ * for it.
+ */
+export async function heldOmoProcess(
+  pane: HerdrPane,
+  foreground: readonly { pid: number; argv?: readonly string[] | null; cwd?: string | null }[],
+  home = userHome(),
+  prefer: number | null = null,
+): Promise<{ pid: number; started: number | null } | null> {
+  const processes: OmoForeground[] = foreground.map(({ pid, argv, cwd }) => ({ pid, ...(argv ? { argv: [...argv] } : {}), ...(cwd ? { cwd } : {}) }));
+  const startOf = await processStarts([{ process_info: { foreground_processes: processes } }]);
+  const holds = (entry: OmoForeground): boolean => omoProcessIdentity(entry, paneFallbackCwd(pane), home, processEnviron, startOf)?.held === true;
+  const preferred = processes.find((entry) => entry.pid === prefer);
+  const held = preferred && holds(preferred) ? preferred : processes.find(holds);
+  return held ? { pid: held.pid, started: startOf(held.pid) } : null;
+}
+
 type OmoForeground = { pid: number; argv?: string[]; cwd?: string };
 
 /** The pane's own directory evidence: herdr's foreground cwd, then the cwd the pane started in. */
@@ -366,10 +431,10 @@ interface PaneResolution {
   ambiguous: boolean;
 }
 
-function resolvePaneRuntime(pane: HerdrPane, info: ProcessInfo, home: string, environOf: (pid: number) => readonly string[] | null): PaneResolution {
+function resolvePaneRuntime(pane: HerdrPane, info: ProcessInfo, home: string, environOf: (pid: number) => readonly string[] | null, startOf: (pid: number) => number | null = processStartedAt): PaneResolution {
   const fallback = paneFallbackCwd(pane);
   const omos = (info?.process_info?.foreground_processes ?? []).flatMap((process) => {
-    const identity = omoProcessIdentity(process, fallback, home, environOf);
+    const identity = omoProcessIdentity(process, fallback, home, environOf, startOf);
     return identity === null ? [] : [{ process, identity, cwd: processCwd(process, fallback) }];
   });
   const holding = [...new Set(omos.filter((omo) => omo.identity.heldIds.length > 0).map((omo) => omo.cwd))];
@@ -395,7 +460,7 @@ const inCwdGroup = (resolved: PaneResolution, cwd: string): boolean =>
  * canonical stores that pane's own processes resolved; another store's file of the same
  * id is a different session, and a pending holder never borrows it.
  */
-function omoTranscriptsResolved(cwd: string, panes: readonly PaneResolution[], home: string): Map<string, { path: string | null; pending: string | null; startedAt: number | null }> {
+function omoTranscriptsResolved(cwd: string, panes: readonly PaneResolution[], home: string, startOf: (pid: number) => number | null = processStartedAt): Map<string, { path: string | null; pending: string | null; startedAt: number | null; identity?: string }> {
   const runtimes: OmoRuntime[] = [];
   // Each process's own store: the default one, and wherever its environment moved it.
   const agentDirs = new Set([defaultOmoAgentDir(home)]);
@@ -411,7 +476,7 @@ function omoTranscriptsResolved(cwd: string, panes: readonly PaneResolution[], h
     if (omos.length === 0) continue;
     // every identity came from verified holders alone: hints and inference never apply
     const custom = omos.every(({ identity }) => identity.custom);
-    const starts = omos.map(({ process }) => processStartedAt(process.pid));
+    const starts = omos.map(({ process }) => startOf(process.pid));
     const owned = omos.map(({ identity }) => identity.agentDir);
     for (const agentDir of owned) agentDirs.add(agentDir);
     const dirs = omos.map((omo, index) => sessionDir(omo.cwd, owned[index]!));
@@ -470,7 +535,10 @@ function omoTranscriptsResolved(cwd: string, panes: readonly PaneResolution[], h
   };
   return new Map(current.map((runtime) => {
     const pending = runtime.ambiguous ? null : unwritten(runtime.paneId);
-    return [runtime.paneId, { path: pending === null ? selectOmoTranscript(runtime.paneId, files, current) : null, pending, startedAt: runtime.startedAt ?? since.get(runtime.paneId) ?? null }];
+    const path = pending === null ? selectOmoTranscript(runtime.paneId, files, current) : null;
+    // the file chosen is a candidate, read through its own descriptor: its identity goes with it
+    const identity = path === null ? undefined : files.find((file) => file.path === path)?.identity;
+    return [runtime.paneId, { path, pending, startedAt: runtime.startedAt ?? since.get(runtime.paneId) ?? null, ...(identity === undefined ? {} : { identity }) }];
   }));
 }
 
@@ -484,19 +552,21 @@ export function omoTranscriptsOfCwd(cwd: string, panes: HerdrPane[], infos: Read
  * but omo has not written yet (before its first message, or right after /new). The folder
  * is the pane's resolved runtime cwd, and its peers are the panes resolving to the same one.
  */
-export async function omoSessionForPane(paneId: string, cwd: string, panes: HerdrPane[], home = process.env["HOME"] ?? ""): Promise<{ path: string | null; pending: string | null }> {
+/** `identity`: the exact dev:ino of the session file as its header was read, with a path. */
+export async function omoSessionForPane(paneId: string, cwd: string, panes: HerdrPane[], home = userHome()): Promise<{ path: string | null; pending: string | null; identity?: string }> {
   // A child model can change herdr's agent label: inspect each pane's processes once.
   const candidates = panes;
   const infos = new Map(await Promise.all(candidates.map(async (pane) => [pane.pane_id, await processInfo(pane.pane_id)] as const)));
-  const resolved = candidates.map((pane) => resolvePaneRuntime(pane, infos.get(pane.pane_id) ?? null, home, processEnviron));
+  const startOf = await processStarts(infos.values());
+  const resolved = candidates.map((pane) => resolvePaneRuntime(pane, infos.get(pane.pane_id) ?? null, home, processEnviron, startOf));
   const target = resolved.find((entry) => entry.pane.pane_id === paneId);
   // two holder-owning cwds fail closed: the pane cannot be bound to either
   if (target?.ambiguous) return { path: null, pending: null };
-  const session = omoTranscriptsResolved(target?.cwd ?? cwd, resolved, home).get(paneId);
-  return { path: session?.path ?? null, pending: session?.pending ?? null };
+  const session = omoTranscriptsResolved(target?.cwd ?? cwd, resolved, home, startOf).get(paneId);
+  return { path: session?.path ?? null, pending: session?.pending ?? null, ...(session?.identity === undefined ? {} : { identity: session.identity }) };
 }
 
-export async function omoTranscriptForPane(paneId: string, cwd: string, panes: HerdrPane[], home = process.env["HOME"] ?? ""): Promise<string | null> {
+export async function omoTranscriptForPane(paneId: string, cwd: string, panes: HerdrPane[], home = userHome()): Promise<string | null> {
   return (await omoSessionForPane(paneId, cwd, panes, home)).path;
 }
 
@@ -506,14 +576,15 @@ export async function omoTranscriptForPane(paneId: string, cwd: string, panes: H
  * pane, regardless of its child agent label, shared by all panes of a folder; the folder each
  * pane counts toward is the one its own processes resolve.
  */
-export async function omoPanes(panes: HerdrPane[], home = process.env["HOME"] ?? ""): Promise<Map<string, { path: string | null; startedAt: number | null }>> {
+export async function omoPanes(panes: HerdrPane[], home = userHome()): Promise<Map<string, { path: string | null; startedAt: number | null }>> {
   const candidates = panes;
   const infos = new Map(await Promise.all(candidates.map(async (pane) => [pane.pane_id, await processInfo(pane.pane_id)] as const)));
-  const resolved = candidates.map((pane) => resolvePaneRuntime(pane, infos.get(pane.pane_id) ?? null, home, processEnviron));
+  const startOf = await processStarts(infos.values());
+  const resolved = candidates.map((pane) => resolvePaneRuntime(pane, infos.get(pane.pane_id) ?? null, home, processEnviron, startOf));
   const found = new Map<string, { path: string | null; startedAt: number | null }>();
   const cwds = new Set(resolved.flatMap((entry) => entry.omos.length === 0 ? [] : entry.ambiguous ? entry.omos.map((omo) => omo.cwd) : [entry.cwd]));
   for (const cwd of cwds) {
-    const transcripts = cwd ? omoTranscriptsResolved(cwd, resolved, home) : new Map<string, { path: string | null; pending: string | null; startedAt: number | null }>();
+    const transcripts = cwd ? omoTranscriptsResolved(cwd, resolved, home, startOf) : new Map<string, { path: string | null; pending: string | null; startedAt: number | null }>();
     for (const entry of resolved) if (entry.omos.length > 0 && inCwdGroup(entry, cwd)) found.set(entry.pane.pane_id, transcripts.get(entry.pane.pane_id) ?? { path: null, startedAt: null });
   }
   return found;

@@ -2,10 +2,10 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, spyOn } from "bu
 import { Database } from "bun:sqlite";
 import { copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, opendirSync, readdirSync, type BigIntStats, type Dir, type Dirent, type Stats, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { SessionHistoryAgent, SessionSnapshot } from "../shared/protocol.ts";
-import { HEAD_BYTES, listSessions, MAX_ENTRIES, MAX_ROWS, MAX_STATS, MAX_WALK, SESSION_HISTORY_AGENTS } from "./session-history.ts";
+import { HEAD_BYTES, HERMES_CANDIDATES, listSessions, MAX_ENTRIES, MAX_ROWS, MAX_STATS, MAX_WALK, SESSION_HISTORY_AGENTS } from "./session-history.ts";
 import { handleSessionHistoryRequest, handleSessionResumeRequest, type PaneProcesses, RESUME_BUDGET_S, workspaceFolder } from "./session-history-routes.ts";
 import { claudeProjectDir, darwinProcess, forgetClaudeSessions } from "./claude-store.ts";
 import { slowMachinePath } from "./machine-api.ts";
@@ -76,10 +76,10 @@ const piStore = (home: string) => join(home, ".pi", "agent", "sessions", FOLDERS
 describe("listSessions", () => {
   for (const agent of SESSION_HISTORY_AGENTS) {
     // Command Code's slug keeps a Windows drive's colon, which no Windows folder name may hold
-    it.skipIf(agent === "cmd" && WINDOWS)(`lists ${agent}'s own sessions of the folder, newest first, with its resume command`, () => {
+    it.skipIf(agent === "cmd" && WINDOWS)(`lists ${agent}'s own sessions of the folder, newest first, with its resume command`, async () => {
       const home = newHome();
       install(agent, home);
-      const rows = listSessions(agent, CWD, { home, env: {} });
+      const rows = await listSessions(agent, CWD, { home, env: {} });
       expect(rows.map((row) => row.id)).toEqual(EXPECTED[agent]);
       expect(rows.map((row) => row.firstMessage)).toEqual([`Fixture ${agent} prompt 2`, `Fixture ${agent} prompt 1`]);
       for (const row of rows) {
@@ -92,12 +92,12 @@ describe("listSessions", () => {
     });
   }
 
-  it("lists nothing from a store that is not there", () => {
+  it("lists nothing from a store that is not there", async () => {
     const home = newHome();
-    for (const agent of SESSION_HISTORY_AGENTS) expect(listSessions(agent, CWD, { home, env: {} })).toEqual([]);
+    for (const agent of SESSION_HISTORY_AGENTS) expect(await listSessions(agent, CWD, { home, env: {} })).toEqual([]);
   });
 
-  it.skipIf(!SYMLINKS)("refuses a session file or folder that a link puts outside the store", () => {
+  it.skipIf(!SYMLINKS)("refuses a session file or folder that a link puts outside the store", async () => {
     const home = newHome();
     install("pi", home);
     const outside = join(root, `outside-${homes}`);
@@ -109,11 +109,11 @@ describe("listSessions", () => {
     writeFileSync(join(outside, "day", `rollout-2026-10-09T09-00-00-${ID(9)}.jsonl`),
       `${JSON.stringify({ type: "session_meta", payload: { id: ID(9), cwd: CWD, source: "cli" } })}\n`);
     symlinkSync(join(outside, "day"), join(home, ".codex", "sessions", "2026", "10", "09"), "dir");
-    expect(listSessions("pi", CWD, { home, env: {} }).map((row) => row.id)).toEqual(EXPECTED.pi);
+    expect((await listSessions("pi", CWD, { home, env: {} })).map((row) => row.id)).toEqual(EXPECTED.pi);
     expect(listSessions("codex", CWD, { home, env: {} }).map((row) => row.id)).toEqual(EXPECTED.codex);
   });
 
-  it(`returns at most ${MAX_ROWS} sessions, the newest`, () => {
+  it(`returns at most ${MAX_ROWS} sessions, the newest`, async () => {
     const home = newHome();
     mkdirSync(piStore(home), { recursive: true });
     for (let n = 0; n < MAX_ROWS + 10; n++) {
@@ -121,20 +121,21 @@ describe("listSessions", () => {
       writeFileSync(path, piHeader(`session-${n}`) + piPrompt(`prompt ${n}`));
       utimesSync(path, 1_790_000_000 + n, 1_790_000_000 + n);
     }
-    const rows = listSessions("pi", CWD, { home, env: {} });
+    const rows = await listSessions("pi", CWD, { home, env: {} });
     expect(rows).toHaveLength(MAX_ROWS);
     expect(rows[0]!.id).toBe(`session-${MAX_ROWS + 9}`);
     expect(rows.at(-1)!.id).toBe("session-10");
   });
 
-  it("reads only the head of a 10 MB session file", () => {
+  it("still reads only the head of a 10 MB non-Pi family session file", () => {
     const home = newHome();
-    mkdirSync(piStore(home), { recursive: true });
-    const path = join(piStore(home), "large.jsonl");
+    const store = join(home, ".omp", "agent", "sessions", FOLDERS.omp!);
+    mkdirSync(store, { recursive: true });
+    const path = join(store, "large.jsonl");
     writeFileSync(path, piHeader(ID(5)) + piPrompt("large prompt") + `${JSON.stringify({ type: "message", message: { role: "assistant", content: "x".repeat(10 * 1024 * 1024) } })}\n`);
     expect(statSync(path).size).toBeGreaterThan(10 * 1024 * 1024);
     let bytes = 0;
-    const rows = listSessions("pi", CWD, {
+    const rows = listSessions("omp", CWD, {
       home, env: {},
       readHead: (fd, max) => {
         const buffer = Buffer.alloc(max);
@@ -296,7 +297,7 @@ describe("listSessions", () => {
     expect(rows).toHaveLength(MAX_ROWS);
   });
 
-  it.skipIf(!SYMLINKS)(`counts every path resolution against the ${MAX_STATS} checks, whether it resolves, fails or lands outside`, () => {
+  it.skipIf(!SYMLINKS)(`counts every path resolution against the ${MAX_STATS} checks, whether it resolves, fails or lands outside`, async () => {
     const home = newHome();
     mkdirSync(piStore(home), { recursive: true });
     const outside = join(root, `outside-links-${homes}`);
@@ -306,7 +307,7 @@ describe("listSessions", () => {
     for (let n = 0; n < 100; n++) symlinkSync(join(outside, "elsewhere.jsonl"), join(piStore(home), `outside-${n}.jsonl`));
     let resolutions = 0;
     let stats = 0;
-    const rows = listSessions("pi", CWD, {
+    const rows = await listSessions("pi", CWD, {
       home, env: {},
       resolve: (path) => { resolutions++; return realpathSync(path); },
       stat: (path, bigint) => { stats++; return statAs(path, bigint); },
@@ -316,7 +317,7 @@ describe("listSessions", () => {
     expect(resolutions + stats).toBeLessThanOrEqual(MAX_STATS);
   });
 
-  it.skipIf(!SYMLINKS)("reads nothing from a session file swapped for a link out of the store after it was checked", () => {
+  it.skipIf(!SYMLINKS)("reads nothing from a session file swapped for a link out of the store after it was checked", async () => {
     const home = newHome();
     mkdirSync(piStore(home), { recursive: true });
     const outside = join(root, `outside-swap-${homes}`);
@@ -325,7 +326,7 @@ describe("listSessions", () => {
     const session = join(piStore(home), "session.jsonl");
     writeFileSync(session, piHeader(ID(1)) + piPrompt("inside the store"));
     const checked = realpathSync(session);
-    const rows = listSessions("pi", CWD, {
+    const rows = await listSessions("pi", CWD, {
       home, env: {},
       // the file is checked, then swapped for a link out of the store before it is opened
       stat: (path, bigint) => {
@@ -382,29 +383,39 @@ describe("listSessions", () => {
     expect(rows).toEqual([]);
   });
 
-  it.skipIf(!SYMLINKS)("gives a reader only the checked file, so no reader can read a file swapped in after the check", () => {
+  it.skipIf(!SYMLINKS)("gives a head reader only the checked descriptor, never an unchecked path", () => {
     const home = newHome();
-    mkdirSync(piStore(home), { recursive: true });
+    const store = join(home, ".omp", "agent", "sessions", FOLDERS.omp!);
+    mkdirSync(store, { recursive: true });
     const outside = join(root, `outside-reader-${homes}`);
     mkdirSync(outside);
     writeFileSync(join(outside, "secret.jsonl"), piHeader(ID(9)) + piPrompt("outside the store"));
-    const session = join(piStore(home), "session.jsonl");
+    const session = join(store, "session.jsonl");
     writeFileSync(session, piHeader(ID(1)) + piPrompt("inside the store"));
     const checked = realpathSync(session);
-    const rows = listSessions("pi", CWD, {
+    let swap = false;
+    const targets: Array<number | string> = [];
+    const listed = () => listSessions("omp", CWD, {
       home, env: {},
       stat: (path, bigint) => {
         const stat = statAs(path, bigint);
-        if (path === checked) { rmSync(path); symlinkSync(join(outside, "secret.jsonl"), path); }
+        if (path === checked && swap) { rmSync(path); symlinkSync(join(outside, "secret.jsonl"), path); }
         return stat;
       },
-      // a reader that does no check of its own: given a path it would follow the link
-      readHead: ((target: number | string, max: number) => typeof target === "number"
-        ? (() => { const buffer = Buffer.alloc(max); return buffer.subarray(0, readSync(target, buffer, 0, max, 0)); })()
-        : readFileSync(target).subarray(0, max)) as never,
+      // A deliberately unchecked reader: handed a path, it would follow the swapped-in link.
+      readHead: ((target: number | string, max: number) => {
+        targets.push(target);
+        if (typeof target !== "number") return readFileSync(target).subarray(0, max);
+        const buffer = Buffer.alloc(max);
+        return buffer.subarray(0, readSync(target, buffer, 0, max, 0));
+      }) as never,
     });
-    expect(rows.map((row) => row.firstMessage)).not.toContain("outside the store");
-    expect(rows).toEqual([]);
+    expect(listed().map((row) => row.firstMessage)).toEqual(["inside the store"]);
+    expect(targets.map((target) => typeof target)).toEqual(["number"]);
+    swap = true;
+    expect(listed()).toEqual([]);
+    // The unsafe replacement was refused before the reader could see it.
+    expect(targets).toHaveLength(1);
   });
 
   // NTFS file IDs often pass 2^53: two that differ only in their low bits round to one number
@@ -412,19 +423,19 @@ describe("listSessions", () => {
   const withIno = <T extends Stats | BigIntStats>(stat: T, ino: bigint): T =>
     Object.assign(Object.create(Object.getPrototypeOf(stat) as object) as T, stat, { ino: typeof stat.ino === "bigint" ? ino : Number(ino) });
 
-  it("refuses a session file whose opened identity differs from the checked one only past 2^53", () => {
+  it("refuses a session file whose opened identity differs from the checked one only past 2^53", async () => {
     const home = newHome();
     mkdirSync(piStore(home), { recursive: true });
     const session = join(piStore(home), "session.jsonl");
     writeFileSync(session, piHeader(ID(1)) + piPrompt("inside the store"));
     const checked = realpathSync(session);
-    const listed = (opened: bigint) => listSessions("pi", CWD, {
+    const listed = async (opened: bigint) => (await listSessions("pi", CWD, {
       home, env: {},
       stat: (path, bigint) => path === checked ? withIno(statAs(path, bigint), NEAR + 1n) : statAs(path, bigint),
       fstat: (fd, bigint) => withIno(bigint ? fstatSync(fd, { bigint: true }) : fstatSync(fd), opened),
-    }).map((row) => row.id);
-    expect(listed(NEAR + 1n)).toEqual([ID(1)]);
-    expect(listed(NEAR + 2n)).toEqual([]);
+    })).map((row) => row.id);
+    expect(await listed(NEAR + 1n)).toEqual([ID(1)]);
+    expect(await listed(NEAR + 2n)).toEqual([]);
   });
 
   it("refuses a SQLite store whose opened descriptor differs from the checked one only past 2^53", () => {
@@ -468,6 +479,43 @@ describe("listSessions", () => {
     });
     expect(rows.map((row) => row.firstMessage)).not.toContain("outside the store");
     expect(rows).toEqual([]);
+  });
+
+  it("finds Windows Hermes under LOCALAPPDATA, where 0.21.5 keeps it, and an earlier build's root only while it is the only store", () => {
+    const home = newHome();
+    const local = join(home, "Local");
+    install("hermes", home);
+    mkdirSync(local);
+    renameSync(join(home, ".hermes"), join(local, "hermes"));
+    expect(listSessions("hermes", CWD, { home, env: { LOCALAPPDATA: local }, platform: "win32" }).map((row) => row.id)).toEqual(EXPECTED.hermes);
+    const legacy = newHome();
+    install("hermes", legacy);
+    expect(listSessions("hermes", CWD, { home: legacy, env: { LOCALAPPDATA: join(legacy, "Local") }, platform: "win32" }).map((row) => row.id)).toEqual(EXPECTED.hermes);
+  });
+
+  it("looks for stores under the OS's home, never a relative path, when the environment names none", () => {
+    const looked: string[] = [];
+    listSessions("claude", CWD, { env: {}, platform: "linux", stat: (path, bigint) => { looked.push(path); return statAs(path, bigint); } });
+    expect(looked.length).toBeGreaterThan(0);
+    expect(looked.filter((path) => !isAbsolute(path))).toEqual([]);
+  });
+
+  it("counts Windows Hermes's home probes against the listing's checks", () => {
+    const home = newHome();
+    const looked: string[] = [];
+    const stat = (path: string, bigint?: boolean) => { looked.push(path); return statAs(path, bigint); };
+    expect(listSessions("hermes", CWD, { home, env: { LOCALAPPDATA: join(home, "Local") }, platform: "win32", spent: MAX_STATS, stat })).toEqual([]);
+    expect(looked).toEqual([]);
+    listSessions("hermes", CWD, { home, env: { LOCALAPPDATA: join(home, "Local") }, platform: "win32", stat });
+    expect(looked).toContain(join(home, "Local", "hermes", "state.db"));
+  });
+
+  it("looks in USERPROFILE on Windows when no home is given, even with HOME set", () => {
+    const profile = newHome();
+    install("hermes", profile);
+    mkdirSync(join(profile, "AppData", "Local"), { recursive: true });
+    renameSync(join(profile, ".hermes"), join(profile, "AppData", "Local", "hermes"));
+    expect(listSessions("hermes", CWD, { env: { HOME: newHome(), USERPROFILE: profile }, platform: "win32" }).map((row) => row.id)).toEqual(EXPECTED.hermes);
   });
 
   const sideFiles = (dir: string) => readdirSync(dir).filter((name) => /-(wal|shm)$/.test(name)).sort();
@@ -699,6 +747,92 @@ describe("listSessions", () => {
     expect(listed(MAX_STATS - 5)).toBe(0);
   });
 
+  // the store hermes-agent's own SessionDB made, and what Hermes answered about each row
+  // (scripts/hermes-history-schema-probe.ts)
+  const HERMES_NATIVE = join(import.meta.dir, "fixtures", "hermes-history");
+  const hermesEvidence = JSON.parse(readFileSync(join(HERMES_NATIVE, "evidence.json"), "utf8")) as {
+    native_list_in_cwd: string[]; rows: Array<{ id: string; kind: string; resume_opens: string }>;
+    decision: { proven: Array<{ id: string }> };
+  };
+  const nativeHermes = (home: string, change?: string) => {
+    mkdirSync(join(home, ".hermes"));
+    const db = new Database(join(home, ".hermes", "state.db"), { create: true });
+    db.transaction(() => db.exec(readFileSync(join(HERMES_NATIVE, "state.sql"), "utf8").replaceAll(":cwd", sql(CWD))))();
+    if (change) db.exec(change);
+    db.close();
+  };
+  const kindOf = (id: string) => hermesEvidence.rows.find((row) => row.id === id)!.kind;
+
+  it("lists Hermes's branched and reset conversations of the folder with their own ids, and none of its other children", () => {
+    const home = newHome();
+    nativeHermes(home);
+    const rows = listSessions("hermes", CWD, { home, env: {} });
+    // left out, as Hermes resumes each as another row: fx0106 (an older branch branched again) as
+    // fx0119, fx0121 through its empty child as fx0123, fx0129 (no end reason) as its unmarked child,
+    // fx0132 (a legacy branch compressed later) as its continuation; fx0135, a reset compressed later,
+    // resumes as itself
+    expect(rows.map((row) => `${row.id.slice(-6)} ${kindOf(row.id)}`)).toEqual([
+      "fx0135 reset", "fx0134 root", "fx0131 root", "fx0128 root", "fx0125 branch", "fx0124 root", "fx0120 root", "fx0119 legacy-branch", "fx0110 branch",
+      "fx0109 root", "fx0108 legacy-reset", "fx0107 root", "fx0105 root", "fx0104 reset", "fx0103 root",
+      "fx0102 branch", "fx0101 root",
+    ]);
+    // the children are exactly those Hermes lists in the folder and resumes as themselves
+    expect(rows.filter((row) => kindOf(row.id) !== "root").map((row) => row.id).sort())
+      .toEqual(hermesEvidence.decision.proven.map((row) => row.id).sort());
+    for (const row of rows) {
+      // Hermes's own list shows it, and `hermes --resume <id>` opens it
+      expect(hermesEvidence.native_list_in_cwd).toContain(row.id);
+      if (kindOf(row.id) !== "root") expect(hermesEvidence.rows.find((made) => made.id === row.id)!.resume_opens).toBe(row.id);
+      expect(row.resume?.argv).toEqual(["hermes", "--resume", row.id]);
+    }
+    const child = rows.find((row) => row.id.endsWith("fx0104"))!;
+    expect([child.title, child.firstMessage, child.startedAt]).toEqual(["Fixture native reset", "Fixture hermes native reset prompt", "2026-10-10T09:30:00.000Z"]);
+  });
+
+  it("hides an unmarked Hermes child that started before its parent ended branched", () => {
+    const home = newHome();
+    // fx0105 ended "branched" at 1791625560: this child started a minute before
+    nativeHermes(home, `INSERT INTO sessions (id, source, parent_session_id, started_at, cwd) VALUES ('20261010_094500_fx0199', 'cli', '20261010_094000_fx0105', 1791625500, ${sql(CWD)})`);
+    const plain = newHome();
+    nativeHermes(plain);
+    expect(listSessions("hermes", CWD, { home, env: {} }).map((row) => row.id))
+      .toEqual(listSessions("hermes", CWD, { home: plain, env: {} }).map((row) => row.id));
+  });
+
+  it("hides a Hermes child that ended in a compression whose continuation holds no messages yet", () => {
+    const home = newHome();
+    // Hermes's resume still opens the continuation (get_compression_tip reads no messages)
+    nativeHermes(home, "DELETE FROM messages WHERE session_id = '20261010_134000_fx0133'");
+    const plain = newHome();
+    nativeHermes(plain);
+    expect(listSessions("hermes", CWD, { home, env: {} }).map((row) => row.id))
+      .toEqual(listSessions("hermes", CWD, { home: plain, env: {} }).map((row) => row.id));
+  });
+
+  it(`walks Hermes's resume for the folder's newest ${HERMES_CANDIDATES} roots and branch or reset children alone`, () => {
+    const home = newHome();
+    // newer than every row of the store: branches of fx0101 that each resume as their child, which has messages
+    nativeHermes(home, `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ${HERMES_CANDIDATES - 1})
+      INSERT INTO sessions (id, source, parent_session_id, model_config, started_at, last_activity_at, cwd)
+      SELECT 'newer_branch_' || i, 'cli', '20261010_090000_fx0101', '{"_branched_from": "20261010_090000_fx0101"}', 1800000000 + i, 1800000000 + i, ${sql(CWD)} FROM n;
+      INSERT INTO sessions (id, source, parent_session_id, started_at) SELECT 'newer_child_' || substr(id, 14), 'cli', id, started_at + 1 FROM sessions WHERE id LIKE 'newer_branch_%';
+      INSERT INTO messages (session_id, role, content, timestamp) SELECT id, 'user', 'newer', started_at FROM sessions WHERE id LIKE 'newer_child_%';`);
+    // the window holds those and the folder's newest conversation; the older ones are not reached
+    expect(listSessions("hermes", CWD, { home, env: {} }).map((row) => row.id)).toEqual(["20261010_136000_fx0135"]);
+  });
+
+  for (const [store, change] of [
+    ["lacks a column its children are told apart by", "ALTER TABLE sessions DROP COLUMN model_config"],
+    ["has a newer schema than the one proven", "UPDATE schema_version SET version = 32"],
+    ["has no schema version", "DROP TABLE schema_version"],
+  ] as const) {
+    it(`lists a Hermes store's roots alone when it ${store}`, () => {
+      const home = newHome();
+      nativeHermes(home, change);
+      expect(listSessions("hermes", CWD, { home, env: {} }).map((row) => kindOf(row.id))).toEqual(Array(10).fill("root"));
+    });
+  }
+
   // the entries a listing walks, taken or passed over, as the opendir seam counts them
   const walking = () => {
     const seen = { walked: 0, lstats: 0 };
@@ -783,13 +917,13 @@ describe("listSessions", () => {
     expect(walked).toBe(MAX_WALK);
   });
 
-  it(`reads at most ${MAX_ENTRIES} entries of a folder, however many it holds`, () => {
+  it(`reads at most ${MAX_ENTRIES} entries of a folder, however many it holds`, async () => {
     const home = newHome();
     mkdirSync(piStore(home), { recursive: true });
     for (let n = 0; n < MAX_ENTRIES + 500; n++) writeFileSync(join(piStore(home), `s-${n}.jsonl`), "");
     let looked = 0;
     try {
-      listSessions("pi", CWD, { home, env: {}, lstat: (path) => { looked++; return lstatSync(path); } });
+      await listSessions("pi", CWD, { home, env: {}, lstat: (path) => { looked++; return lstatSync(path); } });
     } finally {
       // removed here, inside this test's own time: on NTFS making and removing them takes seconds
       rmSync(home, { recursive: true, force: true });
@@ -981,13 +1115,13 @@ describe("listSessions", () => {
     expect(resolved).toEqual([SHORT]);
   });
 
-  it("finds a pi session folder of a Windows short-name cwd's long name", () => {
+  it("finds a pi session folder of a Windows short-name cwd's long name", async () => {
     const home = newHome();
     const folder = join(home, ".pi", "agent", "sessions", "--C--Program Files-Project Folder--");
     mkdirSync(folder, { recursive: true });
     writeFileSync(join(folder, "long.jsonl"), piHeader(ID(3), LONG) + piPrompt("long-name prompt"));
     const resolved: string[] = [];
-    expect(listSessions("pi", SHORT, { home, env: {}, platform: "win32", realpath: shortAlias(resolved) }).map((row) => row.id)).toEqual([ID(3)]);
+    expect((await listSessions("pi", SHORT, { home, env: {}, platform: "win32", realpath: shortAlias(resolved) })).map((row) => row.id)).toEqual([ID(3)]);
     expect(resolved).toEqual([SHORT]);
   });
 
@@ -1026,17 +1160,17 @@ describe("listSessions", () => {
     });
   }
 
-  it("lists a pi session only in a layout version pi documents", () => {
+  it("lists a pi session only in a layout version pi documents", async () => {
     const home = newHome();
     mkdirSync(piStore(home), { recursive: true });
     const header = (id: string, version?: number) => `${JSON.stringify({ type: "session", ...(version === undefined ? {} : { version }), id, timestamp: "2026-10-01T09:00:00.000Z", cwd: CWD })}\n`;
     writeFileSync(join(piStore(home), "future.jsonl"), header("future", 999) + piPrompt("future"));
     writeFileSync(join(piStore(home), "v1.jsonl"), header("v1") + piPrompt("v1"));
     writeFileSync(join(piStore(home), "v2.jsonl"), header("v2", 2) + piPrompt("v2"));
-    expect(listSessions("pi", CWD, { home, env: {} }).map((row) => row.id).sort()).toEqual(["v1", "v2"]);
+    expect((await listSessions("pi", CWD, { home, env: {} })).map((row) => row.id).sort()).toEqual(["v1", "v2"]);
   });
 
-  it("puts the most recently written session first, whatever its file name", () => {
+  it("puts the most recently written session first, whatever its file name", async () => {
     const home = newHome();
     mkdirSync(piStore(home), { recursive: true });
     for (const [name, seconds] of [["2026-10-01T09-00-00_a.jsonl", 1_790_000_300], ["2026-10-02T09-00-00_b.jsonl", 1_790_000_100], ["2026-10-03T09-00-00_c.jsonl", 1_790_000_200]] as const) {
@@ -1044,14 +1178,14 @@ describe("listSessions", () => {
       writeFileSync(path, piHeader(name) + piPrompt(name));
       utimesSync(path, seconds, seconds);
     }
-    expect(listSessions("pi", CWD, { home, env: {} }).map((row) => row.id)).toEqual(["2026-10-01T09-00-00_a.jsonl", "2026-10-03T09-00-00_c.jsonl", "2026-10-02T09-00-00_b.jsonl"]);
+    expect((await listSessions("pi", CWD, { home, env: {} })).map((row) => row.id)).toEqual(["2026-10-01T09-00-00_a.jsonl", "2026-10-03T09-00-00_c.jsonl", "2026-10-02T09-00-00_b.jsonl"]);
   });
 
-  it("gives no resume command for an id that could be read as an option", () => {
+  it("gives no resume command for an id that could be read as an option", async () => {
     const home = newHome();
     mkdirSync(piStore(home), { recursive: true });
     writeFileSync(join(piStore(home), "flag.jsonl"), piHeader("--yolo") + piPrompt("flag"));
-    expect(listSessions("pi", CWD, { home, env: {} }).map((row) => [row.id, row.resume])).toEqual([["--yolo", null]]);
+    expect((await listSessions("pi", CWD, { home, env: {} })).map((row) => [row.id, row.resume])).toEqual([["--yolo", null]]);
   });
 });
 
@@ -1403,10 +1537,20 @@ describe("GET /api/sessions/history", () => {
       { pid: SHELL, parent: 1, path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", commandLine: "powershell.exe" },
       { pid: PID, parent: SHELL, path: CLAUDE_EXE, commandLine: `"${CLAUDE_EXE}"`, started: STARTED },
     ];
+    // the native claude.exe the shell started runs the session in a child claude.exe, and only that child writes the record
+    const LAUNCHER = 4000;
+    const launched = (shell: number): ProcessRow[] => [
+      { pid: LAUNCHER, parent: shell, path: CLAUDE_EXE, commandLine: `"${CLAUDE_EXE}"`, started: STARTED - 1_000 },
+      { pid: PID, parent: LAUNCHER, path: CLAUDE_EXE, commandLine: `"${CLAUDE_EXE}" --permission-mode auto`, started: STARTED },
+    ];
+    const launchedTable = async (): Promise<ProcessRow[]> => [
+      { pid: SHELL, parent: 1, path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", commandLine: "powershell.exe" },
+      ...launched(SHELL),
+    ];
     const shellOnly = async (): Promise<PaneProcesses> => ({ shell_pid: SHELL, foreground_processes: [{ pid: SHELL, name: "powershell.exe", argv: ["powershell.exe"] }] });
-    const record = (store: string) => {
+    const record = (store: string, pid = PID) => {
       mkdirSync(join(store, "sessions"), { recursive: true });
-      writeFileSync(join(store, "sessions", `${PID}.json`), JSON.stringify({ pid: PID, sessionId: ID(5), procStart: PROC_START, kind: "interactive" }));
+      writeFileSync(join(store, "sessions", `${pid}.json`), JSON.stringify({ pid, sessionId: ID(5), procStart: PROC_START, kind: "interactive" }));
     };
     let serverConfigDir: string | undefined;
     beforeEach(() => { serverConfigDir = process.env["CLAUDE_CONFIG_DIR"]; delete process.env["CLAUDE_CONFIG_DIR"]; forgetClaudeSessions(); });
@@ -1422,6 +1566,45 @@ describe("GET /api/sessions/history", () => {
       record(join(home, ".claude-second"));
       const listed = await list(home);
       expect(listed.sessions.map((row) => [row.firstMessage, row.resume?.source?.pane_id])).toEqual([["second store prompt", "p1"]]);
+    });
+
+    it("lists the store of the child Claude holding the PID record, not the launcher's", async () => {
+      const home = newHome();
+      claudeStore(join(home, ".claude"), ID(1), "default store prompt");
+      claudeStore(join(home, ".claude-second"), ID(1), "second store prompt");
+      record(join(home, ".claude-second"));
+      const listed = await list(home, launchedTable);
+      expect(listed.sessions.map((row) => [row.firstMessage, row.resume?.source?.pane_id])).toEqual([["second store prompt", "p1"]]);
+    });
+
+    it("tells no store while the Claude under the shell has written no record yet, rather than take the default one", async () => {
+      const home = newHome();
+      claudeStore(join(home, ".claude"), ID(1), "default store prompt");
+      expect((await list(home)).error?.code).toBe("claude_store_unknown");
+      expect((await list(home, launchedTable)).error?.code).toBe("claude_store_unknown");
+    });
+
+    it("tells no store when two Claudes under the shell hold records", async () => {
+      const BESIDE = 4300;
+      const home = newHome();
+      claudeStore(join(home, ".claude"), ID(1), "default store prompt");
+      record(join(home, ".claude"));
+      record(join(home, ".claude"), BESIDE);
+      const rows = async (): Promise<ProcessRow[]> => [...await launchedTable(), { pid: BESIDE, parent: SHELL, path: CLAUDE_EXE, commandLine: `"${CLAUDE_EXE}"`, started: STARTED }];
+      expect((await list(home, rows)).error?.code).toBe("claude_store_unknown");
+    });
+
+    it("reads no process table on macOS or Linux, where herdr names the program in front", async () => {
+      const home = newHome();
+      claudeStore(join(home, ".claude"), ID(1), "default store prompt");
+      let read = 0;
+      for (const platform of ["darwin", "linux"]) {
+        const listed = await (await handleSessionHistoryRequest(...request("workspace_id=w1&agent=claude&pane_id=p1"), {
+          readOnly: false, stores: { home, env: {} }, snapshot: async () => snapshot(), paneProcesses: shellOnly, launchSource: launchAbsent, platform, table: async () => { read += 1; return launchedTable(); },
+        })).json() as ClaudeListing;
+        expect(listed.sessions.map((row) => row.firstMessage)).toEqual(["default store prompt"]);
+      }
+      expect(read).toBe(0);
     });
 
     it("offers Resume for the default ~/.claude, as before the store was bound", async () => {
@@ -1441,6 +1624,11 @@ describe("GET /api/sessions/history", () => {
         { pid: NEW_SHELL, parent: 1, path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", commandLine: "powershell.exe" },
         { pid: PID, parent: NEW_SHELL, path: CLAUDE_EXE, commandLine: `"${CLAUDE_EXE}" --resume ${ID(1)}`, started: STARTED },
       ];
+      const launchedRows = async (): Promise<ProcessRow[]> => [
+        { pid: SHELL, parent: 1, path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", commandLine: "powershell.exe" },
+        { pid: NEW_SHELL, parent: 1, path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", commandLine: "powershell.exe" },
+        ...launched(NEW_SHELL),
+      ];
       const paneProcesses = async (paneId: string): Promise<PaneProcesses> => {
         const shell = paneId === "p-new" ? NEW_SHELL : SHELL;
         return { shell_pid: shell, foreground_processes: [{ pid: shell, name: "powershell.exe", argv: ["powershell.exe"] }] };
@@ -1450,11 +1638,11 @@ describe("GET /api/sessions/history", () => {
         start: async () => ({ agent_started: true as const }),
         close: async (tabId: string) => { closed.push(tabId); },
       });
-      const outcome = async (recordedIn: string | readonly string[]) => {
+      const outcome = async (recordedIn: string | readonly string[], tableRows = rows) => {
         const home = newHome();
         claudeStore(join(home, ".claude"), ID(1), "default store prompt");
         claudeStore(join(home, ".claude-second"), ID(1), "second store prompt");
-        const base = { stores: { home, env: {} }, snapshot: async () => snapshot(), paneProcesses, launchSource: launchAbsent, platform: "win32", table: rows, launchCheckMs: 0 };
+        const base = { stores: { home, env: {} }, snapshot: async () => snapshot(), paneProcesses, launchSource: launchAbsent, platform: "win32", table: tableRows, launchCheckMs: 0 };
         const listed = await (await handleSessionHistoryRequest(...request("workspace_id=w1&agent=claude&pane_id=p1"), { readOnly: false, ...base })).json() as ClaudeListing;
         expect(listed.sessions.map((row) => row.firstMessage)).toEqual(["default store prompt"]);
         for (const store of typeof recordedIn === "string" ? [recordedIn] : recordedIn) record(join(home, store));
@@ -1468,6 +1656,8 @@ describe("GET /api/sessions/history", () => {
       expect(await outcome(".claude-second")).toEqual([409, "launch_store_changed", ["t-new"]]);
       // the new Claude's live record in two stores (one copied while it ran): which one it writes cannot be told
       expect(await outcome([".claude", ".claude-second"])).toEqual([409, "launch_store_unknown", ["t-new"]]);
+      // below a launcher with no record: the child holding it is the started Claude, and its tab is kept
+      expect(await outcome(".claude", launchedRows)).toEqual([200, "created", []]);
     });
 
     it("tells no store when the process table says nothing", async () => {

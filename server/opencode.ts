@@ -32,7 +32,7 @@ import { join, resolve } from "node:path";
 import type { ConversationMetadata, ConversationPart, ConversationTurn, HerdrPane, SkillActivity } from "../shared/protocol.ts";
 import { opencodeSkillInvocation } from "./skill-invocations/opencode.ts";
 import { trimOutput } from "./tool-output.ts";
-import { MAX_TURNS, toolSummary } from "./transcript-records.ts";
+import { MAX_TURNS, OMO_TASK_RESULT_MAX, toolSummary } from "./transcript-records.ts";
 
 /** A page never holds more prompts than this (each opens a user + assistant pair). */
 const MAX_PAGE_PROMPTS = MAX_TURNS / 2;
@@ -102,12 +102,13 @@ function rowImages(type: string, data: Row): { media_type: string; data: string 
   return images;
 }
 
-/** A tool's own output: its error, else the text it returned. */
-function toolText(state: Row): string {
+/** A tool's own output: its error, else the text it returned (a subagent's answer without the tag around it). */
+function toolText(state: Row, name: string): string {
   if (state.status === "error") return text(record(state.error).message) ?? "";
-  return (Array.isArray(state.content) ? state.content : []).map(record)
+  const output = (Array.isArray(state.content) ? state.content : []).map(record)
     .filter((item) => item.type === "text" && typeof item.text === "string")
     .map((item) => item.text as string).join("\n");
+  return name === "subagent" ? unwrap(output) : output;
 }
 
 /** OpenCode's `skill` tool names the skill it loads by `id` (1.x: `name`). */
@@ -161,7 +162,7 @@ export function opencodeRecord(id: string, type: string, data: Row): OpencodeRec
           output: "",
         };
         if (skill !== null) part.skill = skill;
-        trimOutput(part, toolText(state), `${id}:${index}`);
+        trimOutput(part, toolText(state, block.name), `${id}:${index}`);
         const exit = record(state.metadata).exit;
         if (state.status === "error" || (typeof exit === "number" && exit !== 0)) part.error = true;
         const files = (Array.isArray(state.content) ? state.content : []).map(record).filter((item) => item.type === "file");
@@ -190,6 +191,16 @@ export function opencodeRecord(id: string, type: string, data: Row): OpencodeRec
     if (metadata.source === "shell" && metadata.jobID === undefined) return null;
     const body = typeof data.text === "string" ? unwrap(data.text) : "";
     const label = text(data.description)?.trim() ?? null;
+    // a background subagent that ended (SubagentCompletion.deliver in 2.0.32): its card, with its answer
+    if (metadata.source === "subagent") {
+      const agent = text(metadata.agent)?.trim() ?? null;
+      const status = metadata.state === "error" ? "failed" as const : metadata.state === "cancelled" ? "cancelled" as const : "completed" as const;
+      return { role: "user", ts: iso(time.created), parts: [{ kind: "task_result", tasks: [{
+        id: text(metadata.childID) ?? id, title: label ?? agent ?? "subagent", agent, model: null, status,
+        duration_ms: null, turns: null, tool_calls: null, tokens: null,
+        result: body.slice(0, OMO_TASK_RESULT_MAX), ...(body.length > OMO_TASK_RESULT_MAX ? { result_cut: true } : {}),
+      }] }] };
+    }
     const shown = label !== null && body.length > 0 && body !== label ? `${label}\n${body}` : label ?? body;
     if (shown.length === 0) return null;
     const source = text(metadata.source) ?? text(metadata.notice) ?? "synthetic";
@@ -231,12 +242,12 @@ export function opencodeTurns(records: readonly (OpencodeRecord | null)[]): Conv
 export interface RowMeta { id: string; seq: number; type: string; updated: number; size: number }
 
 /**
- * Where the page ending before `rows` (newest first) starts: at the prompt MAX_PAGE_PROMPTS back,
+ * Where the page ending before `rows` (newest first) starts: at the prompt `pagePrompts` back,
  * else at the earliest prompt inside the window, else at `floor` when the window reaches it. With
  * no prompt in the window the newest page starts mid-turn, at a whole row; an older page is read
  * once, so it reaches further back for one, up to four windows.
  */
-export function pageStart(rows: Iterable<RowMeta>, floor: number, widen: boolean, window = OPENCODE_WINDOW_BYTES): number {
+export function pageStart(rows: Iterable<RowMeta>, floor: number, widen: boolean, window = OPENCODE_WINDOW_BYTES, pagePrompts = MAX_PAGE_PROMPTS): number {
   let bytes = 0;
   let prompts = 0;
   let earliest: number | undefined;
@@ -246,7 +257,7 @@ export function pageStart(rows: Iterable<RowMeta>, floor: number, widen: boolean
     if (bytes > (widen && earliest === undefined ? 4 * window : window)) return earliest ?? newer ?? row.seq;
     if (row.type === "user") {
       earliest = row.seq;
-      if (++prompts === MAX_PAGE_PROMPTS) return row.seq;
+      if (++prompts === pagePrompts) return row.seq;
     }
     newer = row.seq;
   }
@@ -254,7 +265,13 @@ export function pageStart(rows: Iterable<RowMeta>, floor: number, widen: boolean
 }
 
 /** The page asked for: as conversation.ts's ConversationPage. */
-export type OpencodePage = { before?: string; since?: string; from?: string };
+export type OpencodePage = { before?: string; since?: string; from?: string; prompts?: number };
+
+/** The prompts a page keeps: the reader's choice inside MAX_PAGE_PROMPTS, else MAX_PAGE_PROMPTS. */
+function pagePrompts(page: OpencodePage): number {
+  const asked = page.prompts;
+  return typeof asked === "number" && Number.isFinite(asked) ? Math.min(MAX_PAGE_PROMPTS, Math.max(1, Math.floor(asked))) : MAX_PAGE_PROMPTS;
+}
 
 export type OpencodeAnswer =
   | { kind: "unavailable"; reason: string }
@@ -294,16 +311,17 @@ export function forgetOpencodeRead(key: string): void {
 }
 
 /** The store, read-only; null when it cannot be opened (no file, not SQLite, not readable). */
-function openStore(path: string): Database | null {
+function openStore(path: string, busyMs: number): Database | null {
   try {
     const db = new Database(path, { readonly: true, create: false });
-    db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+    db.exec(`PRAGMA busy_timeout = ${busyMs}`);
     return db;
   } catch { return null; }
 }
 
-function withStore<T>(path: string, read: (db: Database) => T): T | null {
-  const db = openStore(path);
+/** `busyMs`: how long a read waits on a store held by its writer; a poll that runs on the event loop waits not at all. */
+export function withStore<T>(path: string, read: (db: Database) => T, busyMs = BUSY_TIMEOUT_MS): T | null {
+  const db = openStore(path, busyMs);
   if (db === null) return null;
   try { return read(db); }
   finally { db.close(); }
@@ -331,7 +349,7 @@ interface SessionView {
 }
 
 /** The session's visible extent, its history id and what any change to it changes. */
-function sessionView(db: Database, sessionId: string): SessionView | null {
+export function sessionView(db: Database, sessionId: string): SessionView | null {
   const session = db.query<{ revert: string | null }, [string]>("SELECT revert FROM session_v2 WHERE id = ?").get(sessionId);
   if (session === null) return null;
   const stats = db.query<{ count: number; last: number | null; updated: number | null }, [string]>(
@@ -432,7 +450,7 @@ export const OPENCODE_ROW_SIZE = { octets: "octet_length(data)", bytes: "length(
 export type OpencodeRowSize = (typeof OPENCODE_ROW_SIZE)[keyof typeof OPENCODE_ROW_SIZE];
 
 let supported: OpencodeRowSize | null = null;
-function supportedRowSize(db: Database): OpencodeRowSize {
+export function supportedRowSize(db: Database): OpencodeRowSize {
   if (supported === null) {
     try { db.query("SELECT octet_length('')").get(); supported = OPENCODE_ROW_SIZE.octets; }
     catch { supported = OPENCODE_ROW_SIZE.bytes; }
@@ -463,7 +481,7 @@ const ROW_QUERIES: Record<OpencodeRowSize, { page: string; pageDescending: strin
 export function opencodeConversation(path: string, sessionId: string, page: OpencodePage = {}, rowSize?: OpencodeRowSize): OpencodeAnswer {
   if (!SESSION_ID.test(sessionId)) return { kind: "unavailable", reason: "no_session_id" };
   const key = opencodeReadKey(path, sessionId);
-  const cacheKey = `${key}\0${page.before ?? ""}\0${page.since ?? ""}\0${page.from ?? ""}`;
+  const cacheKey = `${key}\0${page.before ?? ""}\0${page.since ?? ""}\0${page.from ?? ""}\0${pagePrompts(page)}`;
   try {
     const answer = withStore(path, (db): OpencodeAnswer => {
       // A broken or changing 1.x store leaves the terminal as the source of the conversation.
@@ -488,12 +506,12 @@ export function opencodeConversation(path: string, sessionId: string, page: Open
         const before = cursorOf(db, sessionId, view.historyId, page.before, end);
         const floor = page.since === undefined ? 0 : cursorOf(db, sessionId, view.historyId, page.since, end);
         if (before === null || floor === null || floor > before) return { kind: "history_changed" };
-        start = before === floor ? floor : pageStart(descending(floor, before), floor, true);
+        start = before === floor ? floor : pageStart(descending(floor, before), floor, true, OPENCODE_WINDOW_BYTES, pagePrompts(page));
         to = before;
       } else {
         const held = page.from === undefined ? null : cursorOf(db, sessionId, view.historyId, page.from, end);
         if (page.from !== undefined && held === null) return { kind: "history_changed" };
-        const newest = pageStart(descending(0, end), 0, false);
+        const newest = pageStart(descending(0, end), 0, false, OPENCODE_WINDOW_BYTES, pagePrompts(page));
         // a chat that shows older pages keeps every turn after its held start while they are
         // inside the newest page; once the page moved past it, it fetches the turns between
         start = held !== null && held >= newest ? held : newest;
@@ -580,7 +598,7 @@ export function opencodeToolOutput(path: string, sessionId: string, ref: string)
   return readRow(path, sessionId, match[1]!, (row) => {
     if (row.type !== "assistant" || !Array.isArray(row.data.content)) return null;
     const block = record(row.data.content[Number(match[2])]);
-    return block.type === "tool" ? toolText(record(block.state)) : null;
+    return block.type === "tool" && typeof block.name === "string" ? toolText(record(block.state), block.name) : null;
   });
 }
 
@@ -607,6 +625,38 @@ export function opencodeSessionVersion(path: string, sessionId: string): string 
     });
   } catch (error) {
     if (unusable(error) || busy(error)) return null;
+    throw error;
+  }
+}
+
+/**
+ * The terminal title OpenCode's TUI sets on a session with this title (its `app.tsx`). An untitled
+ * session's terminal title is plain `OpenCode`, as on its home screen: it names no session.
+ */
+export function opencodeTerminalTitle(title: string): string {
+  return `OC | ${title.length > 40 ? `${title.slice(0, 37)}\u2026` : title}`;
+}
+
+/**
+ * Every session in the store (2.x or 1.x) whose terminal title is this one: the session a terminal
+ * shows only when there is exactly one, whichever sessions that terminal reported. Read without
+ * waiting on the store's writer: it runs on every snapshot.
+ */
+export function opencodeSessionsTitled(path: string | null, terminalTitle: string): string[] {
+  if (path === null || !terminalTitle.startsWith("OC | ")) return [];
+  // the title as shown, or the start OpenCode cut it to: the rows are then compared as OpenCode shows them
+  const start = terminalTitle.slice("OC | ".length).replace(/\u2026$/, "");
+  if (start === "") return [];
+  try {
+    return withStore(path, (db) => {
+      const flavor = storeFlavor(db);
+      if (flavor === "unknown") return [];
+      const table = flavor === "v1" ? "session" : "session_v2";
+      const rows = db.query<{ id: string; title: unknown }, [string, string]>(`SELECT id, title FROM ${table} WHERE substr(title, 1, length(?)) = ?`).all(start, start);
+      return rows.flatMap((row) => typeof row.title === "string" && opencodeTerminalTitle(row.title) === terminalTitle ? [row.id] : []);
+    }, 0) ?? [];
+  } catch (error) {
+    if (unusable(error) || busy(error)) return [];
     throw error;
   }
 }
@@ -798,12 +848,12 @@ function conversation1(db: Database, cacheKey: string, sessionId: string, page: 
     const before = cursorOf(page.before);
     const floor = page.since === undefined ? 0 : cursorOf(page.since);
     if (before === null || floor === null || floor > before) return { kind: "history_changed" };
-    start = before === floor ? floor : pageStart(descending(floor, before), floor, true);
+    start = before === floor ? floor : pageStart(descending(floor, before), floor, true, OPENCODE_WINDOW_BYTES, pagePrompts(page));
     to = before;
   } else {
     const held = page.from === undefined ? null : cursorOf(page.from);
     if (page.from !== undefined && held === null) return { kind: "history_changed" };
-    const newest = pageStart(descending(0, end), 0, false);
+    const newest = pageStart(descending(0, end), 0, false, OPENCODE_WINDOW_BYTES, pagePrompts(page));
     start = held !== null && held >= newest ? held : newest;
   }
 

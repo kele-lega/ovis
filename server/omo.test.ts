@@ -1,9 +1,12 @@
 import { expect, it, spyOn } from "bun:test";
+import * as darwinProcess from "./darwin-process.ts";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HerdrPane } from "../shared/protocol.ts";
-import { heldRuntime, heldSessionIds, isOmoProcess, omoAgentDir, omoProcessIdentity, omoSessionFolder, omoCandidates, omoTranscriptsOfCwd, selectOmoTranscript, withOmoDescendants, type OmoRuntime, type ProcessInfo } from "./omo.ts";
+import { heldOmoProcess, heldRuntime, heldSessionIds, isOmoProcess, omoAgentDir, omoPanes, omoProcessIdentity, omoSessionFolder, omoCandidates, omoTranscriptsOfCwd, selectOmoTranscript, withOmoDescendants, type OmoRuntime, type ProcessInfo } from "./omo.ts";
+import * as client from "./herdr/client.ts";
+import * as omoModule from "./omo.ts";
 import * as processStart from "./process-start.ts";
 import { processStartedAt } from "./process-start.ts";
 import { parseOmpTranscript } from "./transcript-records.ts";
@@ -98,7 +101,7 @@ it("reads session identity from bounded headers and rejects foreign cwd and esca
     session(join(home, "outside.jsonl"), "/project");
     symlinkSync(join(home, "outside.jsonl"), join(dir, "escaped.jsonl"));
     writeFileSync(join(dir, "broken.jsonl"), "{");
-    expect(omoCandidates("/project", home)).toEqual([{ path: join(dir, "valid.jsonl"), id: "session-1", createdAt: Date.parse("2026-09-27T00:00:00Z"), store: join(home, ".omo", "agent", "sessions") }]);
+    expect(omoCandidates("/project", home)).toEqual([{ path: join(dir, "valid.jsonl"), id: "session-1", createdAt: Date.parse("2026-09-27T00:00:00Z"), store: join(home, ".omo", "agent", "sessions"), identity: expect.any(String) }]);
     expect(omoCandidates("/missing", home)).toEqual([]);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
@@ -120,6 +123,40 @@ it("reads only the live process's own holder records, never a reused pid's lefto
     expect(heldSessionIds(dir, 43, 10_000)).toEqual(["odd/id"]);
     expect(heldSessionIds(dir, 99, 10_000)).toEqual([]);
     expect(heldSessionIds(join(dir, "missing"), 42, 10_000)).toEqual([]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+it("keeps a holder whose runtime came up seconds after the kernel started its process (#2281)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "herdr-omo-holders-"));
+  try {
+    const boot = 50_000;
+    const hold = (id: string, pid: number, processStartedAtMs: number, bootAtMs?: number) => {
+      const holders = join(dir, "session-holders", encodeURIComponent(id));
+      mkdirSync(holders, { recursive: true });
+      writeFileSync(join(holders, `${pid}.json`), JSON.stringify({ pid, bootAtMs, processStartedAtMs, cwd: "/project" }));
+    };
+    // the kernel started each pid at 100s; omo's own clock read its start later on a busy machine
+    hold("late-3500", 51, 103_500, boot);
+    hold("late-6958", 52, 106_958, boot + 1000);
+    hold("far-too-late", 53, 220_000, boot);
+    hold("reused-pid", 54, 96_500, boot);
+    hold("other-host", 55, 106_958, boot + 600_000);
+    hold("no-boot", 56, 106_958);
+    hold("no-boot-in-time", 57, 102_000);
+    expect(heldSessionIds(dir, 51, 100_000, undefined, boot)).toEqual(["late-3500"]);
+    expect(heldSessionIds(dir, 52, 100_000, "/project", boot)).toEqual(["late-6958"]);
+    expect(heldSessionIds(dir, 52, 100_000, "/elsewhere", boot)).toEqual([]);
+    expect(heldSessionIds(dir, 53, 100_000, undefined, boot)).toEqual([]);
+    // a record from before this process's start is a crashed process's whose pid was reused
+    expect(heldSessionIds(dir, 54, 100_000, undefined, boot)).toEqual([]);
+    // a late record proves nothing unless it names this host's boot: another host sharing the
+    // store, a clock step or an omo that writes no boot keeps the 3 s bound
+    expect(heldSessionIds(dir, 55, 100_000, undefined, boot)).toEqual([]);
+    expect(heldSessionIds(dir, 56, 100_000, undefined, boot)).toEqual([]);
+    expect(heldSessionIds(dir, 57, 100_000, undefined, boot)).toEqual(["no-boot-in-time"]);
+    // where this host's boot cannot be read, only the strict bound applies
+    expect(heldSessionIds(dir, 52, 100_000, undefined, null)).toEqual([]);
+    expect(heldSessionIds(dir, 57, 100_000, undefined, null)).toEqual(["no-boot-in-time"]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -478,4 +515,54 @@ it("fails closed on distinct holder claims while duplicates of one claim still b
   expect(pending.ids).toEqual([]);
   expect(pending.claims).toEqual([{ id: "one", store: "/b/sessions" }]);
   expect(selectOmoTranscript("a", [fileA], [pending], 20_000)).toBeNull();
+});
+
+it("names the OmO process holding a session, not the bundled SDK child beside it (#1545)", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "herdr-omo-held-pid-")));
+  const cwd = join(root, "project");
+  const agentDir = join(root, "agent");
+  const pid = 41001;
+  const start = spyOn(processStart, "processStartedAtAsync").mockResolvedValue(1_792_000_000_000);
+  const environ = spyOn(omoModule, "processEnviron").mockReturnValue([`OMO_CODING_AGENT_DIR=${agentDir}`]);
+  try {
+    holdRecord(join(agentDir, "sessions", omoSessionFolder(cwd)), "sess-1", pid, { pid, processStartedAtMs: 1_792_000_000_000, cwd });
+    // an argv-silent custom OmO, known by its holder alone, and the SDK child it runs a turn in; herdr gives no
+    // per-process cwd (macOS), so the pane's own directory places them
+    const pane = { pane_id: "p", cwd } as HerdrPane;
+    const parent = { pid, argv: ["/opt/team-ai/bin/run"] };
+    const sdk = { pid: pid + 1, argv: [`${OMO_AI}/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude`] };
+    expect(await heldOmoProcess(pane, [parent, sdk], root)).toEqual({ pid, started: 1_792_000_000_000 });
+    expect(await heldOmoProcess(pane, [sdk, parent], root)).toEqual({ pid, started: 1_792_000_000_000 });
+    expect(await heldOmoProcess(pane, [sdk], root)).toBeNull();
+    expect(await heldOmoProcess({ ...pane, cwd: join(root, "elsewhere") }, [parent, sdk], root)).toBeNull();
+  } finally { start.mockRestore(); environ.mockRestore(); rmSync(root, { recursive: true, force: true }); }
+});
+
+// every OmO status refresh reads these, so every snapshot a pending message is checked against does (#1545)
+it("reads OmO panes' process starts from the kernel on macOS, with no ps child", async () => {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  const home = mkdtempSync(join(tmpdir(), "omo-darwin-starts-"));
+  const pane = { pane_id: "omo-darwin", workspace_id: "w", tab_id: "t", terminal_id: "term", focused: false, revision: 0,
+    agent: "pi", agent_status: "idle", cwd: home } as HerdrPane;
+  spyOn(client, "herdrRpc").mockImplementation((async () => ({ process_info: { pane_id: pane.pane_id,
+    foreground_processes: [{ pid: 4242, name: "node", argv: ["node", `${OMO_AI}/bin/omo`], cwd: home }] } })) as unknown as typeof client.herdrRpc);
+  const blocking = spyOn(Bun, "spawnSync");
+  // the kernel's process record answers; no ps runs, awaited or not (#1404)
+  const kernel = spyOn(darwinProcess, "darwinStartTime").mockReturnValue(1_000_000n);
+  const awaited = spyOn(Bun, "spawn");
+  try {
+    // the kernel's start reaches the pane's OmO result: a read that skipped the kernel would leave it unknown
+    expect((await omoPanes([pane], home)).get(pane.pane_id)?.startedAt).toBe(1_000);
+    expect(kernel).toHaveBeenCalledWith(4242);
+    expect(awaited).not.toHaveBeenCalled();
+    expect(blocking).not.toHaveBeenCalled();
+  } finally {
+    awaited.mockRestore();
+    blocking.mockRestore();
+    kernel.mockRestore();
+    (client.herdrRpc as unknown as { mockRestore(): void }).mockRestore();
+    Object.defineProperty(process, "platform", platform);
+    rmSync(home, { recursive: true, force: true });
+  }
 });

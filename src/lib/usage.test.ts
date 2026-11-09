@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { ProviderUsage, UsageWindow } from "../../shared/protocol.ts";
-import { composerUsage, formatPercent, formatResetIn, glanceWindow, meterPercent, meterText, moveInOrder, orderProviders, providerForAgent, statusWindows, tightestWindow, usageName, windowLabel } from "./usage.ts";
+import { canSignInAgain, composerUsage, creditsText, formatPercent, formatResetIn, glanceWindow, meterPercent, meterText, moveInOrder, orderProviders, planForPane, providerForAgent, statusWindows, tightestWindow, usageName, windowLabel } from "./usage.ts";
 
 const NOW = Date.parse("2026-09-29T12:00:00Z");
 const window = (used_percent: number, kind: UsageWindow["kind"] = "week", scope: string | null = null): UsageWindow => ({ kind, scope, used_percent, resets_at: null, starts_at: null });
@@ -9,6 +9,15 @@ const provider = (id: ProviderUsage["id"], windows: UsageWindow[], account: stri
 });
 
 describe("usage meters", () => {
+  it("says credits as the provider counts them: money in its currency, Codex's in whole credits", () => {
+    expect(creditsText({ kind: "spend", currency: "EUR", used: 12.19, limit: 15.39, used_percent: 79.2 })).toBe("€12.19 / €15.39");
+    expect(creditsText({ kind: "spend", currency: "JPY", used: 830, limit: null, used_percent: null })).toBe("¥830 spent");
+    expect(creditsText({ kind: "spend", currency: "USD", used: null, limit: null, used_percent: null })).toBe("Unlimited");
+    expect(creditsText({ kind: "balance", balance: 1231.84, unlimited: false })).toBe("1,232 credits");
+    expect(creditsText({ kind: "balance", balance: null, unlimited: false })).toBe("Available");
+    expect(creditsText({ kind: "balance", balance: null, unlimited: true })).toBe("Unlimited");
+  });
+
   it("uses the agent's provider and the first visible account in Settings order", () => {
     const accounts = [provider("claude", [window(40)]), provider("codex", [window(20)], "a@x"), provider("codex", [window(80)], "b@x")];
     expect(composerUsage(accounts, "codex", ["codex:b@x"], [])?.account).toBe("b@x");
@@ -17,6 +26,26 @@ describe("usage meters", () => {
     expect(composerUsage(accounts, null, [], [])).toBeUndefined();
     expect(providerForAgent("agy")).toBe("antigravity");
     expect(providerForAgent("opencode")).toBe("opencode");
+  });
+
+  it("looks up a pi-family pane's plan by the provider its conversation runs at", () => {
+    const accounts = [provider("claude", [window(40)], "c@x"), provider("codex", [window(20)], "a@x"), provider("codex", [window(80)], "b@x")];
+    for (const agent of ["gjc", "omp", "omo", "pi"]) {
+      expect(planForPane(agent, "anthropic-subscription")).toBe("claude");
+      expect(planForPane(agent, "openai-codex")).toBe("codex");
+      expect(composerUsage(accounts, agent, [], [], "anthropic-subscription")?.account).toBe("c@x");
+      // the user's order and hidden accounts still choose among that plan's accounts
+      expect(composerUsage(accounts, agent, ["codex:b@x"], [], "openai-codex")?.account).toBe("b@x");
+      expect(composerUsage(accounts, agent, ["codex:b@x"], ["codex:b@x"], "openai-codex")?.account).toBe("a@x");
+      // a plain `anthropic` may be an API key, as `openai` is: no plan, and none is guessed without one
+      for (const other of ["anthropic", "openai", "zai", "__proto__", null, undefined]) {
+        expect(planForPane(agent, other)).toBeNull();
+        expect(composerUsage(accounts, agent, [], [], other)).toBeUndefined();
+      }
+    }
+    // an agent that maps to a plan keeps its own
+    expect(planForPane("codex", "anthropic-subscription")).toBe("codex");
+    expect(planForPane(null, "anthropic-subscription")).toBe("claude");
   });
 
   it("prioritizes the plan-wide five-hour session, with weekly fallback only", () => {
@@ -55,6 +84,18 @@ describe("usage meters", () => {
     expect(moveInOrder(["a", "b", "c"], ["x", "b"], "c", -1)).toEqual(["a", "c", "b", "x"]);
     expect(moveInOrder(["a", "b", "c"], [], "a", -1)).toEqual(["a", "b", "c"]);
     expect(moveInOrder(["a", "b"], [], "a", 1)).toEqual(["b", "a"]);
+  });
+
+  it("offers signing in again only for an expired sign-in this PC's own CLI holds", () => {
+    const expired = (id: ProviderUsage["id"], key: string, problem: ProviderUsage["problem"] = "expired"): ProviderUsage => ({ ...provider(id, []), key, problem });
+    expect(canSignInAgain(expired("claude", "claude:team"))).toBe(true);
+    expect(canSignInAgain(expired("codex", "codex@0123456789ab"))).toBe(true);
+    expect(canSignInAgain(expired("codex", "codex:cliproxy:hub-1"))).toBe(false);
+    expect(canSignInAgain(expired("antigravity", "antigravity@keychain"))).toBe(false);
+    expect(canSignInAgain(expired("cursor", "cursor:c1"))).toBe(false);
+    expect(canSignInAgain(expired("opencode", "opencode@0123456789ab"))).toBe(false);
+    expect(canSignInAgain(expired("claude", "claude:team", null))).toBe(false);
+    expect(canSignInAgain(expired("claude", "claude:team", "failed"))).toBe(false);
   });
 
   it("counts a meter as used or left, and names the account", () => {

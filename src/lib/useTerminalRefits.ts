@@ -1,17 +1,22 @@
 import { useEffect, useRef, type RefObject } from "react";
 import { terminalTheme, type Palette, type ResolvedTheme } from "./settings.ts";
-import { loadFontStack, measurableFontStack, TERMINAL_FONT_STACK, terminalFontStack } from "./fontFamily.ts";
+import { type FontSettled, loadFontStack, measurableFontStack, monoFaceArrived, openingFontStack, terminalFontStack } from "./fontFamily.ts";
 import { modalOpen } from "./focus.ts";
+import { addServedFonts } from "./userFonts.ts";
 import { inUse } from "./paneTerminalShared.ts";
+import { fitLineHeight } from "./terminalLineHeight.ts";
 import type { TerminalPeek } from "./terminalPeek.ts";
 import type { HerdrSocket } from "./ws.ts";
 import type { FitAddon } from "@xterm/addon-fit";
 import type { Terminal } from "@xterm/xterm";
+import { typeAheadFocused } from "./typeAhead.ts";
 
 export interface TerminalRefitsDeps {
   activeRef: RefObject<boolean>;
   autoSelected: boolean;
   baseFontRef: RefObject<number>;
+  pinchingRef: RefObject<boolean>;
+  fontSettledRef: RefObject<FontSettled>;
   chatView: boolean;
   chatViewRef: RefObject<boolean>;
   coarseRef: RefObject<boolean>;
@@ -39,7 +44,7 @@ export interface TerminalRefitsDeps {
 }
 
 export function useTerminalRefits(deps: TerminalRefitsDeps): void {
-  const { activeRef, autoSelected, baseFontRef, chatView, chatViewRef, coarseRef, findOpenRef, fitRef, fittedRef, fixedGridRef, follow, followCursorRef, keyboardHoldsRef, narrowFont, narrowFontFitted, observeRef, palette, paneRef, peekRef, sharedGridRef, shown, sizesPty, socketRef, termRef, terminalFontFamily, terminalFontSize, theme } = deps;
+  const { activeRef, autoSelected, baseFontRef, pinchingRef, fontSettledRef, chatView, chatViewRef, coarseRef, findOpenRef, fitRef, fittedRef, fixedGridRef, follow, followCursorRef, keyboardHoldsRef, narrowFont, narrowFontFitted, observeRef, palette, paneRef, peekRef, sharedGridRef, shown, sizesPty, socketRef, termRef, terminalFontFamily, terminalFontSize, theme } = deps;
   // the theme follows the settings without a remount
   useEffect(() => {
     const term = termRef.current;
@@ -56,14 +61,21 @@ export function useTerminalRefits(deps: TerminalRefitsDeps): void {
     const term = termRef.current;
     if (!term) return;
     let superseded = false;
+    // a face can arrive while two fingers pinch: the pinch keeps its live size, and the pty is sized
+    // once, when they lift (useTerminalMount.ts, finishPinch)
     const apply = (): void => {
       // a newer font, or an unmounted terminal, took over while the faces loaded
       if (superseded || termRef.current !== term) return;
-      baseFontRef.current = terminalFontSize;
-      const family = measurableFontStack(fontFamily);
-      if (term.options.fontSize === terminalFontSize && term.options.fontFamily === family) return;
-      term.options.fontSize = terminalFontSize;
+      const pinching = pinchingRef.current;
+      const size = pinching ? baseFontRef.current : terminalFontSize;
+      baseFontRef.current = size;
+      // only a face that has loaded: one still loading would be measured as its fallback, so it is
+      // set once it arrives (below)
+      const family = measurableFontStack(openingFontStack(fontFamily));
+      if (term.options.fontSize === size && term.options.fontFamily === family) return;
+      term.options.fontSize = size;
       term.options.fontFamily = family;
+      fitLineHeight(term);
       if (observeRef.current || fixedGridRef.current || chatViewRef.current || keyboardHoldsRef.current(true)) return;
       try {
         fitRef.current?.fit();
@@ -74,10 +86,19 @@ export function useTerminalRefits(deps: TerminalRefitsDeps): void {
       // a chosen font loads after every attach: out of use (a reload behind another app), only
       // this grid fits, and the refit takes the pane once the user is here
       const pane = paneRef.current;
-      if (pane && sizesPty() && inUse()) socketRef.current?.resize(pane, term.cols, term.rows, true);
+      if (!pinching && pane && sizesPty() && inUse()) socketRef.current?.resize(pane, term.cols, term.rows, true);
     };
-    if (fontFamily === TERMINAL_FONT_STACK) apply();
-    else void loadFontStack(fontFamily, terminalFontSize).then(apply);
+    // the built-in stack too: its first text font is the bundled face, which the terminal opened without until it loaded.
+    // A face slower than the load's timeout is set when it arrives, however late. A family this PC serves from its
+    // fonts/ folder is on the page first (lib/userFonts.ts), so the cell is measured from it
+    void addServedFonts(terminalFontFamily).then(() => loadFontStack(fontFamily, terminalFontSize)).then(() => {
+      // a newer font's effect settles the first font once its own faces are in
+      if (superseded) return;
+      apply();
+      // the first fit and the pty's first size waited for this font (usePaneAttach.ts)
+      fontSettledRef.current.settle();
+      if (openingFontStack(fontFamily) !== fontFamily) void monoFaceArrived(terminalFontSize).then(apply);
+    });
     return () => { superseded = true; };
   }, [terminalFontSize, fontFamily]);
 
@@ -125,7 +146,8 @@ export function useTerminalRefits(deps: TerminalRefitsDeps): void {
     const pane = paneRef.current;
     if (pane && term && sizesPty() && inUse()) socketRef.current?.resize(pane, term.cols, term.rows, true);
     // a peek opened from what the reader just sent or pressed: its keys (Escape above all) go to the agent
-    if (activeRef.current && (!autoSelected || peekRef.current !== null) && !coarseRef.current && !modalOpen() && !findOpenRef.current) term?.focus();
+    // keys typed ahead for a new tab hold the keyboard until its hand-over gives it to the terminal (lib/typeAhead.ts)
+    if (activeRef.current && (!autoSelected || peekRef.current !== null) && !coarseRef.current && !modalOpen() && !findOpenRef.current && !typeAheadFocused()) term?.focus();
   }, [chatView]);
 
   // hidden behind another pane of its split, the pane keeps the size the pty has; shown again, it

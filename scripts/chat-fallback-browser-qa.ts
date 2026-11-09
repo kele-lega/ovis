@@ -1,6 +1,6 @@
 /** Real ChatView with an unavailable conversation and a stalled optional terminal. */
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright-core";
@@ -11,6 +11,7 @@ import { parseClaudeTranscript } from "../server/conversation.ts";
 import type { ConversationTurn, InteractivePrompt } from "../shared/protocol.ts";
 import type {} from "./chat-fallback-fixture.tsx";
 import { parseInteractivePrompt } from "../server/prompt.ts";
+import { parseOmpTranscript } from "../server/transcript-records.ts";
 import piNavigation from "../server/fixtures/pi-ask-navigation.json";
 const root = realpathSync(mkdtempSync(join(tmpdir(), "herdr-chat-fallback-")));
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
@@ -24,8 +25,11 @@ try {
   const terminalReads: string[] = [];
   let structured = false, resolveAgent!: () => void, agentReadArrived!: () => void;
   let lookupTimeout = false;
+  let copilotWaiting = false;
   let source = "codex-transcript";
   let prompt: InteractivePrompt | null = null;
+  // the answers of pane "screen": settings read off the agent's own screen (ConversationResponse.screen)
+  let screenAnswer: Record<string, unknown> = {};
   let turns: ConversationTurn[] = [{ role: "assistant", ts: null, parts: [{ kind: "text", text: "Structured conversation arrived" }] }];
   // resolved by the server's handler: a browser-side waitForRequest can win the race against it
   const agentRead = new Promise<void>((resolve) => { agentReadArrived = resolve; });
@@ -35,6 +39,8 @@ try {
     // the chat's skill matcher asks for the pane's commands
     if (url.pathname === "/api/pane/commands") return Response.json({ commands: [] });
     if (url.pathname === "/api/pane/conversation") {
+      if (pane === "screen") return Response.json({ cursor: null, turns: [], ...screenAnswer });
+      if (copilotWaiting && pane === "agent") return Response.json({ source: "scrollback", turns: [], recovery: "waiting" });
       if (lookupTimeout && pane === "agent") return Response.json({ error: { code: "read_timeout", message: "Conversation read timed out." } }, { status: 504 });
       return Response.json({ source: (structured && pane === "agent") || pane === "empty" ? source : "scrollback", cursor: null, turns: structured && pane === "agent" ? turns : [] });
     }
@@ -174,6 +180,149 @@ try {
     if (process.env.UI_EVIDENCE_DIR) await page.screenshot({ path: join(process.env.UI_EVIDENCE_DIR, "claude-hook-separate-replies.png") });
     console.log("PASS Claude hook narration and replies stay visible outside folded work; the tool remains inside");
   }
+  {
+    // A turn reads in the agent's own order, as its terminal does: words written before a tool call
+    // stay above it, and each run of work sits between the words around it.
+    const rows = () => page.locator(".chat-turn-agent").last().evaluate((turn) => [...turn.children].flatMap((child) => {
+      if (child.classList.contains("chat-turn-meta")) return [];
+      if (child.classList.contains("work-block")) return [["work", ...[".work-block-title", ".work-block-summary"].map((part) => child.querySelector(part)?.textContent ?? "")].join(" ")];
+      const words = (child as HTMLElement).innerText.trim();
+      return words ? [words] : [];
+    }));
+    const message = (role: string, extra: Record<string, unknown>) => ({ type: "message", message: { role, ...extra } });
+    source = "pi-transcript";
+    turns = parseOmpTranscript(jsonl(
+      message("user", { content: [{ type: "text", text: "Update the test server." }] }),
+      message("assistant", { stopReason: "toolUse", content: [
+        { type: "thinking", thinking: "Check what it runs first." },
+        { type: "text", text: "I read this as: bring the test server up to date." },
+        { type: "toolCall", id: "one", name: "eval", arguments: { summary: "Checking the revision" } },
+      ] }),
+      message("toolResult", { toolCallId: "one", content: [{ type: "text", text: "rev a" }] }),
+      message("assistant", { stopReason: "toolUse", content: [{ type: "toolCall", id: "two", name: "eval", arguments: { summary: "Checking the service" } }] }),
+      message("toolResult", { toolCallId: "two", content: [{ type: "text", text: "active" }] }),
+      message("assistant", { stopReason: "toolUse", content: [{ type: "thinking", thinking: "Restart it." }, { type: "toolCall", id: "three", name: "eval", arguments: { summary: "Restarting" } }] }),
+      message("toolResult", { toolCallId: "three", content: [{ type: "text", text: "restarted" }] }),
+      message("assistant", { stopReason: "stop", content: [{ type: "text", text: "The test server runs the latest main." }] }),
+    ));
+    await page.evaluate(() => { window.chatFallbackQA.agent("pi"); window.chatFallbackQA.pane("agent"); window.chatFallbackQA.refresh(); });
+    await page.getByText("The test server runs the latest main.", { exact: true }).waitFor();
+    const piRows = await rows();
+    console.log("OmO/pi turn order:", JSON.stringify(piRows));
+    assert.deepEqual(piRows, ["I read this as: bring the test server up to date.", "work Worked \u00b7 3 commands", "The test server runs the latest main."], "words before the tool calls stay above their one work block");
+    if (process.env.UI_EVIDENCE_DIR) await page.screenshot({ path: join(process.env.UI_EVIDENCE_DIR, "pi-words-before-tools.png") });
+    source = "claude-transcript";
+    // the turn, ended (Claude's end_turn makes its last words the final answer) or still at work on them
+    const catalog = (stop: "end_turn" | null): ConversationTurn[] => parseClaudeTranscript(jsonl(
+      { type: "user", message: { content: "Check the catalog." } },
+      { type: "assistant", message: { content: [{ type: "text", text: "Checking the catalog first." }, { type: "tool_use", id: "a", name: "Bash", input: { command: "ls" } }], stop_reason: "tool_use" } },
+      { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "a", content: "books" }] } },
+      { type: "assistant", message: { content: [{ type: "text", text: "Three books. Now the loans." }, { type: "tool_use", id: "b", name: "Bash", input: { command: "cat loans" } }], stop_reason: "tool_use" } },
+      { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "b", content: "none" }] } },
+      { type: "assistant", message: { content: [{ type: "text", text: "No book is on loan." }], stop_reason: stop } },
+    ));
+    turns = catalog("end_turn");
+    await page.evaluate(() => { window.chatFallbackQA.agent("claude"); window.chatFallbackQA.refresh(); });
+    await page.getByText("No book is on loan.", { exact: true }).waitFor();
+    assert.deepEqual(await rows(), ["Checking the catalog first.", "work Worked \u00b7 1 command", "Three books. Now the loans.", "work Worked \u00b7 1 command", "No book is on loan."], "each run of work stays between the words around it");
+    // the turn still at work: one that ended on its final answer stays finished while the agent works again
+    turns = catalog(null);
+    await page.evaluate(() => { window.chatFallbackQA.status("working"); window.chatFallbackQA.refresh(); });
+    const live = page.locator(".chat-turn-agent").last().locator(".work-block.is-live");
+    await live.waitFor();
+    assert.deepEqual(await rows(), ["Checking the catalog first.", "work Worked \u00b7 1 command", "Three books. Now the loans.", "work Working\u2026 \u00b7 1 command", "No book is on loan."], "while the turn runs, only its last run of work reads Working");
+    assert.equal(await live.count(), 1, "one Working at a time");
+    if (process.env.UI_EVIDENCE_DIR) await page.screenshot({ path: join(process.env.UI_EVIDENCE_DIR, "claude-runs-live.png") });
+    // An earlier run splits when its blank text gets words: every block keeps the fold it had.
+    const bash = (command: string) => ({ kind: "tool" as const, name: "Bash", summary: command, input: JSON.stringify({ command }), output: "" });
+    const said = (value: string) => ({ kind: "text" as const, text: value });
+    const shelves = (first: string): ConversationTurn[] => [
+      { role: "user", ts: null, parts: [said("List the shelves.")] },
+      { role: "assistant", ts: null, parts: [said("Three shelves.")] },
+      { role: "user", ts: null, parts: [said("Check each shelf.")] },
+      { role: "assistant", ts: null, parts: [bash("ls a"), said(first), bash("ls b"), said("Shelf b next."), bash("ls c")] },
+    ];
+    const heads = page.locator(".chat-turn-agent").last().locator(".work-block-head");
+    const opened = async () => Promise.all((await heads.all()).map(async (head) => await head.getAttribute("aria-expanded") === "true"));
+    turns = shelves("");
+    await page.evaluate(() => window.chatFallbackQA.refresh());
+    await page.getByText("Shelf b next.", { exact: true }).waitFor();
+    assert.deepEqual(await opened(), [false, true], "while the turn runs only its working run is open");
+    const headRows = page.locator(".chat-turn-agent").last().locator(".work-block").last().locator(".work-block-rows");
+    await heads.last().click();
+    await headRows.waitFor({ state: "hidden" });
+    assert.deepEqual(await opened(), [false, false], "the reader folds the working run");
+    turns = shelves("Shelf a is empty.");
+    await page.evaluate(() => window.chatFallbackQA.refresh());
+    await page.getByText("Shelf a is empty.", { exact: true }).waitFor();
+    assert.deepEqual(await opened(), [false, false, false], "a run that splits moves no fold to another block: the folded run stays folded");
+    await headRows.waitFor({ state: "hidden" });
+    if (process.env.UI_EVIDENCE_DIR) await page.screenshot({ path: join(process.env.UI_EVIDENCE_DIR, "claude-run-split.png") });
+    // Words before a run's tools join it later (a Codex record marks them commentary): the run
+    // keeps the fold the reader gave it (#2063). A history without an ID keeps each row's memory
+    // by its place, so the turn sits on row 5, which the four rows above left with none.
+    const sorting = (words: { kind: "text"; text: string; phase?: "commentary" }): ConversationTurn[] => [
+      ...shelves("Shelf a is empty."),
+      { role: "user", ts: null, parts: [said("Sort the shelves.")] },
+      { role: "assistant", ts: null, parts: [words, bash("sort a")] },
+    ];
+    turns = sorting(said("Sorting shelf a."));
+    await page.evaluate(() => window.chatFallbackQA.refresh());
+    await page.getByText("Sorting shelf a.", { exact: true }).waitFor();
+    assert.deepEqual(await rows(), ["Sorting shelf a.", "work Working\u2026 \u00b7 1 command"], "the words stand above the working run");
+    assert.deepEqual(await opened(), [true], "the working run is open");
+    await heads.last().click();
+    await headRows.waitFor({ state: "hidden" });
+    assert.deepEqual(await opened(), [false], "the reader folds the working run");
+    turns = sorting({ ...said("Sorting shelf a."), phase: "commentary" });
+    await page.evaluate(() => window.chatFallbackQA.refresh());
+    // drawn once the words left the turn for its run of work
+    await page.waitForFunction(() => [...[...document.querySelectorAll(".chat-turn-agent")].at(-1)!.children].every((child) => child.classList.contains("work-block")));
+    assert.deepEqual(await opened(), [false], "words that join the run keep it folded");
+    assert.equal(await page.getByText("Sorting shelf a.", { exact: true }).isVisible(), false, "and fold with it");
+    if (process.env.UI_EVIDENCE_DIR) await page.screenshot({ path: join(process.env.UI_EVIDENCE_DIR, "run-words-join-fold.png") });
+    await page.evaluate(() => window.chatFallbackQA.status(undefined));
+    await live.waitFor({ state: "detached" });
+    console.log("PASS words and runs of work keep the agent's order, settled and live");
+  }
+  for (const viewport of [{ width: 390, height: 844 }, { width: 390, height: 420 }, { width: 1440, height: 900 }]) {
+    await page.setViewportSize(viewport);
+    prompt = parseInteractivePrompt("claude", readFileSync(join(repo, "server/fixtures/claude-question-words-2.1.311-40.txt"), "utf8"))!;
+    assert.ok(prompt.screen_words, "the recorded question includes Claude's preceding words");
+    await page.evaluate(() => { window.chatFallbackQA.agent("claude"); window.chatFallbackQA.refresh(); });
+    const card = page.locator(".prompt-card");
+    await card.locator(".prompt-card-words").waitFor({ state: "attached" });
+    // the context, its caption and the question in the card's order, each box whole, and the
+    // context at eight lines at rest (its content, when shorter) and two when the card is short
+    const layout = await card.evaluate(node => {
+      const text = node.querySelector(".prompt-card-words-text")!;
+      const caption = node.querySelector(".prompt-card-words .prompt-card-hint")!.getBoundingClientRect();
+      const question = node.querySelector(".prompt-card-question")!.getBoundingClientRect();
+      const bounds = text.getBoundingClientRect();
+      return { textBottom: bounds.bottom, textHeight: bounds.height, textScroll: text.scrollHeight, lineHeight: parseFloat(getComputedStyle(text).lineHeight), captionTop: caption.top, captionBottom: caption.bottom, questionTop: question.top, questionBottom: question.bottom, cardBottom: node.getBoundingClientRect().bottom };
+    });
+    assert.ok(layout.textBottom <= layout.captionTop, "terminal context and its caption do not overlap");
+    assert.ok(layout.captionBottom <= layout.questionTop, "the caption stays above the question");
+    if (viewport.height < 600) {
+      assert.ok(layout.textHeight <= 2 * layout.lineHeight + 1, `a short card's context gives way down to two lines (${layout.textHeight}px of ${layout.lineHeight}px lines)`);
+      assert.ok(layout.textScroll > layout.textHeight + 1, "and scrolls the rest in itself");
+      assert.ok(layout.questionBottom <= layout.cardBottom, "so the question is in view without scrolling the card");
+    } else {
+      assert.ok(layout.textHeight >= Math.min(layout.textScroll, 8 * layout.lineHeight) - 1, `at rest the context shows its lines, up to eight (${layout.textHeight}px of ${layout.textScroll}px)`);
+    }
+    if (process.env.UI_EVIDENCE_DIR) await page.screenshot({ path: join(process.env.UI_EVIDENCE_DIR, `claude-question-context-${viewport.width}-${viewport.height}.png`) });
+    await card.locator("input.input").scrollIntoViewIfNeeded();
+    const answerInView = await card.evaluate(node => {
+      const bounds = node.getBoundingClientRect();
+      const input = node.querySelector("input.input")!.getBoundingClientRect();
+      return input.top >= bounds.top && input.bottom <= bounds.bottom;
+    });
+    assert.equal(answerInView, true, "the custom answer remains reachable by scrolling the card");
+    prompt = null;
+    await page.evaluate(() => window.chatFallbackQA.refresh());
+    await card.waitFor({ state: "detached" });
+  }
+  console.log("PASS Claude's recorded terminal context, caption and question do not overlap at desktop, mobile and short mobile sizes");
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
     prompt = parseInteractivePrompt("pi", piNavigation["custom-empty"])!;
@@ -236,6 +385,108 @@ try {
   assert.equal(pollingReads, copilotReads + 1, "only Copilot terminal fallback uses the 2s recovery poll");
   await polling.close();
   console.log("PASS fallback polling keeps 10s for other agents and 2s for Copilot under a controlled clock");
+  {
+    // Copilot's reader lost its proof of the conversation shown: the turns stay, marked paused, and
+    // only the pane's activity reads again, not a timer
+    source = "copilot-transcript"; structured = true;
+    turns = [{ role: "assistant", ts: null, parts: [{ kind: "text", text: "Copilot turn before the wait" }] }];
+    const paused = await browser.newPage();
+    let reads = 0;
+    paused.on("request", (request) => { if (new URL(request.url()).pathname === "/api/pane/conversation") reads += 1; });
+    await paused.clock.install();
+    await paused.clock.pauseAt(new Date());
+    await paused.addInitScript(() => localStorage.setItem("ovis:settings", JSON.stringify({ language: "en" })));
+    await paused.goto(`http://127.0.0.1:${server.port}/?pushes`);
+    await paused.evaluate(() => window.chatFallbackQA.agent("copilot"));
+    await paused.getByText("Copilot turn before the wait", { exact: true }).waitFor();
+    copilotWaiting = true;
+    const waited = paused.waitForResponse((response) => new URL(response.url()).pathname === "/api/pane/conversation");
+    await paused.evaluate(() => window.chatFallbackQA.refresh());
+    await waited;
+    const banner = paused.getByText("Updates paused — waiting for the agent's next activity", { exact: true });
+    await banner.waitFor();
+    assert.equal(await paused.getByText("Copilot turn before the wait", { exact: true }).isVisible(), true, "a wait keeps the turns shown");
+    assert.equal(await paused.locator(".chat-terminal-fallback").count(), 0, "a wait does not swap the turns for the terminal");
+    const before = reads;
+    await paused.clock.runFor(30_000);
+    assert.equal(reads, before, "a wait schedules no backstop reads");
+    await paused.evaluate(() => window.chatFallbackQA.until(() => window.chatFallbackQA.listening()));
+    // a read that fails while waiting proves nothing to wait on: the backstop retries it
+    copilotWaiting = false; lookupTimeout = true;
+    const failed = paused.waitForResponse((response) => new URL(response.url()).pathname === "/api/pane/conversation");
+    await paused.evaluate(() => window.chatFallbackQA.output());
+    await failed;
+    copilotWaiting = true; lookupTimeout = false;
+    const afterFailure = reads;
+    const retried = paused.waitForResponse((response) => new URL(response.url()).pathname === "/api/pane/conversation", { timeout: 5000 })
+      .catch(() => assert.fail("a read that failed while waiting is retried without pane activity"));
+    // just past the 10s backstop: further on, the read's own timeout would cancel it before it answers
+    await paused.clock.runFor(11_000);
+    await retried;
+    assert.ok(reads > afterFailure, "a read that failed while waiting is retried without pane activity");
+    await banner.waitFor();
+    copilotWaiting = false;
+    turns = [...turns, { role: "assistant", ts: null, parts: [{ kind: "text", text: "Copilot turn after the wait" }] }];
+    const woken = paused.waitForResponse((response) => new URL(response.url()).pathname === "/api/pane/conversation");
+    await paused.evaluate(() => window.chatFallbackQA.output());
+    await woken;
+    await paused.getByText("Copilot turn after the wait", { exact: true }).waitFor();
+    await banner.waitFor({ state: "detached" });
+    if (process.env.UI_EVIDENCE_DIR) await paused.screenshot({ path: join(process.env.UI_EVIDENCE_DIR, "copilot-recovered.png") });
+    await paused.close();
+    structured = false; source = "codex-transcript";
+    console.log("PASS a Copilot wait keeps the turns, reads on activity only, and resumes them");
+  }
+  {
+    // A Codex that reported no session: the scrollback stands in with the model its live footer
+    // states, and a conversation not begun with the model its screen states. No file changes when
+    // that model does, so the terminal's output re-reads them. Pushes are on and the clock is
+    // paused, so neither the 2s poll nor the 10s backstop reads in its place.
+    const screen = await browser.newPage();
+    let screenReads = 0;
+    screen.on("request", (request) => {
+      const url = new URL(request.url());
+      if (url.pathname === "/api/pane/conversation" && url.searchParams.get("pane_id") === "screen") screenReads += 1;
+    });
+    await screen.clock.install();
+    await screen.clock.pauseAt(new Date());
+    await screen.addInitScript(() => localStorage.setItem("ovis:settings", JSON.stringify({ language: "en" })));
+    await screen.goto(`http://127.0.0.1:${server.port}/?pushes`);
+    await screen.locator(".chat-terminal-fallback summary").waitFor();
+    const within = async (what: string, until: Promise<void>): Promise<void> => {
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([until, new Promise<never>((_, reject) => { deadline = setTimeout(() => reject(new Error(what)), 10_000); })]);
+      } finally { clearTimeout(deadline); }
+    };
+    const forwarded = (model: string, effort: string) => within(`the chat never forwarded ${model} ${effort}`, screen.evaluate(([model, effort]) =>
+      window.chatFallbackQA.until(() => window.chatFallbackQA.metadata("screen")?.model === model && window.chatFallbackQA.metadata("screen")?.reasoning_effort === effort), [model, effort]));
+    const listening = (expected: boolean, what: string) => within(what, screen.evaluate((expected) =>
+      window.chatFallbackQA.until(() => window.chatFallbackQA.listening() === expected), expected));
+    const sol = { model: "gpt-6.1-sol", reasoning_effort: "low" }, luna = { model: "gpt-6-luna", reasoning_effort: "medium" };
+    for (const source of ["scrollback", "codex-transcript"]) {
+      screenAnswer = { source, metadata: sol, screen: true };
+      if (source === "scrollback") await screen.evaluate(() => window.chatFallbackQA.pane("screen"));
+      else await screen.evaluate(() => window.chatFallbackQA.refresh());
+      await forwarded("gpt-6.1-sol", "low");
+      await listening(true, `a ${source} answer read off the screen never listened to the terminal`);
+      // a model switched in the terminal: its output, once the 1s bound since the last read has passed, reads it
+      screenAnswer = { source, metadata: luna, screen: true };
+      await screen.clock.runFor(1000);
+      const reads = screenReads;
+      await screen.evaluate(() => window.chatFallbackQA.output());
+      await forwarded("gpt-6-luna", "medium");
+      assert.equal(screenReads, reads + 1, `terminal output re-reads a ${source} answer read off the screen once`);
+    }
+    // a conversation whose settings come from its transcript has a file to watch: output reads nothing
+    screenAnswer = { source: "codex-transcript", metadata: sol };
+    await screen.evaluate(() => window.chatFallbackQA.refresh());
+    await forwarded("gpt-6.1-sol", "low");
+    await listening(false, "a transcript's answer kept listening to the terminal");
+    await screen.close();
+    screenAnswer = {};
+  }
+  console.log("PASS a scrollback or not-begun answer forwards the model its screen states, and terminal output re-reads it");
   console.log("chat fallback: browser OK (no hidden terminal reads, opened stalled output cannot block structured refresh, late cleanup, non-agent inline output, fallback error announcement and accurate empty state)");
 
 } finally {

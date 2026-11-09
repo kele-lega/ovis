@@ -1,23 +1,37 @@
 /**
  * Simplified Chinese for the keys only the sidebar files use:
- * components/Sidebar.tsx, components/AgentSidebar.tsx, components/SidebarResizer.tsx.
+ * components/Sidebar.tsx, components/AgentSidebar.tsx, components/SidebarResizer.tsx,
+ * components/SidebarSplit.tsx.
  * Register and fixed terms follow ../i18n.zh.ts; a key another feature also uses goes there.
  */
 export const SIDEBAR_ZH: Record<string, string> = {
+  "{count} working": "{count} 个工作中",
   "Pin agent": "固定 Agent",
   "Unpin agent": "取消固定 Agent",
+  "Lock agent": "锁定 Agent",
+  "Locked": "已锁定",
   "Mute alerts": "静音提醒",
   "Unmute alerts": "取消静音提醒",
   "Alerts muted": "提醒已静音",
   "Pin workspace": "固定工作区",
   "Unpin workspace": "取消固定工作区",
   "Pinned": "已固定",
+  "Background agents": "后台代理",
+  "Background workspaces": "后台工作区",
+  "Helpers": "助手",
+  "Helpers of {title}": "{title} 的助手",
+  "Fold helpers under their agent": "把助手折叠在其代理下",
+  "On this device, an agent's helpers fold under one line below its row in the Agents list, with how many there are. A helper that needs you and the selected one stay in sight.": "在此设备的代理列表中，把代理的助手折叠为其行下方的一行，并显示数量。需要你回应的助手和选中的助手仍然可见。",
   "Background tasks running: {count}": "正在运行的后台任务：{count}",
   "Agent waiting on background work": "Agent 正在等待后台工作",
+  "Has a question": "有问题",
+  "Needs sign-in": "需要登录",
+  "Progress {percent}%": "进度 {percent}%",
+  "Agents in {name}": "{name} 中的代理",
+  "Started by {name}": "由 {name} 启动",
   "Agent {status}": "Agent 状态：{status}",
   "Loading agents…": "正在加载代理…",
   "Herdr workspaces": "herdr 工作区",
-  "Agents": "代理",
   "No agents running": "没有运行中的代理",
   "Expand worktrees of {name}": "展开 {name} 的工作树",
   "Collapse worktrees of {name}": "折叠 {name} 的工作树",
@@ -28,6 +42,7 @@ export const SIDEBAR_ZH: Record<string, string> = {
   "Reorder workspace {name}": "调整工作区 {name} 的顺序",
   "Drag to reorder · Alt+↑/↓": "拖动以调整顺序 · Alt+↑/↓",
   "Resize sidebar": "调整侧边栏宽度",
+  "Resize PCs and Agents": "调整 PC 与代理的高度",
   "More for {title}": "{title} 的更多操作",
   "Rename workspace": "重命名工作区",
   "Close workspace": "关闭工作区",
@@ -52,5 +67,9 @@ export const SIDEBAR_ZH: Record<string, string> = {
   "Close group": "关闭分组",
   "Collapse": "折叠",
   "Expand": "展开",
-  "Shell": "Shell",
+  "Working": "工作中",
+  "Idle": "空闲",
+  "{count} need you": "{count} 个需要你",
+  "Move to {group}": "移到 {group}",
+  "Remove from {group}": "从 {group} 移出",
 };

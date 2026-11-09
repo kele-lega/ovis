@@ -9,8 +9,9 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchVoiceStatus } from "./api.ts";
+import { getTransport } from "./transport.ts";
 import { LOCALE_TAGS, type Language, type LanguageSetting } from "./i18n.ts";
-import { useSettings, type DictationLanguage } from "./settings.ts";
+import { useSettings, type DictationLanguage, type VoiceEngineChoice } from "./settings.ts";
 import {
   VOICE_FORM,
   VOICE_KEYWORDS_MAX,
@@ -25,7 +26,7 @@ import {
 export type VoiceState = "idle" | "starting" | "recording" | "transcribing";
 export type VoiceEngine = "server" | "browser";
 /** why the last dictation failed, short enough to key a translated message on */
-export type VoiceError = "insecure" | "permission" | "no_mic" | "not_configured" | "provider_auth" | "provider" | "network" | "too_large" | "no_speech";
+export type VoiceError = "insecure" | "permission" | "no_mic" | "speech_unavailable" | "not_configured" | "provider_auth" | "provider" | "network" | "too_large" | "no_speech";
 /** why the mic button is off: the setting, no https, or neither a server key nor browser speech */
 export type VoiceUnavailable = "disabled" | "insecure" | "not_configured" | "unsupported";
 /** `take` numbers each press-to-text run, so a late answer never lands on another run's words */
@@ -298,7 +299,9 @@ export function micErrorReason(name: string): VoiceError {
 /** SpeechRecognition's error string; null for the ones that only mean "nothing was said". */
 export function speechErrorReason(error: string): VoiceError | null {
   if (error === "no-speech" || error === "aborted") return null;
-  if (error === "not-allowed" || error === "service-not-allowed") return "permission";
+  if (error === "not-allowed") return "permission";
+  // the device's own recognizer is off (iOS: Siri & Dictation) or has no model for the language
+  if (error === "service-not-allowed") return "speech_unavailable";
   if (error === "audio-capture") return "no_mic";
   if (error === "network") return "network";
   return "provider";
@@ -690,7 +693,7 @@ export function createVoiceEngine(io: EngineIO) {
     const language = io.language();
     form.append(VOICE_FORM.language, transcribeLanguage(language.locale, language.ui));
     try {
-      const response = await fetch("/api/voice/transcribe", { method: "POST", body: form, credentials: "same-origin", signal });
+      const response = await getTransport().fetch("/api/voice/transcribe", { method: "POST", body: form, credentials: "same-origin", signal });
       if (!response.ok || !response.body) {
         const body = (await response.json().catch(() => null)) as { error?: { code?: unknown } } | null;
         const code = typeof body?.error?.code === "string" ? body.error.code : null;
@@ -842,6 +845,19 @@ export function createVoiceEngine(io: EngineIO) {
   };
 }
 
+/**
+ * The engine a take uses for the chosen one: auto prefers the server's key and falls back to the
+ * browser's recognition; an explicit choice never falls back, so the mic says why it cannot record.
+ */
+export function pickVoiceEngine(choice: VoiceEngineChoice, configured: boolean, recorder: boolean, speech: boolean): { engine: VoiceEngine | null; unavailableReason: VoiceUnavailable | null } {
+  const server = choice !== "browser" && configured && recorder;
+  const browser = choice !== "server" && speech;
+  if (server) return { engine: "server", unavailableReason: null };
+  if (browser) return { engine: "browser", unavailableReason: null };
+  if (choice === "browser") return { engine: null, unavailableReason: "unsupported" };
+  return { engine: null, unavailableReason: configured ? "unsupported" : "not_configured" };
+}
+
 export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
   const { settings, resolvedLanguage } = useSettings();
   const status = useVoiceStatus(options.enabled);
@@ -854,9 +870,7 @@ export function useVoiceInput(options: VoiceInputOptions): VoiceInput {
   if (!options.enabled) unavailableReason = "disabled";
   else if (!secure) unavailableReason = "insecure";
   else if (status === undefined) unavailableReason = null;
-  else if (status?.configured && mime) engine = "server";
-  else if (Speech) engine = "browser";
-  else unavailableReason = status?.configured ? "unsupported" : "not_configured";
+  else ({ engine, unavailableReason } = pickVoiceEngine(settings.voiceEngine, status?.configured === true, mime !== null, Speech !== null));
 
   const [state, setState] = useState<VoiceState>("idle");
   const [elapsedMs, setElapsed] = useState(0);

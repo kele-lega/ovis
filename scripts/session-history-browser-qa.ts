@@ -4,8 +4,9 @@
  * clicked (the body carries the row's argv), no second Resume in the window before herdr reports the
  * resumed pane's session (App's RecentResume record), a session a pane already shows selected instead of
  * started, a row without a verified resume listed with no button, the keyboard along the rows,
- * the agent picker (each agent with its mark, no Shell, its open list taking Escape alone, disabled
- * while a resume is in flight), a PC whose bridge answers 404 for the route, whose menu has no item, and
+ * the agent picker (each agent with its mark, no Shell, its open list taking Escape alone, also with the
+ * focus off its button and when the sessions arrive while it is open, disabled while a resume is in
+ * flight), a PC whose bridge answers 404 for the route, whose menu has no item, and
  * Claude's store-bound Resume: the list asked for from a pane of the workspace, one POST sessions/resume
  * per double click (never tab/create), the same UUID reported by a pane on another store left to Resume, a
  * store that changed read again, and a bridge from before store-bound Resume (rows without a source, no
@@ -14,7 +15,7 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Page } from "playwright-core";
@@ -23,6 +24,8 @@ import type {} from "./session-history-fixture.tsx";
 import { CLAUDE_OTHER, CLAUDE_ROWS, CLAUDE_SHARED, CLAUDE_STORE_KEY, OLDER_SESSION, SESSION_ROWS } from "./session-history-fixture-data.ts";
 import { chromePath } from "./chrome-path.ts";
 import { contextMenuKey } from "./context-menu-key.ts";
+import { listSessions, piSessionFolder } from "../server/session-history.ts";
+import { PiSessionReader } from "../server/pi-session-metadata.ts";
 const repo = join(import.meta.dir, "..");
 const root = mkdtempSync(join(tmpdir(), "herdr-session-history-browser-"));
 const evidence = join(process.env.UI_EVIDENCE_DIR || join(repo, "evidence"), "session-history");
@@ -41,9 +44,27 @@ const resumeRequests = new EventEmitter();
 let holdResume = false;
 /** true: the next Claude lists wait for a release, as a list read again after a changed store does */
 let holdList = false;
+/** "held" each time a Claude list starts waiting for its release */
+const heldLists = new EventEmitter();
 /** how the bridge answers the next resumes: start it, name a pane already showing it, refuse a changed store or one a new tab would not keep, or have no route */
 let resumeAnswer: "created" | "opened" | "stale" | "unsupported" | "changed" | "missing" = "created";
 const closedSources = new Set<string>();
+const piReader = new PiSessionReader();
+const piStore = join(root, "pi-sessions");
+const piFolder = join(piStore, piSessionFolder("/fixture/w1"));
+mkdirSync(piFolder, { recursive: true });
+const piNamed = join(piFolder, "named.jsonl");
+const piLine = (value: unknown) => `${JSON.stringify(value)}\n`;
+const piHeader = (id: string) => piLine({ type: "session", version: 3, id, cwd: "/fixture/w1" });
+const piSystem = piLine({ type: "message", message: { role: "system", content: "s".repeat(100 * 1024) } });
+writeFileSync(piNamed, piHeader("pi-named") + piSystem + piLine({ type: "message", message: { role: "user", content: "Named Pi first prompt" } }) + piLine({ type: "session_info", name: "Deep Pi name" }) + piSystem);
+utimesSync(piNamed, 1_790_000_002, 1_790_000_002);
+const piUnnamed = join(piFolder, "unnamed.jsonl");
+writeFileSync(piUnnamed, piHeader("pi-unnamed") + piSystem + piLine({ type: "message", message: { role: "user", content: [{ type: "text", text: "Late Pi" }, { type: "text", text: "prompt" }] } }));
+utimesSync(piUnnamed, 1_790_000_001, 1_790_000_001);
+let piBusy = 0;
+let piLists = 0;
+const piRetry = "Pi sessions could not be read right now. Try again.";
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
 const refusal = (code: string, message: string, status: number) => json({ error: { code, message } }, status);
 /** every bounded animation (the sheet's rise) over, then two frames; a looping one (a breathing status dot) never finishes and is not waited for */
@@ -67,14 +88,22 @@ try {
       const workspaceId = url.searchParams.get("workspace_id")!;
       if (agent === "claude" && (workspaceId === "w3" || workspaceId === "w4")) {
         claudeLists.push(url.search);
-        if (holdList) await new Promise<void>((resolve) => releases.push(resolve));
+        if (holdList) await new Promise<void>((resolve) => { releases.push(resolve); heldLists.emit("held"); });
         const paneId = url.searchParams.get("pane_id");
         if (paneId && closedSources.has(paneId)) return refusal("stale_source", "source pane no longer exists", 409);
         // w4's bridge is from before store-bound Resume: it ignores pane_id and gives no source
         const sessions = CLAUDE_ROWS.map((row) => workspaceId === "w3" && paneId !== null && row.resume ? { ...row, resume: { ...row.resume, source: { pane_id: paneId, store_key: CLAUDE_STORE_KEY } } } : row);
         return json({ workspace_id: workspaceId, agent: "claude", cwd: `/fixture/${workspaceId}`, sessions } satisfies SessionHistoryResponse);
       }
-      const answer: SessionHistoryResponse = { workspace_id: workspaceId, agent: agent as SessionHistoryResponse["agent"], cwd: `/fixture/${workspaceId}`, sessions: agent === "codex" ? SESSION_ROWS : [] };
+      if (agent === "pi") piLists++;
+      if (agent === "pi" && piBusy > 0) {
+        piBusy--;
+        const response = refusal("session_history_busy", piRetry, 503);
+        response.headers.set("retry-after", "1");
+        return response;
+      }
+      const sessions = agent === "pi" ? await listSessions("pi", `/fixture/${workspaceId}`, { home: root, env: { PI_CODING_AGENT_SESSION_DIR: piStore }, piReader }) : agent === "codex" ? SESSION_ROWS : [];
+      const answer: SessionHistoryResponse = { workspace_id: workspaceId, agent: agent as SessionHistoryResponse["agent"], cwd: `/fixture/${workspaceId}`, sessions };
       return json(answer);
     }
     if (path === "/api/sessions/resume") {
@@ -140,12 +169,86 @@ try {
   console.log("PASS workspace menu item, newest-first rows, no button without a verified resume");
   await page.keyboard.press("Escape");
   await dialog.waitFor({ state: "detached" });
+  // Real Pi metadata from synthetic transcripts, not hand-picked titles: late names, a prompt
+  // after a huge system record, freshly read renames/clears and automatic busy recovery.
+  const capturePi = async (state: string) => {
+    const previous = await page.evaluate(() => document.documentElement.dataset.theme);
+    for (const width of [390, 1440]) {
+      await page.setViewportSize({ width, height: 800 });
+      for (const theme of ["light", "dark"]) {
+        await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+        await settled(page);
+        await page.screenshot({ path: join(evidence, `pi-${state}-${width}-${theme}.png`) });
+      }
+    }
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.evaluate((value) => {
+      if (value === undefined) delete document.documentElement.dataset.theme;
+      else document.documentElement.dataset.theme = value;
+    }, previous);
+  };
+  // StrictMode discards its first mount's read: refuse that probe and the active mount once each,
+  // so only an automatic retry (not the second mount's initial read) can produce the rows.
+  piBusy = 2;
+  const busyOnce = page.waitForResponse((response) => response.url().includes("/sessions/history?") && response.status() === 503);
+  await page.evaluate(() => window.qa.openHistory("w1", "pi", "p1"));
+  await busyOnce;
+  await dialog.getByRole("status").waitFor();
+  assert.equal(await dialog.getByRole("alert").count(), 0);
+  assert.equal(await dialog.locator(".session-empty").count(), 0);
+  await dialog.locator('[data-session-id="pi-named"]').waitFor();
+  assert.equal(piLists, 3, "the active listing recovers from one busy answer without a click");
+  assert.equal(await dialog.locator(".session-error").count(), 0);
+  await capturePi("busy-recovered");
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "detached" });
+  piBusy = 100;
+  const beforeBusy = piLists;
+  await page.evaluate(() => window.qa.openHistory("w1", "pi", "p1"));
+  await dialog.locator(".session-error[role=status]").waitFor({ timeout: 75_000 });
+  assert.equal(piLists - beforeBusy, 7, "one discarded StrictMode probe plus an active read and five retries");
+  assert.equal(await dialog.getByRole("alert").count(), 0);
+  assert.equal(await dialog.locator(".session-empty").count(), 0);
+  assert.equal(await dialog.locator(".session-row").count(), 0);
+  assert.ok((await dialog.locator(".session-error").textContent())?.trim());
+  await capturePi("busy-retry");
+  piBusy = 0;
+  await dialog.getByRole("button", { name: "Retry", exact: true }).click();
+  await dialog.locator('[data-session-id="pi-named"]').waitFor();
+  assert.equal(await dialog.locator(".session-error").count(), 0);
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "detached" });
+  const openPi = async () => {
+    await page.evaluate(() => window.qa.openHistory("w1", "pi", "p1"));
+    await dialog.locator(".session-row").first().waitFor();
+  };
+  await openPi();
+  assert.deepEqual(await dialog.locator(".session-title").allTextContents(), ["Deep Pi name", "Late Pi prompt"]);
+  assert.equal(await dialog.locator(".session-id").count(), 0);
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "detached" });
+  appendFileSync(piNamed, piLine({ type: "session_info", name: "Renamed Pi" }));
+  utimesSync(piNamed, 1_790_000_003, 1_790_000_003);
+  await openPi();
+  assert.equal(await dialog.locator(".session-title").first().textContent(), "Renamed Pi");
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "detached" });
+  appendFileSync(piNamed, piLine({ type: "session_info", name: " " }));
+  utimesSync(piNamed, 1_790_000_004, 1_790_000_004);
+  await openPi();
+  assert.deepEqual(await dialog.locator(".session-title").allTextContents(), ["Named Pi first prompt", "Late Pi prompt"]);
+  assert.equal(await dialog.locator(".session-id").count(), 0);
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "detached" });
+  console.log("PASS Pi busy-once automatic recovery, bounded persistent busy with Retry, late labels and fresh rename/clear");
   // the keyboard alone: the row's context-menu key, the item, the first row's button focused, arrows
   // along the rows, Tab inside, Escape closing with the focus back on the row
   await row("w1").focus();
   await contextMenuKey(page);
   const keyMenu = page.getByRole("menu");
   await keyMenu.waitFor();
+  // RowMenu places its initial focus in an animation frame; let it finish before choosing another item.
+  await settled(page);
   await keyMenu.getByRole("menuitem", { name: "Earlier sessions…", exact: true }).focus();
   await page.keyboard.press("Enter");
   await dialog.waitFor();
@@ -254,6 +357,77 @@ try {
   await page.keyboard.press("Escape");
   await dialog.waitFor({ state: "detached" });
   console.log("PASS the agent picker lists the agents with their marks, closes its list alone on Escape and takes the keys; an empty store is said in words");
+  // the sessions arrive while the agent list is open: the list keeps the focus, so its keys and Escape stay
+  // the list's, not the first Resume's and the dialog's
+  holdList = true;
+  const listHeld = once(heldLists, "held", { signal: AbortSignal.timeout(10_000) });
+  await (await openMenu("w3")).getByRole("menuitem", { name: "Earlier sessions…", exact: true }).click();
+  await dialog.waitFor();
+  await listHeld;
+  assert.equal(await dialog.locator(".session-row").count(), 0, "the sessions are still on their way");
+  await picker.click();
+  await agentList.waitFor();
+  holdList = false;
+  releases.splice(0).forEach((release) => release());
+  await dialog.locator(".session-row").first().waitFor();
+  await settled(page);
+  assert.equal(await agentList.isVisible(), true, "the open list stays open when the sessions arrive");
+  assert.equal(await picker.evaluate((node) => node === document.activeElement), true, "the open list keeps the focus when the sessions arrive");
+  await page.keyboard.press("Escape");
+  await agentList.waitFor({ state: "detached" });
+  assert.equal(await dialog.isVisible(), true, "Escape after the sessions arrived closes the list, not the dialog");
+  console.log("PASS sessions arriving while the agent list is open leave it the focus and its Escape");
+  // Safari leaves the focus off a button a click opened: the open list still takes Escape alone
+  await picker.click();
+  await agentList.waitFor();
+  await picker.evaluate((node) => (node as HTMLElement).blur());
+  assert.equal(await page.evaluate(() => document.activeElement === document.body), true, "the focus is off the picker, as Safari leaves it");
+  await page.keyboard.press("Escape");
+  await agentList.waitFor({ state: "detached" });
+  assert.equal(await dialog.isVisible(), true, "Escape with the focus off the open list closes the list, not the dialog");
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "detached" });
+  console.log("PASS an open agent list takes Escape alone with the focus off its button; the next Escape closes the dialog");
+  // an overlay opened over the dialog keeps its own Escape while the agent list stays open under it:
+  // a native modal (Add PC from the palette), and an overlay holding the focus outside the dialog
+  await openHistory("w1");
+  await picker.click();
+  await agentList.waitFor();
+  await page.evaluate(() => {
+    const modal = document.createElement("dialog");
+    modal.id = "qa-native-modal";
+    modal.innerHTML = '<button type="button">Add PC</button>';
+    document.body.append(modal);
+    modal.showModal();
+    // the focus on body, as Safari leaves it after a click in the modal: only the modal check keeps this Escape the modal's
+    modal.querySelector("button")!.focus();
+    modal.querySelector("button")!.blur();
+  });
+  assert.equal(await page.evaluate(() => document.activeElement === document.body), true, "the focus is on body under the native modal");
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => !(document.getElementById("qa-native-modal") as HTMLDialogElement).open);
+  assert.equal(await agentList.isVisible(), true, "Escape in a native modal over the dialog closes that modal, not the agent list under it");
+  await page.evaluate(() => document.getElementById("qa-native-modal")!.remove());
+  const outside = await page.evaluate(() => {
+    const field = document.createElement("input");
+    field.setAttribute("aria-label", "qa overlay field");
+    // fixed, as the palette is: focusing a field below #root scrolls the page, and the list closes on that scroll
+    field.style.cssText = "position: fixed; top: 0; left: 0";
+    document.body.append(field);
+    field.focus();
+    const escape = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    field.dispatchEvent(escape);
+    field.remove();
+    return escape.defaultPrevented;
+  });
+  assert.equal(outside, false, "an Escape from an overlay outside the dialog is left to that overlay");
+  assert.equal(await agentList.isVisible(), true, "the agent list under that overlay stays open");
+  console.log("PASS an overlay over the dialog keeps its own Escape while the agent list stays open under it");
+  // with the overlay gone the focus is nowhere: the list takes the next Escape, the dialog the one after
+  await page.keyboard.press("Escape");
+  await agentList.waitFor({ state: "detached" });
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "detached" });
   // Claude: the list is asked for from a pane of the workspace (its store's), and the same UUID reported by a
   // pane on another store is not that row's session: Resume, not Open
   await openHistory("w3");
@@ -418,5 +592,7 @@ try {
   releases.forEach((release) => release());
   await browser?.close();
   server?.stop(true);
+  piReader.close();
+  await piReader.idle();
   rmSync(root, { recursive: true, force: true });
 }

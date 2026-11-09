@@ -1,6 +1,7 @@
-import { afterAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 
-import { handleMachineRequest, slowMachinePath } from "./machine-api.ts";
+import { agentRowTokens } from "./herdr-sidebar.ts";
+import { handleMachineRequest } from "./machine-api.ts";
 import type { MachineManager } from "./machines.ts";
 
 // A remote bridge that answers like the local conversation route: an ETag, then 304 while unchanged.
@@ -8,29 +9,44 @@ const asked: (string | null)[] = [];
 const promptAsked: (string | null)[] = [];
 const PLAN_CARD = { id: "claude-plan:abc", agent: "claude", kind: "plan", title: "Plan", question: "Would you like to proceed?", options: [{ label: "Yes", description: null }], multi_select: false, custom_option_index: null };
 const historyAsked: (string | null)[] = [];
+const commandsAsked: string[] = [];
+const filesAsked: string[] = [];
+const worktreesAsked: string[] = [];
 const faviconAsked: { search: string; authorization: string | null; cookie: string | null }[] = [];
+const textAsked: { method: string; body: string; authorization: string | null; contentType: string | null }[] = [];
 const diffAsked: { path: string; search: string; authorization: string | null; cookie: string | null; forwarded: string | null }[] = [];
-const createAsked: { path: string; body: string; authorization: string | null; cookie: string | null }[] = [];
-let atomicProof: unknown = { bridge_protocol: 1, launch_command: true, herdr: { capabilities: { atomic_command_launch: true } } };
-const proofAsked: { authorization: string | null; cookie: string | null; forwarded: string | null }[] = [];
 const remote = Bun.serve({
   port: 0,
-  async fetch(request) {
+  fetch(request) {
     const path = new URL(request.url).pathname;
-    if (path === "/api/bridge") {
-      proofAsked.push({ authorization: request.headers.get("authorization"), cookie: request.headers.get("cookie"), forwarded: request.headers.get("x-forwarded-for") });
-      return Response.json(atomicProof);
-    }
-    if (["/api/workspace/create", "/api/tab/create", "/api/worktree/create", "/api/worktree/open"].includes(path)) {
-      createAsked.push({ path, body: await request.text(), authorization: request.headers.get("authorization"), cookie: request.headers.get("cookie") });
-      return Response.json({ created: true });
-    }
     if (path === "/api/pane/conversation/image") return new Response(new Uint8Array([137, 80, 78, 71]), { headers: { "content-type": "image/png" } });
     if (path === "/api/pane/conversation/tool-output") return new Response("complete remote output", { headers: { "content-type": "text/plain; charset=utf-8" } });
     if (path === "/api/fs/file") return new Response("%PDF-1.7", { headers: { "content-type": "application/pdf" } });
+    if (path === "/api/session") return Response.json({ snapshot: { workspaces: [], tabs: [], panes: [{ pane_id: "w1:p1", workspace_id: "w1", tab_id: "t1", agent: "claude", tokens: { quota: "off · private", eta: "soon" } }], agents: [] } });
     if (path === "/api/sessions/history") {
       historyAsked.push(request.headers.get("authorization"));
       return Response.json({ workspace_id: "w1", agent: "pi", cwd: "/work", sessions: [{ id: "s1", title: null, firstMessage: "a private prompt", startedAt: null, updatedAt: "2026-10-01T00:00:00.000Z", resume: null }] });
+    }
+    if (path === "/api/pane/commands" || path === "/api/agent/commands") {
+      commandsAsked.push(path);
+      // a PC whose skill folders are too slow to scan in time (#2254)
+      if (new URL(request.url).searchParams.get("pane_id") === "busy") return Response.json({ error: { code: "file_busy", message: "the skill folders did not answer in time" } }, { status: 503, headers: { "retry-after": "1" } });
+      return Response.json({ commands: [{ name: "deploy", description: "SECRET", source: "custom", id: "/work/.commandcode/commands/deploy.md" }] });
+    }
+    if (path === "/api/pane/files" || path === "/api/plugin/action" || path === "/api/pane/docs") {
+      filesAsked.push(path);
+      if (path === "/api/pane/docs") return Response.json({ root: "/work", documents: [{ path: "SECRET.md", size: 1, modified: "2026-11-01T00:00:00.000Z" }], truncated: false });
+      return Response.json(path === "/api/pane/files" ? { files: [".env.SECRET"] } : { log_id: "plugin-log-1", status: "failed", exit_code: 1, output: "SECRET", opened_pane_id: null });
+    }
+    if (path === "/api/worktree/list") {
+      worktreesAsked.push(path);
+      return Response.json({ source: { repo_key: "repo" }, worktrees: [{ path: "/work-wt/SECRET", branch: "SECRET", open_workspace_id: null }] });
+    }
+    if (path === "/api/fs/text") {
+      return request.text().then((body) => {
+        textAsked.push({ method: request.method, body, authorization: request.headers.get("authorization"), contentType: request.headers.get("content-type") });
+        return Response.json({ error: { code: "stale_revision", message: "changed", revision: "b".repeat(64) } }, { status: 409 });
+      });
     }
     if (path === "/api/fs/favicon") {
       faviconAsked.push({ search: new URL(request.url).search, authorization: request.headers.get("authorization"), cookie: request.headers.get("cookie") });
@@ -45,13 +61,13 @@ const remote = Bun.serve({
         ? { ...PLAN_CARD, body: "4. The last step that fits the pane." }
         : { ...PLAN_CARD, id: `${PLAN_CARD.id}.0123abcd`, body: "1. A secret step from the plan file.", plan_file: "/home/u/.claude/plans/p.md" }, suggestion: null, restored: null });
     }
-    if (path.startsWith("/api/workspace/diff/")) {
+    if (path.startsWith("/api/workspace/diff/") || path.startsWith("/api/workspace/git/")) {
       diffAsked.push({ path, search: new URL(request.url).search, authorization: request.headers.get("authorization"), cookie: request.headers.get("cookie"), forwarded: request.headers.get("x-forwarded-for") });
       return Response.json({ files: [], total: 0, truncated: false }, { headers: { "set-cookie": "remote=1" } });
     }
     const ifNoneMatch = request.headers.get("if-none-match");
     asked.push(ifNoneMatch);
-    if (ifNoneMatch === "\"v1\"") return new Response(null, { status: 304, headers: { etag: "\"v1\"" } });
+    if (ifNoneMatch === "\"v1\"") return new Response(null, { status: 304, headers: { etag: "\"v1\"", "x-server-time": "2026-11-05T10:00:00.000Z" } });
     return Response.json({ source: "claude-transcript", turns: [] }, { headers: { etag: "\"v1\"" } });
   },
 });
@@ -63,89 +79,6 @@ const manager = {
 } as unknown as MachineManager;
 
 describe("PC proxy", () => {
-  it("gives command worktree open the same slow proxy deadline as creation", async () => {
-    expect(["worktree/create", "worktree/open", "sessions/resume", "worktree/list", "workspace/create"].map(slowMachinePath)).toEqual([true, true, true, false, false]);
-    const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
-    const timeout = spyOn(AbortSignal, "timeout").mockImplementation(nativeTimeout);
-    try {
-      const response = await handleMachineRequest(new Request("http://127.0.0.1/api/machines/pc1/worktree/open", {
-        method: "POST", headers: { "x-herdr-machine": "1" },
-        body: JSON.stringify({ workspace_id: "source", branch: "fixture", agent: { kind: "claude", command: "wrapper" } }),
-      }), manager);
-      expect(response.status).toBe(200);
-      expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([10_000, 165_000]);
-    } finally { timeout.mockRestore(); }
-  });
-
-  it("refuses invalid custom commands before contacting any remote runtime", async () => {
-    const before = createAsked.length;
-    const noContact = { endpoint() { throw new Error("Must not contact a PC"); } } as unknown as MachineManager;
-    for (const path of ["workspace/create", "tab/create", "worktree/create", "worktree/open"]) {
-      for (const command of ["", null, false, 42, "a\nb"]) {
-        const response = await handleMachineRequest(new Request(`http://127.0.0.1/api/machines/pc1/${path}`, {
-          method: "POST", headers: { "x-herdr-machine": "1" },
-          body: JSON.stringify({ agent: { kind: "claude", command } }),
-        }), noContact);
-        expect(response.status).toBe(400);
-        expect(await response.json()).toMatchObject({ error: { code: "invalid_agent" } });
-      }
-    }
-    expect(createAsked).toHaveLength(before);
-  });
-
-  it("requires the selected bridge AND its live daemon, not a stale roster or old runtime37", async () => {
-    const before = createAsked.length;
-    const capable = { bridge_protocol: 1, launch_command: true, herdr: { capabilities: { atomic_command_launch: true } } };
-    const body = ' { "agent": { "kind": "claude", "command": "  ENV=fixture wrapper --model \'two words\'  " } } ';
-    const post = () => handleMachineRequest(new Request("http://127.0.0.1/api/machines/pc1/workspace/create", {
-      method: "POST", headers: { "x-herdr-machine": "1", "content-type": "application/json", authorization: "Bearer browser-secret", cookie: "browser=secret", "x-forwarded-for": "203.0.113.1" }, body,
-    }), manager);
-    for (const proof of [
-      { ...capable, launch_command: undefined }, // old Ovis plus new daemon is still unsafe
-      { ...capable, launch_command: false }, // unsupported selected platform
-      { ...capable, herdr: {} },
-      { ...capable, herdr: { capabilities: { atomic_command_launch: false } } },
-      { ...capable, herdr: { capabilities: { atomic_command_launch: "true" } } },
-    ]) {
-      atomicProof = proof;
-      expect((await post()).status).toBe(409);
-    }
-    expect(createAsked.length).toBe(before);
-    atomicProof = capable;
-    expect((await post()).status).toBe(200);
-    expect(createAsked.at(-1)).toEqual({ path: "/api/workspace/create", body, authorization: "Bearer remote-token", cookie: null });
-    expect(proofAsked.at(-1)).toEqual({ authorization: "Bearer remote-token", cookie: null, forwarded: null });
-    atomicProof = { ...capable, herdr: {} };
-    expect((await post()).status).toBe(409); // previous successful proof must not be cached
-    expect(createAsked.length).toBe(before + 1);
-    atomicProof = capable;
-  });
-
-  it("forwards ordinary create payloads byte-for-byte with only the PC credential", async () => {
-    const before = createAsked.length;
-    for (const path of ["workspace/create", "tab/create", "worktree/create"]) {
-      const body = ' { "agent": { "kind": "claude", "args": ["--model", "fixture-model"] }, "message": "fixture" } ';
-      const response = await handleMachineRequest(new Request(`http://127.0.0.1/api/machines/pc1/${path}`, {
-        method: "POST", headers: { "x-herdr-machine": "1", "content-type": "application/json", cookie: "browser=secret" }, body,
-      }), manager);
-      expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ created: true });
-      expect(createAsked.at(-1)).toEqual({ path: `/api/${path}`, body, authorization: "Bearer remote-token", cookie: null });
-    }
-    expect(createAsked).toHaveLength(before + 3);
-  });
-
-  it("bounds create bodies before parsing and rejects malformed JSON without contacting a PC", async () => {
-    const noContact = { endpoint() { throw new Error("Must not contact a PC"); } } as unknown as MachineManager;
-    const url = "http://127.0.0.1/api/machines/pc1/workspace/create";
-    const malformed = await handleMachineRequest(new Request(url, { method: "POST", headers: { "x-herdr-machine": "1" }, body: "{" }), noContact);
-    expect(malformed.status).toBe(400);
-    expect(await malformed.json()).toMatchObject({ error: { code: "invalid_json" } });
-    const oversized = await handleMachineRequest(new Request(url, { method: "POST", headers: { "x-herdr-machine": "1", "content-length": String(64 * 1024 * 1024 + 1) }, body: "{}" }), noContact);
-    expect(oversized.status).toBe(413);
-    expect(await oversized.json()).toMatchObject({ error: { code: "too_large" } });
-  });
-
   it("carries a conversation's ETag both ways and passes an unchanged answer on as a bodyless 304", async () => {
     const url = "http://127.0.0.1/api/machines/pc1/pane/conversation?pane_id=w1%3Ap1";
     const first = await handleMachineRequest(new Request(url), manager);
@@ -155,6 +88,8 @@ describe("PC proxy", () => {
     const unchanged = await handleMachineRequest(new Request(url, { headers: { "if-none-match": "\"v1\"" } }), manager);
     expect(unchanged.status).toBe(304);
     expect(unchanged.headers.get("etag")).toBe("\"v1\"");
+    // that PC's clock as it answered, which its turns' times are on
+    expect(unchanged.headers.get("x-server-time")).toBe("2026-11-05T10:00:00.000Z");
     expect(await unchanged.text()).toBe("");
     expect(asked).toEqual([null, "\"v1\""]);
   });
@@ -178,6 +113,68 @@ it("never forwards a PC's session history to a watching device, nor a route spel
   expect(driven.status).toBe(200);
   expect(JSON.stringify(await driven.json())).toContain("a private prompt");
   expect(historyAsked).toEqual(["Bearer remote-token"]);
+});
+
+it("never asks a PC for a pane's or a folder's command rows for a watching device (#2132)", async () => {
+  const base = "http://127.0.0.1/api/machines/pc1";
+  for (const path of ["pane/commands?pane_id=w1:p1", "agent/commands?agent=claude"]) {
+    const watched = await handleMachineRequest(new Request(`${base}/${path}`), manager, undefined, undefined, true);
+    expect([path, watched.status, ((await watched.json()) as { error: { code: string } }).error.code]).toEqual([path, 403, "read_only"]);
+  }
+  expect(commandsAsked).toEqual([]);
+  // a driving device gets the PC's rows
+  const driven = await handleMachineRequest(new Request(`${base}/pane/commands?pane_id=w1:p1`), manager);
+  expect(driven.status).toBe(200);
+  expect(JSON.stringify(await driven.json())).toContain("SECRET");
+  expect(commandsAsked).toEqual(["/api/pane/commands"]);
+});
+
+it("carries a save to a PC's file with its body and the PC's credential, and its conflict back, but never for a watching device (#771)", async () => {
+  const body = JSON.stringify({ pane_id: "w1:p1", path: "/work/notes.md", revision: "a".repeat(64), text: "new\n" });
+  const put = (readOnly: boolean) => handleMachineRequest(new Request("http://127.0.0.1/api/machines/pc1/fs/text", {
+    method: "PUT", body, headers: { origin: "http://127.0.0.1", "x-herdr-machine": "1", "content-type": "application/json" },
+  }), manager, undefined, undefined, readOnly);
+  const watched = await put(true);
+  expect([watched.status, ((await watched.json()) as { error: { code: string } }).error.code]).toEqual([403, "read_only"]);
+  expect(textAsked).toEqual([]);
+  const driven = await put(false);
+  expect(driven.status).toBe(409);
+  expect(await driven.json()).toMatchObject({ error: { code: "stale_revision", revision: "b".repeat(64) } });
+  expect(textAsked).toEqual([{ method: "PUT", body, authorization: "Bearer remote-token", contentType: "application/json" }]);
+});
+
+it("passes on a PC's 503 with its Retry-After, so the menu knows to ask again (#2254)", async () => {
+  const busy = await handleMachineRequest(new Request("http://127.0.0.1/api/machines/pc1/pane/commands?pane_id=busy"), manager);
+  expect(busy.status).toBe(503);
+  expect(busy.headers.get("retry-after")).toBe("1");
+  expect(((await busy.json()) as { error: { code: string } }).error.code).toBe("file_busy");
+});
+
+it("never asks a PC for the paths under a pane's folder or a plugin run's output for a watching device (#2244)", async () => {
+  const base = "http://127.0.0.1/api/machines/pc1";
+  const routes = ["pane/files?pane_id=w1:p1&q=env", "plugin/action?plugin_id=deploy&log_id=plugin-log-1", "pane/docs?pane_id=w1:p1"];
+  for (const path of routes) {
+    const watched = await handleMachineRequest(new Request(`${base}/${path}`), manager, undefined, undefined, true);
+    expect([path, watched.status, ((await watched.json()) as { error: { code: string } }).error.code]).toEqual([path, 403, "read_only"]);
+  }
+  expect(filesAsked).toEqual([]);
+  // a driving device gets the PC's answers
+  for (const path of routes) {
+    const driven = await handleMachineRequest(new Request(`${base}/${path}`), manager);
+    expect([path, driven.status, JSON.stringify(await driven.json()).includes("SECRET")]).toEqual([path, 200, true]);
+  }
+  expect(filesAsked).toEqual(["/api/pane/files", "/api/plugin/action", "/api/pane/docs"]);
+});
+
+it("never asks a PC for a repository's checkouts for a watching device (#2250)", async () => {
+  const url = "http://127.0.0.1/api/machines/pc1/worktree/list?workspace_id=w1";
+  const watched = await handleMachineRequest(new Request(url), manager, undefined, undefined, true);
+  expect([watched.status, ((await watched.json()) as { error: { code: string } }).error.code]).toEqual([403, "read_only"]);
+  expect(worktreesAsked).toEqual([]);
+  // a driving device gets the PC's answer
+  const driven = await handleMachineRequest(new Request(url), manager);
+  expect([driven.status, JSON.stringify(await driven.json()).includes("SECRET")]).toEqual([200, true]);
+  expect(worktreesAsked).toEqual(["/api/worktree/list"]);
 });
 
 it("forwards conversation images and complete output, while rejecting arbitrary nested paths", async () => {
@@ -243,11 +240,12 @@ it("refuses a path with an empty segment instead of forwarding it as another rou
   expect(asked.length).toBe(before);
 });
 
-it("forwards a repository diff read with its query and the bridge's own credential, and nothing of the browser's", async () => {
+it("forwards a repository diff or history read with its query and the bridge's own credential, and nothing of the browser's", async () => {
   const before = diffAsked.length;
   const search = "?pane_id=w1%3Ap1&scope=commit&base=HEAD~1&path=dir%20with%20space%2Fa.txt";
-  for (const route of ["files", "file", "refs"]) {
-    const response = await handleMachineRequest(new Request(`http://127.0.0.1/api/machines/pc1/workspace/diff/${route}${search}`, {
+  const routes = ["diff/files", "diff/file", "diff/refs", "git/log", "git/branches", "git/show"];
+  for (const route of routes) {
+    const response = await handleMachineRequest(new Request(`http://127.0.0.1/api/machines/pc1/workspace/${route}${search}`, {
       headers: { cookie: "ovis_token=browser-secret; ovis_device=device-secret", authorization: "Bearer browser-secret", "x-forwarded-for": "203.0.113.9" },
     }), manager);
     expect(response.status).toBe(200);
@@ -255,9 +253,9 @@ it("forwards a repository diff read with its query and the bridge's own credenti
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.json()).toEqual({ files: [], total: 0, truncated: false });
   }
-  expect(diffAsked.slice(before)).toEqual(["files", "file", "refs"].map((route) => ({ path: `/api/workspace/diff/${route}`, search, authorization: "Bearer remote-token", cookie: null, forwarded: null })));
+  expect(diffAsked.slice(before)).toEqual(routes.map((route) => ({ path: `/api/workspace/${route}`, search, authorization: "Bearer remote-token", cookie: null, forwarded: null })));
   // only the three reads are routes: nothing else under that name reaches the PC
-  for (const path of ["workspace/diff", "workspace/diff/file/extra", "workspace/diff/apply", "workspace/diffs/file"]) {
+  for (const path of ["workspace/diff", "workspace/diff/file/extra", "workspace/diff/apply", "workspace/diffs/file", "workspace/git", "workspace/git/log/extra", "workspace/git/checkout"]) {
     const response = await handleMachineRequest(new Request(`http://127.0.0.1/api/machines/pc1/${path}${search}`), manager);
     expect(response.status).toBe(404);
     expect(await response.json()).toMatchObject({ error: { code: "not_found" } });
@@ -265,7 +263,7 @@ it("forwards a repository diff read with its query and the bridge's own credenti
   const crossSite = await handleMachineRequest(new Request(`http://127.0.0.1/api/machines/pc1/workspace/diff/file${search}`, { headers: { "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate" } }), manager);
   expect(crossSite.status).toBe(403);
   expect(await crossSite.json()).toMatchObject({ error: { code: "invalid_origin" } });
-  expect(diffAsked.length).toBe(before + 3);
+  expect(diffAsked.length).toBe(before + routes.length);
 });
 
 it("gives a watching device a PC's plan card without Claude's plan file, even from a PC that ignores the ask", async () => {
@@ -284,4 +282,24 @@ it("gives a watching device a PC's plan card without Claude's plan file, even fr
   // a device that can drive still gets the whole plan
   expect((await poll("w1%3Ap1", false)).prompt).toMatchObject({ plan_file: "/home/u/.claude/plans/p.md", body: "1. A secret step from the plan file." });
   expect(promptAsked.slice(before)).toEqual(["0", "0", null]);
+});
+
+it("passes a PC's session on without the token values this server's sidebar rows hide (#2160)", async () => {
+  const rows = agentRowTokens(Bun.TOML.parse(`[ui.sidebar.agents]\nrows = [[{ token = "$quota", rules = [{ starts_with = "off", hide = true }] }, "$eta"]]`));
+  const sidebar = { get: () => rows, subscribe: () => () => undefined };
+  for (const readOnly of [true, false]) {
+    const response = await handleMachineRequest(new Request("http://127.0.0.1/api/machines/pc1/session"), manager, undefined, undefined, readOnly, sidebar);
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).not.toContain("off · private");
+    expect((JSON.parse(text) as { snapshot: { panes: { tokens: unknown }[] } }).snapshot.panes[0]!.tokens).toEqual({ eta: "soon" });
+  }
+  // any other method the PC answers with a body is filtered too (its session route takes them all)
+  const asked = await handleMachineRequest(new Request("http://127.0.0.1/api/machines/pc1/session", { method: "OPTIONS", headers: { "x-herdr-machine": "1" } }), manager, undefined, undefined, true, sidebar);
+  expect(await asked.text()).not.toContain("off · private");
+  // a HEAD has no body to filter: it is answered as before
+  expect((await handleMachineRequest(new Request("http://127.0.0.1/api/machines/pc1/session", { method: "HEAD" }), manager, undefined, undefined, true, sidebar)).status).toBe(200);
+  // a server whose config names no rows passes the session on whole
+  const whole = await handleMachineRequest(new Request("http://127.0.0.1/api/machines/pc1/session"), manager, undefined, undefined, true, { get: () => null, subscribe: () => () => undefined });
+  expect(await whole.text()).toContain("off · private");
 });

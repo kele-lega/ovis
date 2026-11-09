@@ -1,3 +1,5 @@
+import { getTransport } from "./transport.ts";
+
 /** Whether a picture can go on the clipboard here: only the clipboard API takes one, and only in a secure context. */
 export function canCopyImage(): boolean {
   return typeof ClipboardItem !== "undefined" && typeof navigator.clipboard?.write === "function";
@@ -21,12 +23,17 @@ export async function copyImage(image: HTMLImageElement): Promise<boolean> {
 
 async function pngOf(image: HTMLImageElement): Promise<Blob> {
   try {
-    const response = await fetch(image.currentSrc);
+    const response = await getTransport().fetch(image.currentSrc);
     const blob = await response.blob();
     if (response.ok && blob.type.split(";", 1)[0] === "image/png") return blob;
   } catch {
     /* the bytes could not be read again: the decoded picture is drawn instead */
   }
+  return drawnPng(image);
+}
+
+/** A decoded picture drawn on a canvas and encoded as PNG. */
+export async function drawnPng(image: HTMLImageElement): Promise<Blob> {
   if (image.naturalWidth === 0 || image.naturalHeight === 0) throw new Error("image not decoded");
   const canvas = document.createElement("canvas");
   canvas.width = image.naturalWidth;

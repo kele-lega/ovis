@@ -166,14 +166,27 @@ describe("Pages deployment gate", () => {
     expect(integration).toContain("if: always()");
     expect(integration).toContain(".ci/**/*.log");
     expect(integration).toContain(".ci/config/herdr/sessions/*/test-server.log");
-    for (const name of ["browser-main", "browser-other"]) {
-      const job = ciJob(name);
-      expect(job).toContain("if: always()");
-      expect(job).toContain(".ci/browser-logs/**");
-      expect(job).toContain(".ci/browser-evidence/**/*.png");
-      expect(job).toContain(".ci/browser-evidence/**/*.json");
-      expect(job).toContain(".ci/browser-evidence/**/*.zip");
+    const main = ciJob("browser-main");
+    expect(main).toContain("if: always()");
+    expect(main).toContain(".ci/browser-logs/**");
+    expect(main).toContain(".ci/browser-evidence/**/*.png");
+    expect(main).toContain(".ci/browser-evidence/**/*.json");
+    expect(main).toContain(".ci/browser-evidence/**/*.zip");
+  });
+
+  it("keeps browser-other's logs on every outcome and its screenshots only when it failed or was cancelled", () => {
+    const uploads = ciJob("browser-other").split(/^      - name: /m).filter((step) => step.includes("actions/upload-artifact@"));
+    const onSuccess = uploads.find((step) => /^        if: success\(\)$/m.test(step));
+    const otherwise = uploads.find((step) => /^        if: failure\(\) \|\| cancelled\(\)$/m.test(step));
+    expect(uploads).toHaveLength(2);
+    for (const step of [onSuccess, otherwise]) {
+      expect(step).toContain(".ci/report.json");
+      expect(step).toContain(".ci/browser-logs/**");
     }
+    expect(onSuccess).not.toContain(".ci/browser-evidence/");
+    expect(otherwise).toContain(".ci/browser-evidence/**/*.png");
+    expect(otherwise).toContain(".ci/browser-evidence/**/*.json");
+    expect(otherwise).toContain(".ci/browser-evidence/**/*.zip");
   });
 });
 
@@ -187,6 +200,7 @@ describe("Browser lane script lists", () => {
     expect(serial).toEqual(runs);
     expect(serial).toContain("scripts/ui-regression.ts");
     expect(serial).toContain("scripts/ui-contexts-regression.ts");
+    expect(serial).toContain("scripts/ui-contexts-layout-regression.ts");
     expect(serial).toContain("scripts/sidebar-spacing-demo-regression.ts");
     expect(new Set(serial).size).toBe(serial.length);
   });
@@ -231,11 +245,11 @@ describe("Browser lane script lists", () => {
   it("runs both isolated UI flows in browser-main and keeps the local UI command complete", () => {
     const main = ciJob("browser-main");
     expect(selectBrowserScripts(serial, env(main, "BROWSER_SCRIPTS"))).toEqual([
-      "scripts/ui-regression.ts", "scripts/ui-contexts-regression.ts",
+      "scripts/ui-regression.ts", "scripts/ui-contexts-regression.ts", "scripts/ui-contexts-layout-regression.ts",
     ]);
     expect(env(main, "BROWSER_WORKERS")).toBe("2");
     const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-    for (const script of ["ui-regression.ts", "ui-contexts-regression.ts", "sticky-modifiers-regression.ts"]) {
+    for (const script of ["ui-regression.ts", "ui-contexts-regression.ts", "ui-contexts-layout-regression.ts", "sticky-modifiers-regression.ts"]) {
       expect(pkg.scripts["test:ui"]).toContain(`bun scripts/${script}`);
     }
   });
@@ -244,7 +258,8 @@ describe("Browser lane script lists", () => {
     expect(env(ciJob("integration"), "HERDR_TEST_SHARDS"))
       .toBe("${{ runner.environment == 'self-hosted' && '4' || '1' }}");
     expect(env(ciJob("browser-other"), "BROWSER_WORKERS"))
-      .toBe("${{ runner.environment == 'self-hosted' && '6' || '4' }}");
+      .toBe("${{ runner.environment == 'self-hosted' && '6' || '3' }}");
+    expect(env(ciJob("browser-other"), "BROWSER_SHARD")).toBe("${{ matrix.shard }}/${{ strategy.job-total }}");
   });
 });
 
@@ -262,13 +277,14 @@ describe("Extracted UI checks", () => {
     expect(result.stderr).toContain("HERDR_TEST_MODE=unit");
   });
 
+  // the layout group (ui-contexts-layout-regression.ts) comes first in ui-contexts-checks.ts
   const moved = [
+    "checkSplitView", "checkBackgroundTabKeepsTerminalSize",
     "checkPushSettings", "checkWakeLock", "checkSecretInput", "checkTerminalCopy", "checkPaneFind",
     "checkUsageMeters", "checkNotificationStartup", "checkNotificationView", "checkMobileViewport",
     "checkTerminalPinch", "checkMobileTabs", "checkTabMenu", "checkDefaultView",
-    "checkComposerReconnect", "checkDroplet", "checkSplitView", "checkTakeOver", "checkAlertSound",
-    "checkChatKeepsTerminalSize", "checkPaneSwitchKeepsTerminalSize",
-    "checkBackgroundTabKeepsTerminalSize", "checkFocusedWindowReclaimsTerminalSize",
+    "checkComposerReconnect", "checkDroplet", "checkTakeOver", "checkAlertSound",
+    "checkChatKeepsTerminalSize", "checkPaneSwitchKeepsTerminalSize", "checkFocusedWindowReclaimsTerminalSize",
     "checkUpdateNotice", "checkTelemetrySettings",
   ];
   const calls = (source: string) => [...source.matchAll(/\b(check[A-Z]\w*)\(/g)].map((match) => match[1]!);
@@ -284,14 +300,14 @@ describe("Extracted UI checks", () => {
     }
   });
 
-  for (const mode of ["unit", "live"] as const) {
-    it(`refuses ${mode} execution before touching a herdr daemon`, () => {
+  for (const [script, mode] of ["ui-contexts-regression.ts", "ui-contexts-layout-regression.ts"].flatMap((script) => (["unit", "live"] as const).map((mode) => [script, mode] as const))) {
+    it(`${script} refuses ${mode} execution before touching a herdr daemon`, () => {
       const root = mkdtempSync(join(tmpdir(), "ui-context-guard-"));
       try {
         const invoked = join(root, "invoked");
         const herdr = join(root, "herdr");
         writeFileSync(herdr, '#!/bin/sh\nprintf called > "$HERDR_GUARD_LOG"\nexit 1\n', { mode: 0o700 });
-        const result = spawnSync(process.execPath, [fileURLToPath(new URL("./ui-contexts-regression.ts", import.meta.url))], {
+        const result = spawnSync(process.execPath, [fileURLToPath(new URL(`./${script}`, import.meta.url))], {
           encoding: "utf8", timeout: 5_000,
           env: {
             ...process.env, TMPDIR: root, XDG_CONFIG_HOME: root,

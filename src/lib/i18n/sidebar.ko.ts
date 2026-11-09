@@ -1,23 +1,37 @@
 /**
  * Korean for the keys only the sidebar files use:
- * components/Sidebar.tsx, components/AgentSidebar.tsx, components/SidebarResizer.tsx.
+ * components/Sidebar.tsx, components/AgentSidebar.tsx, components/SidebarResizer.tsx,
+ * components/SidebarSplit.tsx.
  * Register and fixed terms follow ../i18n.ko.ts; a key another feature also uses goes there.
  */
 export const SIDEBAR_KO: Record<string, string> = {
+  "{count} working": "작업 중 {count}개",
   "Pin agent": "에이전트 고정",
   "Unpin agent": "에이전트 고정 해제",
+  "Lock agent": "에이전트 잠금",
+  "Locked": "잠김",
   "Mute alerts": "알림 끄기",
   "Unmute alerts": "알림 켜기",
   "Alerts muted": "알림 꺼짐",
   "Pin workspace": "워크스페이스 고정",
   "Unpin workspace": "워크스페이스 고정 해제",
   "Pinned": "고정됨",
+  "Background agents": "백그라운드 에이전트",
+  "Background workspaces": "백그라운드 워크스페이스",
+  "Helpers": "도우미",
+  "Helpers of {title}": "{title}의 도우미",
+  "Fold helpers under their agent": "도우미를 에이전트 아래에 접기",
+  "On this device, an agent's helpers fold under one line below its row in the Agents list, with how many there are. A helper that needs you and the selected one stay in sight.": "이 기기의 에이전트 목록에서 에이전트의 도우미를 그 행 아래 한 줄로 접고 개수를 보여 줍니다. 내 응답이 필요한 도우미와 선택한 도우미는 계속 보입니다.",
   "Background tasks running: {count}": "실행 중인 백그라운드 작업: {count}",
   "Agent waiting on background work": "에이전트가 백그라운드 작업을 기다리는 중",
+  "Has a question": "질문 있음",
+  "Needs sign-in": "로그인 필요",
+  "Progress {percent}%": "진행률 {percent}%",
+  "Agents in {name}": "{name}의 에이전트",
+  "Started by {name}": "{name}이(가) 시작함",
   "Agent {status}": "에이전트 {status}",
   "Loading agents…": "에이전트 불러오는 중…",
   "Herdr workspaces": "herdr 워크스페이스",
-  "Agents": "에이전트",
   "No agents running": "실행 중인 에이전트가 없습니다",
   "Expand worktrees of {name}": "{name}의 워크트리 펼치기",
   "Collapse worktrees of {name}": "{name}의 워크트리 접기",
@@ -28,6 +42,7 @@ export const SIDEBAR_KO: Record<string, string> = {
   "Reorder workspace {name}": "워크스페이스 {name} 순서 바꾸기",
   "Drag to reorder · Alt+↑/↓": "끌어서 순서 바꾸기 · Alt+↑/↓",
   "Resize sidebar": "사이드바 너비 조절",
+  "Resize PCs and Agents": "PC와 에이전트 높이 조절",
   "More for {title}": "{title} 더보기",
   "Rename workspace": "워크스페이스 이름 바꾸기",
   "Close workspace": "워크스페이스 닫기",
@@ -52,5 +67,9 @@ export const SIDEBAR_KO: Record<string, string> = {
   "Close group": "그룹 닫기",
   "Collapse": "접기",
   "Expand": "펼치기",
-  "Shell": "셸",
+  "Working": "작업 중",
+  "Idle": "대기",
+  "{count} need you": "{count}개가 기다림",
+  "Move to {group}": "{group}(으)로 옮기기",
+  "Remove from {group}": "{group}에서 빼기",
 };

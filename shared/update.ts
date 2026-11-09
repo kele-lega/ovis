@@ -38,9 +38,43 @@ export interface UpdateStatus {
    * restart instead of offering an install.
    */
   revision_bound_install?: boolean;
+  /**
+   * The supervisor stops an install while it builds when asked (POST /api/updates/cancel): it then
+   * ends `error` with `error_code: "update_cancelled"`, nothing installed and its offer kept. Once it
+   * restarts onto the new release, it is too late. Absent from an older supervisor, which cannot.
+   */
+  install_cancellable?: boolean;
+  /**
+   * Where this server answers, told only to the connection server that reaches it as its PC (its
+   * bridge token), which cannot read GET /api/access (#2191): the port it listens on, and the HTTPS
+   * address Tailscale already serves it at (RemoteAccess.port, TailscaleAccess.serving_url). Absent
+   * from any other caller's answer and from an older server.
+   */
+  port?: number;
+  serving_url?: string | null;
+  /**
+   * Which builds this PC updates to: `stable` releases only, or also the `beta` builds CI publishes
+   * from green main. Absent from a supervisor older than the field, which offers releases only.
+   */
+  channel?: UpdateChannel;
 }
 
-export type UpdateErrorCode = "update_offer_changed";
+/**
+ * `stable` takes `vX.Y.Z` releases only; `beta` also takes the `vX.Y.Z-beta.N` builds CI tags on
+ * main once its checks pass. Off (`stable`) unless the PC opts in.
+ */
+export type UpdateChannel = "stable" | "beta";
+
+/**
+ * The channel a setting names (`OVIS_UPDATE_CHANNEL`, or the `update-channel` file in the state
+ * dir): `beta` turns the beta builds on, `stable` off; anything else names none.
+ */
+export function readUpdateChannel(value: string | null | undefined): UpdateChannel | null {
+  const name = value?.trim().toLowerCase();
+  return name === "beta" || name === "stable" ? name : null;
+}
+
+export type UpdateErrorCode = "update_offer_changed" | "update_cancelled";
 /** A full commit id, as `latest_revision` names it. */
 export const REVISION = /^[0-9a-f]{40,64}$/;
 
@@ -48,7 +82,12 @@ export const REVISION = /^[0-9a-f]{40,64}$/;
  * What the bridge asks of the update service: a check, or the install of the exact revision the
  * person saw offered. A manual install never goes without its revision.
  */
-export type UpdateRequest = { command: "check" } | { command: "install"; expected_revision: string };
+export type UpdateRequest = { command: "check" } | { command: "install"; expected_revision: string; install_id?: string } | { command: "cancel"; install_id: string };
+/**
+ * An install's own id, given in its 202 (POST /api/updates/install) to whoever asked for it: a cancel names it, so only the one
+ * that asked for an install can stop it, never another device's or the PC's own Settings'.
+ */
+export const INSTALL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * The supervisor's reading of a bridge's IPC message. `update-command` carries only a check: an
@@ -57,11 +96,13 @@ export type UpdateRequest = { command: "check" } | { command: "install"; expecte
  * running it as an install of whatever its own check finds.
  */
 export function readUpdateIpcRequest(message: unknown): UpdateRequest | null {
-  const value = message as { type?: unknown; command?: unknown; expected_revision?: unknown } | null | undefined;
+  const value = message as { type?: unknown; command?: unknown; expected_revision?: unknown; install_id?: unknown } | null | undefined;
   if (typeof value !== "object" || value === null) return null;
   if (value.type === "update-command" && value.command === "check") return { command: "check" };
+  // a cancel travels as a type no older supervisor knows (one that cancelled without an id knew "update-cancel"), and so ignores
+  if (value.type === "update-cancel-v2") return typeof value.install_id === "string" && INSTALL_ID.test(value.install_id) ? { command: "cancel", install_id: value.install_id } : null;
   if (value.type === "update-install-revision" && typeof value.expected_revision === "string" && REVISION.test(value.expected_revision)) {
-    return { command: "install", expected_revision: value.expected_revision };
+    return { command: "install", expected_revision: value.expected_revision, ...(typeof value.install_id === "string" && INSTALL_ID.test(value.install_id) ? { install_id: value.install_id } : {}) };
   }
   return null;
 }
@@ -212,11 +253,14 @@ export function readInstalledNotes(value: unknown): InstalledNotes {
   };
 }
 
-export function unmanagedUpdateStatus(): UpdateStatus {
+/** Why a server the desktop app runs (OVIS_DESKTOP_APP) offers no update here: the app updates itself and its server with it. */
+export const DESKTOP_APP_UPDATES = "This server is part of the Ovis app, which updates them together: updates come with the app, not from here.";
+
+export function unmanagedUpdateStatus(desktopApp = false): UpdateStatus {
   return {
     managed: false, auto_update: false, phase: "idle", current_revision: null,
     latest_revision: null, current_version: null, latest_version: null, available: false, checked_at: null, error: null,
-    blocked_reason: "Start with bun run start or the herdr plugin to enable updates.",
+    blocked_reason: desktopApp ? DESKTOP_APP_UPDATES : "Start with bun run start or the herdr plugin to enable updates.",
   };
 }
 

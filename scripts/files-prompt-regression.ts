@@ -11,6 +11,7 @@ import { chromium, type BrowserContext, type Page } from "playwright-core";
 import { createServer } from "../server/index.ts";
 import { herdrRpc, workspaceClose, workspaceCreate } from "../server/herdr/client.ts";
 import { UsageService } from "../server/usage.ts";
+import { PANE_DRAG_TYPE } from "../src/lib/split.ts";
 import { chromePath } from "./chrome-path.ts";
 import { runMoreItem } from "./header-more.ts";
 import "./test-herdr.ts";
@@ -23,7 +24,7 @@ if (!xdg || !socket.startsWith(`${xdg}/`) || !/\/herdr\/sessions\/check-[0-9a-f]
 console.log(`HERDR_SOCKET=${socket} (isolated check session)`);
 
 const root = mkdtempSync(join(tmpdir(), "herdr-files-prompt-"));
-const shots = process.env["FILES_PROMPT_SHOTS"] ?? root;
+const shots = process.env["FILES_PROMPT_SHOTS"] || process.env["UI_EVIDENCE_DIR"] || root;
 mkdirSync(shots, { recursive: true });
 const workspaces: string[] = [];
 const results: Array<{ scenario: string; page: string; pass: boolean }> = [];
@@ -67,11 +68,129 @@ async function checkFiles(page: Page, label: string, phone: boolean, paneA: stri
   results.push({ scenario: "Files follows pane switch", page: label, pass });
   console.log(`${pass ? "PASS" : "FAIL"} Files ${label}: ${outcome}`);
   if (await dialog.isVisible()) {
+    // CI once saw this Escape leave the dialog open after a pane switch, never reproduced here (#2631):
+    // the key's path is recorded before it is pressed, and a failure says what decided it
+    await page.evaluate(() => {
+      const seen: unknown[] = [];
+      const describe = (node: EventTarget | null) => node instanceof Element ? `${node.tagName.toLowerCase()}${node.id ? `#${node.id}` : ""}.${String(node.className).trim().replace(/\s+/g, ".")}` : String(node);
+      const note = (phase: string) => (event: KeyboardEvent) => { if (event.key === "Escape") seen.push({ phase, target: describe(event.target), defaultPrevented: event.defaultPrevented, composing: event.isComposing }); };
+      window.addEventListener("keydown", note("window capture"), true);
+      window.addEventListener("keydown", note("window bubble"));
+      Object.assign(window, { escapeSeen_: seen });
+    });
     await page.keyboard.press("Escape");
-    await dialog.waitFor({ state: "hidden" });
+    try {
+      await dialog.waitFor({ state: "hidden" });
+    } catch (error) {
+      // what is gathered here never takes the place of the timeout: a page gone by now still fails on it
+      try {
+      const why = await page.evaluate(() => {
+        const describe = (node: Element | null) => node === null ? null : `${node.tagName.toLowerCase()}${node.id ? `#${node.id}` : ""}.${String(node.className).trim().replace(/\s+/g, ".")}`;
+        const active = document.activeElement;
+        const opens = (element: Element) => { try { return element.matches(":open"); } catch { return false; } };
+        return {
+          escapeSeen: (window as unknown as { escapeSeen_?: unknown[] }).escapeSeen_ ?? null,
+          activeElement: describe(active),
+          activeInFiles: active?.closest(".files-dialog") !== null && active !== null,
+          activeIn: describe(active?.closest("[role='dialog'], dialog, [aria-modal='true']") ?? null),
+          modalStack: [...document.querySelectorAll("[aria-modal='true'], dialog")].map((element) => ({ element: describe(element), open: element instanceof HTMLDialogElement ? element.open : true, modal: (() => { try { return element.matches(":modal"); } catch { return false; } })() })),
+          // FilesDialog stands its Escape down while a file or a diff it opened is over it (viewing) or a native modal is
+          fileViewerOpen: document.querySelector(".file-viewer") !== null,
+          diffOpen: document.querySelector(".repo-diff") !== null,
+          nativeModal: [...document.querySelectorAll("dialog")].some((element) => { try { return element.matches(":modal"); } catch { return false; } }),
+          openPickers: [...document.querySelectorAll("select, input")].filter(opens).map(describe),
+          filesPath: document.querySelector(".files-dialog .dir-browser-path")?.getAttribute("title") ?? null,
+          selection: sessionStorage.getItem("ovis:selection"),
+        };
+      });
+      console.log(`Files ${label}: Escape after the pane switch left the dialog open: ${JSON.stringify(why)}`);
+      writeFileSync(join(shots, `files-${label}-escape-diagnostics.json`), `${JSON.stringify(why, null, 2)}\n`);
+      await page.screenshot({ path: join(shots, `files-${label}-escape-stuck.png`) });
+      } catch (diagnostics) {
+        console.log(`Files ${label}: the Escape diagnostics could not be gathered: ${String(diagnostics)}`);
+      }
+      throw error;
+    }
   }
   // The shortcut is intentionally global, including while the Files dialog is open.
   assert.equal(await selectedPane(page), paneB);
+  if (phone) return;
+  // Escape closes Files even when an earlier listener of the same key re-renders the app (#2631): here the
+  // split guide of a pane drag, which that Escape puts away first
+  await page.getByRole("button", { name: "Browse files", exact: true }).click();
+  await dialog.waitFor();
+  await page.evaluate((type) => {
+    const data = new DataTransfer();
+    data.setData(type, "{}");
+    window.dispatchEvent(new DragEvent("dragstart", { dataTransfer: data }));
+  }, PANE_DRAG_TYPE);
+  await page.locator(".split-drop.is-visible").waitFor({ state: "attached" });
+  await page.keyboard.press("Escape");
+  await page.locator(".split-drop.is-visible").waitFor({ state: "detached" });
+  await dialog.waitFor({ state: "hidden" });
+  // Settings opened by its shortcut with Files open takes the keyboard: one Escape closes Settings alone, the next Files
+  await page.getByRole("button", { name: "Browse files", exact: true }).click();
+  await dialog.waitFor();
+  await page.keyboard.press("Control+Shift+Comma");
+  const settings = page.locator(".settings-dialog");
+  await settings.waitFor();
+  await page.keyboard.press("Escape");
+  await settings.waitFor({ state: "detached" });
+  assert.equal(await dialog.isVisible(), true, "one Escape closed both Settings and Files");
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+  // Files is drawn over Settings: a click in it takes the keyboard back, and then its Escape leaves Settings open
+  await page.getByRole("button", { name: "Browse files", exact: true }).click();
+  await dialog.waitFor();
+  await page.keyboard.press("Control+Shift+Comma");
+  await settings.waitFor();
+  await dialog.getByRole("button", { name: "Browse", exact: true }).click();
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(await settings.isVisible(), true, "one Escape closed both Files and Settings");
+  await page.keyboard.press("Escape");
+  await settings.waitFor({ state: "detached" });
+  // Files opened from the palette over Settings holds the keyboard: Escape closes Files first, though Settings
+  // listened first (#3037)
+  const browseOverSettings = async (): Promise<void> => {
+    await page.keyboard.press("Control+Shift+Comma");
+    await settings.waitFor();
+    await page.keyboard.press("Control+Shift+K");
+    await page.locator(".command-palette input[type='search']").fill("Browse files");
+    await page.locator(".command-palette").getByRole("option", { name: /^Browse files/ }).first().click();
+    await dialog.waitFor();
+  };
+  await browseOverSettings();
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(await settings.isVisible(), true, "Escape in Files over Settings closed Settings");
+  await page.keyboard.press("Escape");
+  await settings.waitFor({ state: "detached" });
+  // a file opened from there is drawn under Settings, which keeps its Escape though the file has the focus:
+  // Escape closes Settings, then the file, then Files
+  await browseOverSettings();
+  await dialog.locator(".dir-browser-item", { hasText: "other" }).click();
+  await dialog.locator(".dir-browser-item", { hasText: "note.txt" }).click();
+  const viewer = page.locator(".file-viewer");
+  await viewer.waitFor();
+  await page.keyboard.press("Escape");
+  await settings.waitFor({ state: "detached" });
+  assert.equal(await viewer.isVisible(), true, "Escape over a file opened from Files closed the file with Settings");
+  await page.keyboard.press("Escape");
+  await viewer.waitFor({ state: "detached" });
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+  // Settings opened by its shortcut over New workspace: Escape closes Settings, and New workspace stays (#3037)
+  await page.locator(".machine-new-row").click();
+  const create = page.getByRole("dialog", { name: /^New workspace/ });
+  await create.waitFor();
+  await page.keyboard.press("Control+Shift+Comma");
+  await settings.waitFor();
+  await page.keyboard.press("Escape");
+  await settings.waitFor({ state: "detached" });
+  assert.equal(await create.isVisible(), true, "Escape in Settings over New workspace closed New workspace");
+  await page.keyboard.press("Escape");
+  await create.waitFor({ state: "hidden" });
 }
 
 async function paintStartupMenu(pane: string): Promise<void> {
@@ -162,6 +281,7 @@ try {
   mkdirSync(join(cwdA, "sub"), { recursive: true });
   writeFileSync(join(cwdA, "sub", "note.txt"), "regression\n");
   mkdirSync(join(cwdB, "other"), { recursive: true });
+  writeFileSync(join(cwdB, "other", "note.txt"), "regression\n");
   const panes: string[] = [];
   for (const [suffix, cwd] of [["a", cwdA], ["b", cwdB]] as const) {
     const result = await workspaceCreate({ cwd, label: `ovis-files-prompt-${suffix}` });

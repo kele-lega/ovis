@@ -1,4 +1,5 @@
-/** Manual native Windows/PowerShell regression (not run by CI), in the isolated test session.
+/** Native Windows/PowerShell regression in the isolated test session. Not in the browser lane:
+ * .github/workflows/windows-terminal-qa.yml runs it on a Windows runner.
  * Requires Bun, herdr on PATH and Chromium (`bun node_modules/playwright-core/cli.js install chromium`).
  * Run after `bun install --frozen-lockfile` and `bun run build`:
  *   bun scripts/windows-terminal-browser-qa.ts
@@ -10,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Request } from "playwright-core";
 import { chromePath } from "./chrome-path.ts";
+import { shownRow, shownRows } from "./shown-rows.ts";
 
 assert.equal(process.platform, "win32", "this regression requires native Windows");
 assert.notEqual(process.env["HERDR_TEST_LIVE"], "1", "this regression requires an isolated test session");
@@ -39,7 +41,11 @@ try {
   await until(async () => (await paneRead({ paneId: pane, source: "visible", format: "text" })).text.includes("WIN-HISTORY-120"), "PowerShell output");
   browser = await chromium.launch({ executablePath: chromePath(), headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, hasTouch: true });
-  await context.addInitScript(() => localStorage.setItem("ovis:settings", JSON.stringify({ terminalWheelSpeed: 1 })));
+  await context.addInitScript(() => {
+    localStorage.setItem("ovis:settings", JSON.stringify({ terminalWheelSpeed: 1 }));
+    // the pane menu's Original width: unchosen, a touch or narrow screen folds the wide grid and nothing pans
+    localStorage.setItem("ovis:mirror-wrap", JSON.stringify(false));
+  });
   const page = await context.newPage();
   const errors: string[] = [];
   let scrollWrites = 0;
@@ -51,7 +57,8 @@ try {
   });
   await page.goto(`http://127.0.0.1:${server.port}/?pane=${encodeURIComponent(pane)}`);
   const host = page.locator(".pane-terminal");
-  const text = () => page.locator(".xterm-rows").innerText();
+  // the rows the user sees, one line each: libghostty's while it draws, else xterm's (shown-rows.ts)
+  const text = () => page.locator(shownRow()).evaluateAll((rows) => rows.map((row) => row.textContent ?? "").join("\n"));
   await until(async () => (await text()).includes("WIN-HISTORY-120"), "mirrored output");
   await host.hover();
   await page.mouse.wheel(0, -350);
@@ -61,8 +68,12 @@ try {
 
   await paneScroll(pane, 0);
   await until(async () => (await text()).includes("P".repeat(100)), "native prompt returns before resizing");
+  // The desktop viewport holds the whole grid, so the mount rests at its top: only the follow after
+  // the short mount settles can bring the prompt's rows into view. A position written once
+  // setViewportSize returns raced that follow, which may already have run (a slow resize on a VM).
+  assert.equal(await host.evaluate((element) => element.scrollTop), 0, "the whole grid fits before resizing");
   await page.setViewportSize({ width: 390, height: 500 });
-  await host.evaluate((element) => { element.scrollTop = 80; });
+  await until(async () => await host.evaluate((element) => element.scrollWidth > element.clientWidth), "the native grid at its original width overflows a phone");
   await until(async () => await host.evaluate((element) => element.scrollTop > 100), "settled short mount follows the native prompt");
   const beforeWheelPan = await host.evaluate((element) => element.scrollTop);
   await host.hover();
@@ -144,19 +155,38 @@ try {
   }
   await cdp.send("Input.imeSetComposition", { text: "", selectionStart: 0, selectionEnd: 0 });
   await paneSendKeys(pane, ["Escape"]);
-  await paneSendText(pane, 'function prompt { ("V" * 52) + "> " }');
+  // The caret's whole cell must lie inside the phone's visible box (a cell the edge cuts counts as off
+  // screen and moves the anchor), one column short of the edge, wherever this PC's font puts the columns:
+  // the cell width is read from the long prompt's run of P's.
+  await pan(0);
+  const { cellWidth, visibleWidth } = await host.evaluate((element, drawn) => {
+    const walker = document.createTreeWalker(element.querySelector(drawn)!, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (!node.textContent?.startsWith("P".repeat(100))) continue;
+      const range = document.createRange();
+      range.setStart(node, 0);
+      range.setEnd(node, 100);
+      const screen = element.querySelector(".xterm-screen")!.getBoundingClientRect();
+      const box = element.getBoundingClientRect();
+      return { cellWidth: range.getBoundingClientRect().width / 100, visibleWidth: box.left + element.clientLeft + element.clientWidth - screen.left };
+    }
+    throw new Error("no rendered run of the long prompt's P's to measure a cell by");
+  }, shownRows());
+  // the cursor sits after the V's and "> ", in column count + 2
+  const vs = Math.floor(visibleWidth / cellWidth) - 4;
+  await paneSendText(pane, `function prompt { ("V" * ${vs}) + "> " }`);
   await paneSendKeys(pane, ["Enter"]);
-  await until(async () => (await text()).includes("V".repeat(52) + ">"), "visible cursor near the phone's right edge");
+  await until(async () => (await text()).includes("V".repeat(vs) + ">"), "visible cursor near the phone's right edge");
   const edgePan = await pan(0);
   const helper = page.locator(".xterm-helper-textarea");
   const edgeAnchor = (await helper.boundingBox())!;
   const visibleBox = (await host.boundingBox())!;
-  assert.ok(edgeAnchor.x > visibleBox.x + visibleBox.width / 2 && edgeAnchor.x < visibleBox.x + visibleBox.width,
-    "the native prompt puts a visible caret near the right edge");
+  assert.ok(edgeAnchor.x > visibleBox.x + visibleBox.width / 2 && edgeAnchor.x + cellWidth < visibleBox.x + visibleBox.width,
+    `the native prompt puts a wholly visible caret near the right edge (caret ${edgeAnchor.x}, cell ${cellWidth}, box ${visibleBox.x}+${visibleBox.width})`);
   await cdp.send("Input.imeSetComposition", { text: "한글입력테스트".repeat(8), selectionStart: 56, selectionEnd: 56 });
   assert.equal(await host.evaluate((element) => element.scrollLeft), edgePan, "long composition at a visible edge preserves horizontal pan");
   const composed = (await helper.boundingBox())!;
-  assert.ok(Math.abs(composed.x - edgeAnchor.x) <= 1, "a visible cursor keeps its composition anchor");
+  assert.ok(Math.abs(composed.x - edgeAnchor.x) <= 1, `a visible cursor keeps its composition anchor (${edgeAnchor.x} -> ${composed.x})`);
   assert.ok(composed.x + composed.width <= visibleBox.x + visibleBox.width + 1, "long preedit stays within the visible scrollport");
   await cdp.send("Input.imeSetComposition", { text: "", selectionStart: 0, selectionEnd: 0 });
   const screenHeight = await page.locator(".xterm-screen").evaluate((element) => element.getBoundingClientRect().height);
@@ -175,9 +205,22 @@ try {
   await cdp.detach();
   assert.deepEqual(errors, []);
   console.log("PASS native Windows mirror text insertion and IME preserve the phone viewport");
+} catch (error) {
+  // a failing cleanup below would otherwise replace this error
+  console.error(error);
+  throw error;
 } finally {
   await browser?.close();
   server?.stop();
   if (workspace) await workspaceClose(workspace);
-  rmSync(root, { recursive: true, force: true });
+  // the closed pane's PowerShell holds its folder (EBUSY) until it has exited
+  await until(async () => {
+    try {
+      rmSync(root, { recursive: true, force: true });
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EBUSY") return false;
+      throw error;
+    }
+  }, "the closed pane's shell lets go of the test folder");
 }

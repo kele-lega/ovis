@@ -1,7 +1,7 @@
 import { afterEach, expect, it, jest } from "bun:test";
 import { MAX_ATTACHMENT_BYTES } from "../../shared/attachments.ts";
 import { NOTICE_VERSION } from "../../shared/telemetry.ts";
-import { AttachmentTooLargeError, ApiError, changeTelemetry, fetchAgentKinds, fetchTelemetry, swapPaneWith, uploadPaneImage, verifySourceBoot } from "./api.ts";
+import { AttachmentTooLargeError, ApiError, cancelUsageLogin, changeTelemetry, fetchAgentKinds, fetchTelemetry, movePaneBeside, swapPaneWith, uploadPaneImage, verifySourceBoot } from "./api.ts";
 import { movingHerdrFocusOn } from "./followFocus.ts";
 import { clearDirectTransports } from "./directTransport.ts";
 import { DEFAULT_SETTINGS, telemetrySettingsSnapshot } from "./settings.ts";
@@ -13,6 +13,11 @@ afterEach(() => {
   globalThis.fetch = realFetch;
   Object.defineProperties(AbortSignal, { any: abortSignalStatics.any!, timeout: abortSignalStatics.timeout! });
   jest.useRealTimers();
+});
+
+it("reports a refused cancellation instead of allowing a terminal handoff", async () => {
+  globalThis.fetch = (async (_url: string) => Response.json({ error: { code: "login_not_found", message: "Not found" } }, { status: 404 })) as typeof fetch;
+  await expect(cancelUsageLogin("fixture-login")).rejects.toMatchObject({ status: 404, code: "login_not_found" });
 });
 
 it("suppresses this PC's focus frames until an explicit swap answers, including refusals", async () => {
@@ -30,6 +35,25 @@ it("suppresses this PC's focus frames until an explicit swap answers, including 
     }
     expect(movingHerdrFocusOn("office")).toBe(false);
   }
+});
+
+it("asks the pane's PC to move it beside another pane, holding that PC's focus frames until it answers", async () => {
+  const response = Promise.withResolvers<Response>();
+  const sent: { url: string; body: unknown }[] = [];
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    sent.push({ url, body: JSON.parse(String(init?.body)) });
+    return response.promise;
+  }) as typeof fetch;
+  const pending = movePaneBeside("source", "target", "up", "office");
+  try {
+    expect(movingHerdrFocusOn("office")).toBe(true);
+    expect(movingHerdrFocusOn("local")).toBe(false);
+  } finally {
+    response.resolve(Response.json({ ok: true, changed: true, reason: null }));
+  }
+  expect(await pending).toEqual({ ok: true, changed: true, reason: null });
+  expect(sent).toEqual([{ url: "/api/machines/office/pane/move", body: { pane_id: "source", target_pane_id: "target", side: "up" } }]);
+  expect(movingHerdrFocusOn("office")).toBe(false);
 });
 
 it("offers installed Copilot in agent menus while filtering missing and unsupported agents", async () => {

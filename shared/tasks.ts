@@ -1,4 +1,4 @@
-/** One background task of an OmO session, or one subagent of a Claude Code session (GET /api/pane/omo-tasks), from OmO's task record or the subagent's files. */
+/** One background task of an OmO session, one subagent of a Claude Code session, or one subagent or background command of an OpenCode session (GET /api/pane/omo-tasks), from OmO's task record, the subagent's files, or OpenCode's store. */
 export interface OmoTask {
   id: string;
   /** the task's summary, else its description or name */
@@ -15,10 +15,11 @@ export interface OmoTask {
   tokens: number | null;
   /**
    * What GET /api/pane/background-agent can show of it while it runs: `claude-subagent` for a
-   * Claude Code subagent (its own transcript), null for a source it reads nothing of (OmO's tasks,
-   * a Claude background command). Absent from a bridge from before the route.
+   * Claude Code subagent (its own transcript), `opencode-subagent` for an OpenCode subagent (its
+   * child session in OpenCode's store), null for a source it reads nothing of (OmO's tasks, a
+   * background command). Absent from a bridge from before the route.
    */
-  detail_kind?: "claude-subagent" | null;
+  detail_kind?: "claude-subagent" | "opencode-subagent" | null;
 }
 
 /** One step of an OmO workflow (a DAG node); `error` is why a failed one failed. */
@@ -46,16 +47,19 @@ export interface OmoActivity {
   runs: OmoRun[];
   /** the PC's clock, which the times are on */
   server_time: string;
+  /** running tasks that count but are not listed: an OpenCode pane lists the newest thousand that run */
+  more_running?: number;
 }
 
 /**
  * GET /api/pane/background-agent?pane_id=&agent_id=: what a running Claude Code subagent's own
- * transcript holds now, read-only and bounded (server/claude-subagents.ts backgroundAgentDetail):
+ * transcript holds now, read-only and bounded (server/claude-subagents.ts backgroundAgentDetail),
+ * or an OpenCode subagent's child session (server/opencode-subagents.ts opencodeAgentDetail):
  * the prompt it was dispatched with, then its prose and the tools it called, as text. The read
  * covers the start of its file (the prompt) and its end (recent activity): `truncated` when the
  * file, the events or the text went past the `limits`, `incomplete` when a record inside what was
  * read could not be used (torn, over its size, or not a record). `session_id` names the Claude
- * session it belongs to: an opaque identity, never a path.
+ * or OpenCode session it belongs to: an opaque identity, never a path.
  */
 export interface PaneBackgroundAgentDetail {
   agent_id: string;

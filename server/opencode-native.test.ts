@@ -10,9 +10,11 @@ import * as omo from "./omo.ts";
 import { omoSessionFolder } from "./omo.ts";
 import * as processStart from "./process-start.ts";
 import { paneProcessRoots } from "./conversation.ts";
-import { closeOpenCodeNative, openCodeNativeState, openCodePaneService, openCodeSkillsToType, releaseOpenCodePane, skillsNotAttached, startOpenCodeWatch, trackVerifiedOpenCodePanes } from "./opencode-native.ts";
+import { closeOpenCodeNative, openCodeNativeState, openCodePaneService, openCodeSkillsToType, openCodeVerificationCheckpoint, releaseOpenCodePane, skillsNotAttached, startOpenCodeWatch, trackVerifiedOpenCodePanes } from "./opencode-native.ts";
 import { commandOutcome } from "./outcome.ts";
 import * as service from "./opencode-service.ts";
+import * as commands from "./commands.ts";
+import { CATALOG_SOURCE_BUDGET_MS } from "./catalog-sources.ts";
 import { forgetOpenCodeService, openCodeServiceOptions } from "./opencode-service.ts";
 
 const root = mkdtempSync(join(tmpdir(), "opencode-native-test-"));
@@ -39,6 +41,54 @@ describe("a skill OpenCode did not attach", () => {
     expect(result).toMatchObject({ state: "terminal-required", unattached_skills: ["effect"] });
     expect(result.note).toContain("@effect");
     expect(commandOutcome("p_native", sent, { now: sent.at + 100 }).unattached_skills).toBeUndefined();
+  });
+});
+
+describe("cold skill lookup budget", () => {
+  it.each(["absent", "present"])("records only known skills when the service times out and a remembered catalog is %s", async (availability) => {
+    const remembered = availability === "present";
+    const target = { ...pane, pane_id: `p_review_catalog_${remembered}`, cwd: root } as HerdrPane;
+    const text = "@effect @a.ts @alice,";
+    if (remembered) commands.rememberPaneCommands(target, "opencode", [{ name: "effect", description: "", source: "skill", trigger: "@" }]);
+    let clock = 1_000;
+    const now = spyOn(Date, "now").mockImplementation(() => clock);
+    const rpc = spyOn(herdr, "herdrRpc").mockResolvedValue({ process_info: { foreground_processes: [] } } as never);
+    const lookup = spyOn(service, "openCodeService").mockImplementation(async () => {
+      clock += CATALOG_SOURCE_BUDGET_MS;
+      return { version: "2.0.32", config: { baseUrl: failing.url.origin, port: failing.port!, pid: process.pid, password: "fixture" } };
+    });
+    const scan = spyOn(commands, "paneCommands");
+    try {
+      const result = await openCodeSkillsToType(target, undefined, text);
+      expect(result.skills).toEqual([]);
+      if (remembered) expect(result.sent?.unattached).toEqual(["effect"]);
+      else expect(result.sent).toBeUndefined();
+      expect(scan).not.toHaveBeenCalled();
+    } finally { now.mockRestore(); rpc.mockRestore(); lookup.mockRestore(); scan.mockRestore(); }
+  });
+
+  it.each([0, CATALOG_SOURCE_BUDGET_MS])("never starts a synchronous scan after a service lookup taking %d ms", async (elapsed) => {
+    let clock = 1_000;
+    const now = spyOn(Date, "now").mockImplementation(() => clock);
+    const rpc = spyOn(herdr, "herdrRpc").mockResolvedValue({ process_info: { foreground_processes: [] } } as never);
+    const lookup = spyOn(service, "openCodeService").mockImplementation(async () => {
+      clock += elapsed;
+      return { version: "2.0.32", config: { baseUrl: failing.url.origin, port: failing.port!, pid: process.pid, password: "fixture" } };
+    });
+    const session = spyOn(service, "openCodeHasSession").mockResolvedValue(false);
+    const scan = spyOn(commands, "paneCommands");
+    try {
+      const result = await openCodeSkillsToType({ ...pane, pane_id: `p_cold_${elapsed}`, cwd: root } as HerdrPane, undefined, "@effect");
+      expect(scan).not.toHaveBeenCalled();
+      expect(result.skills).toEqual([]);
+      if (elapsed === CATALOG_SOURCE_BUDGET_MS) {
+        expect(result.sent).toBeUndefined();
+        expect(clock).toBe(1_000 + CATALOG_SOURCE_BUDGET_MS);
+        expect(session).not.toHaveBeenCalled();
+      }
+    } finally {
+      now.mockRestore(); rpc.mockRestore(); lookup.mockRestore(); session.mockRestore(); scan.mockRestore();
+    }
   });
 });
 
@@ -129,6 +179,8 @@ function gatedService(dir: string) {
   const streamOpened = Promise.withResolvers<void>();
   const streamClosed = Promise.withResolvers<void>();
   let holdLookups = false;
+  /** a session lookup held since the last hold() */
+  let heldSeen = Promise.withResolvers<void>();
   const server = Bun.serve({ port: 0, hostname: "127.0.0.1", idleTimeout: 0, fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === "/api/info") return Response.json({ version: "2.0.32", pid: process.pid, urls: [], paths: { tmp: dir } });
@@ -136,6 +188,7 @@ function gatedService(dir: string) {
       const id = decodeURIComponent(url.pathname.split("/").at(-1)!);
       const answer = () => Response.json({ data: { id } });
       lookupSeen.resolve();
+      if (holdLookups) heldSeen.resolve();
       return holdLookups ? new Promise<Response>((resolve) => lookups.push(() => resolve(answer()))) : answer();
     }
     if (url.pathname === "/api/event") {
@@ -150,7 +203,8 @@ function gatedService(dir: string) {
   writeFileSync(join(dir, "service.json"), JSON.stringify({ url: server.url.origin, pid: process.pid, password: "x", version: "2.0.32" }));
   return {
     server, lookupSeen: lookupSeen.promise, streamOpened: streamOpened.promise, streamClosed: streamClosed.promise,
-    hold() { holdLookups = true; }, release() { holdLookups = false; for (const answer of lookups.splice(0)) answer(); },
+    hold() { holdLookups = true; heldSeen = Promise.withResolvers<void>(); }, release() { holdLookups = false; for (const answer of lookups.splice(0)) answer(); },
+    heldLookup: () => heldSeen.promise,
   };
 }
 const opencodePane = (paneId: string, session: string) => ({ pane_id: paneId, agent: "opencode", agent_session: { agent: "opencode", source: "herdr:opencode", kind: "id", value: session } }) as unknown as HerdrPane;
@@ -233,6 +287,31 @@ describe("a verification still in flight is cancelled by a reset or by its pane'
       } finally { closeOpenCodeNative(); fake.release(); fake.server.stop(true); }
     });
   }
+});
+
+describe("a re-verification begun after a snapshot was read", () => {
+  it("is newer evidence: that older snapshot's release keeps it, the pane and the stream", async () => {
+    const fake = gatedService(join(root, "reverify-newer"));
+    openCodeServiceOptions.stateDir = join(root, "reverify-newer");
+    forgetOpenCodeService();
+    closeOpenCodeNative();
+    try {
+      // Given a pane verified before a snapshot's read began.
+      expect(await openCodePaneService(opencodePane("p_re", "ses_re"))).not.toBeNull();
+      await within(fake.streamOpened, "the stream opening");
+      const checkpoint = openCodeVerificationCheckpoint();
+      // And its re-verification, begun after that read, held at its session lookup.
+      fake.hold();
+      const reverifying = openCodePaneService(opencodePane("p_re", "ses_re"));
+      await within(fake.heldLookup(), "the re-verification's session lookup");
+      // When the older snapshot releases the pane, then the lookup answers.
+      releaseOpenCodePane("p_re", checkpoint);
+      fake.release();
+      // Then the re-verification stands, and the pane keeps the stream.
+      expect(await reverifying).not.toBeNull();
+      expect(openCodeNativeState()).toEqual({ stream: true, panes: ["p_re"] });
+    } finally { closeOpenCodeNative(); fake.release(); fake.server.stop(true); }
+  });
 });
 
 describe("collectors track the verified panes", () => {

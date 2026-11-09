@@ -1,9 +1,18 @@
+import type { PortalSignIn } from "./portal.ts";
+
 /** How a request got in, when it did. */
-export type AccessVia = "local" | "tailscale" | "device" | "token" | "open";
+export type AccessVia = "local" | "tailscale" | "device" | "token" | "open" | "portal" | "relay";
 /** Why a request did not. */
 export type AccessRefusal = "other_user" | "pairing_required" | "token_required";
 /** What a paired device may do: drive (type, answer, manage) or only watch. */
 export type DeviceRole = "drive" | "watch";
+
+/** Who Portal's own sign-in let in, as it states it to the app (server/access.ts `portalLogin`). */
+export interface PortalLogin {
+  /** the wallet address, link name, or verified email or sub:<id> that signed in */
+  readonly user: string;
+  readonly method: PortalSignIn;
+}
 
 /** GET /api/health `auth`: `authenticated` is whether this request got in; `required` is the opposite, kept for older clients. */
 export interface HealthAuth {
@@ -13,6 +22,8 @@ export interface HealthAuth {
   /** with `via: "token"`: the token came in an `Authorization` header (a proxy sends it), so signing out of this browser would change nothing */
   readonly bearer?: true;
   readonly role?: DeviceRole;
+  /** with `via: "portal"`: who signed in through Portal */
+  readonly portal?: PortalLogin;
   readonly reason?: AccessRefusal;
 }
 
@@ -28,6 +39,46 @@ export interface HealthAuth {
 export interface LanExposure {
   /** the address the server is bound to, so the warning can name where it is reachable */
   readonly host: string;
+  /**
+   * Only from the 0.4.23 betas, which named the relay's direct carrier here: `host` is then that
+   * carrier's address, and the client words it as DirectExposure. This server sends DirectExposure instead.
+   */
+  readonly direct?: true;
+}
+
+/**
+ * GET /api/health, as `direct_exposure`, to a request that got in, while LanExposure is not sent: the
+ * relay's direct carrier listens on this PC's network (docs/relay.md, "Direct on the same network"),
+ * and that is all: only devices paired through the relay sign in there. Its own field, not a flag on
+ * `lan_exposure`: a 0.4.x client takes any `lan_exposure` for an open server and warns that anyone
+ * on the network can type into every pane.
+ */
+export interface DirectExposure {
+  /** the direct carrier's first address */
+  readonly host: string;
+}
+
+/** The configured bind address, read from its literal (`bindScope` in server/access.ts): never a DNS lookup or the request's Host. */
+export type BindScope = "loopback" | "tailnet" | "other";
+/** How this one request arrived, as far as it proves (`observedIngress` in server/access.ts); not how every device reaches the server. `direct`: no proxy said it forwarded the request, which a proxy that adds nothing (an SSH tunnel, nginx's bare `proxy_pass`) also looks like. `portal`: Portal vouched for the request with its proof, whatever signed it in (the token or a paired device too), or, running with no sign-in and so with no proof, it came from this PC in the shape Portal forwards to an address that Portal serves. */
+export type ObservedIngress = "direct" | "proxy" | "tailscale" | "funnel" | "unknown" | "relay" | "portal";
+
+/**
+ * GET /api/health (both scopes), authenticated requests only, a watching device's included:
+ * what protects this server, each fact on its own and none of them a verdict. It carries no
+ * token, hash, header, login or address, and is sent `no-store`. Anonymous answers omit it, and
+ * an older server sends none: the client then says the facts are unavailable rather than
+ * reading them from `auth` or from the absence of `lan_exposure`.
+ */
+export interface SecuritySummary {
+  /** an access token is configured on the server, whether or not this request used it */
+  readonly token_configured: boolean;
+  /** the durable pairing gate (`DeviceStore.gated`); `unavailable` when devices.json cannot be read, which keeps it closed */
+  readonly pairing_gate: "open" | "closed" | "unavailable";
+  readonly bind_scope: BindScope;
+  readonly observed_ingress: ObservedIngress;
+  /** `observed` only with trusted public-ingress evidence on this request (Funnel); otherwise unknown, never "none" */
+  readonly public_exposure: "observed" | "unknown";
 }
 
 export interface PairedDevice {
@@ -38,6 +89,32 @@ export interface PairedDevice {
   readonly last_seen_at: string | null;
   /** the device this request came from */
   readonly current: boolean;
+  /** paired with a public key for relay access, not a browser cookie */
+  readonly via_relay?: true;
+  /** account members only, and only to a caller that may drive (docs/account.md, "Account members") */
+  readonly account?: string;
+  /** that member's account key: its `relay_public_key`, which is public */
+  readonly account_key?: string;
+  /** the member on this PC that added it */
+  readonly added_by?: string;
+  /** how it reaches this PC right now, while one of its encrypted sessions is up; absent while none is */
+  readonly connection?: DeviceConnection;
+}
+
+/**
+ * Which way a device's session reaches the PC: straight on the same network (`lan`), straight over
+ * Tailscale, or through a relay. A matter of speed only: every way carries the same end-to-end channel.
+ */
+export type DeviceRoute = "lan" | "tailscale" | "relay";
+
+export interface DeviceConnection {
+  readonly route: DeviceRoute;
+  /** the relay's address (`wss://…`), for `relay` only: Ovis's regional ones are named by place */
+  readonly relay?: string;
+  /** the latest keepalive's round trip, PC to device and back; null until one came back */
+  readonly rtt_ms: number | null;
+  /** when this session signed in */
+  readonly since: string;
 }
 
 /** POST /api/devices/pair/start */

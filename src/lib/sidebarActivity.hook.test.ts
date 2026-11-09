@@ -4,9 +4,9 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import type { Machine } from "../../shared/machines.ts";
 import type { AgentStatus, HerdrPane } from "../../shared/protocol.ts";
 import machinesFixture from "../../site/demo/fixtures/machines.json";
-import { useSidebarActivityState, type SidebarActivity } from "./sidebarActivity.tsx";
-import { cleanSeen, loadSeen, receiveSeen, saveSeen, seenKey, SEEN_LIMIT } from "./seenFinishes.ts";
-import type { SeenFinish } from "../../shared/seen.ts";
+import { type PanePresence, useSidebarActivityState, type SidebarActivity } from "./sidebarActivity.tsx";
+import { loadSeen, receiveSeen, saveSeen, seenKey, SEEN_LIMIT } from "./seenFinishes.ts";
+import type { SeenFinish, SeenPresentation } from "../../shared/seen.ts";
 import { conversationFinishEvidence } from "./panePresentation.ts";
 import { shareSeen } from "./api.ts";
 
@@ -78,14 +78,14 @@ describe("sidebar finish acknowledgement through React effects", () => {
     });
   }
 
-  async function open(machines: Machine[], selected: string | null = null, covered = false, share?: (finish: SeenFinish) => Promise<void>) {
+  async function open(machines: Machine[], selected: string | null = null, covered = false, share?: (finish: SeenFinish, presented?: SeenPresentation) => Promise<void>) {
     let activity: SidebarActivity | undefined;
     let current = machines;
     let renders = 0;
     function Probe({ machines, selected, covered }: { machines: Machine[]; selected: string | null; covered: boolean }) {
       // Keep callback identity stable between the hook's own renders.
       renders++;
-      activity = useSidebarActivityState(machines, "local", selected, inFronts[Number(covered)]!, share);
+      activity = useSidebarActivityState(machines, "local", selected, covered ? coveredView : loading.current ? loadingView : frontView, share);
       return null;
     }
     let renderer: ReactTestRenderer | undefined;
@@ -116,7 +116,9 @@ describe("sidebar finish acknowledgement through React effects", () => {
       get renders() { return renders; },
     };
   }
-  const inFronts = [() => true, () => false];
+  // stable identities, as App's memoized callback; content still loading: in view, not yet drawn
+  const frontView = (): PanePresence => "front", coveredView = (): PanePresence => "covered", loadingView = (): PanePresence => "loading";
+  const loading = { current: false };
 
   for (const state of ["connecting", "reconnecting", "disconnected"] as const) {
     it(`keeps cached read finishes ready while ${state}, without marking an unseen selected pane`, async () => {
@@ -346,7 +348,8 @@ describe("sidebar finish acknowledgement through React effects", () => {
         expect(post.mock.calls.map(([url, init]) => [url, init?.method])).toEqual([
           ["/api/seen", "POST"], ["/api/seen", "POST"],
         ]);
-        expect(delivered).toEqual([{ pc: "local", epoch: "server-a", pane: "a", id: 1 }]);
+        // a retry tells an earlier look: it cannot overrule an unread told since
+        expect(delivered).toEqual([{ pc: "local", epoch: "server-a", pane: "a", id: 1, presented: "held" }]);
       } finally { post.mockRestore(); }
     });
   }
@@ -502,7 +505,8 @@ describe("sidebar finish acknowledgement through React effects", () => {
       // When one later health response confirms sign-in.
       authenticated = true;
       await act(async () => { jest.advanceTimersByTime(2_000); });
-      for (let index = 0; index < 100; index++) await client.update(roster({ [`p${index}`]: 1 }), `p${index}`);
+      // roster updates on the pane still in front (going back to the others would be a look again)
+      for (let index = 0; index < 100; index++) await client.update(roster({ p99: 1 }), "p99");
       await act(async () => { jest.advanceTimersByTime(60_000); });
 
       // Then every finish is delivered exactly once, and health polling stops.
@@ -580,6 +584,198 @@ describe("sidebar finish acknowledgement through React effects", () => {
     } finally { health.mockRestore(); }
   });
 
+  it("says whether a shared finish's pane just came into view, and tells a held finish again when the pane is shown again", async () => {
+    const told: [number, string | undefined][] = [];
+    const share = async (finish: SeenFinish, presented?: SeenPresentation) => { told.push([finish.id, presented]); };
+    const client = await open(roster({ a: 1, b: 1 }, { b: "working" }), "a", false, share);
+    // a finish that arrives while the pane is in front (another client marked it unread)
+    await client.update(roster({ a: 2, b: 1 }, { b: "working" }), "a");
+    // away and back: the same finish, now shown again
+    await client.update(roster({ a: 2, b: 1 }, { b: "working" }), "b");
+    await client.update(roster({ a: 2, b: 1 }, { b: "working" }), "a");
+    // once told as a look, coming back to it tells nothing more
+    await client.update(roster({ a: 2, b: 1 }, { b: "working" }), "b");
+    await client.update(roster({ a: 2, b: 1 }, { b: "working" }), "a");
+    // content still loading and a reconnect are no look: the pane stayed in view
+    loading.current = true;
+    await client.update(roster({ a: 3, b: 1 }, { b: "working" }), "a");
+    loading.current = false;
+    await client.update(roster({ a: 3, b: 1 }, { b: "working" }), "a");
+    const away = roster({ a: 4, b: 1 }, { b: "working" });
+    away[0]!.state = "reconnecting";
+    await client.update(away, "a");
+    await client.update(roster({ a: 4, b: 1 }, { b: "working" }), "a");
+    // a pane selected while covered is new once it is first presented
+    await client.update(roster({ a: 4, b: 5 }), "b", true);
+    await client.update(roster({ a: 4, b: 5 }), "b");
+    // closing an overlay over it brings it into view again
+    await client.update(roster({ a: 4, b: 6 }), "b", true);
+    await client.update(roster({ a: 4, b: 6 }), "b");
+    expect(told).toEqual([[1, "new"], [2, "held"], [2, "new"], [3, "held"], [4, "held"], [5, "new"], [6, "new"]]);
+  });
+
+  it("tells a return made while a held share is in flight as a look right away, once", async () => {
+    // Given finish 2 of pane a shared as held, its request still unanswered.
+    const told: [number, string | undefined][] = [];
+    const pending = Promise.withResolvers<void>();
+    const share = (finish: SeenFinish, presented?: SeenPresentation) => {
+      told.push([finish.id, presented]);
+      return finish.id === 2 ? pending.promise : Promise.resolve();
+    };
+    const client = await open(roster({ a: 1, b: 1 }, { b: "working" }), "a", false, share);
+    await client.update(roster({ a: 2, b: 1 }, { b: "working" }), "a");
+
+    // When the person goes away and comes back before it answers.
+    await client.update(roster({ a: 2, b: 1 }, { b: "working" }), "b");
+    await client.update(roster({ a: 2, b: 1 }, { b: "working" }), "a");
+
+    // Then the return is told as a look then, not when the held share answers, and not again.
+    expect(told).toEqual([[1, "new"], [2, "held"], [2, "new"]]);
+    await act(async () => { pending.resolve(); await pending.promise; });
+    expect(told).toEqual([[1, "new"], [2, "held"], [2, "new"]]);
+    await client.update(roster({ a: 2, b: 1 }, { b: "working" }), "b");
+    await client.update(roster({ a: 2, b: 1 }, { b: "working" }), "a");
+    expect(told).toEqual([[1, "new"], [2, "held"], [2, "new"]]);
+  });
+
+  it("tells a return made while its held share waits for a retry as a look right away", async () => {
+    // Given finish 2 of pane a shared as held, failed with a transient error and waiting for its retry.
+    jest.useFakeTimers();
+    const told: [number, string | undefined][] = [];
+    let failed = false;
+    const share = async (finish: SeenFinish, presented?: SeenPresentation) => {
+      told.push([finish.id, presented]);
+      if (finish.id === 2 && !failed) { failed = true; throw Object.assign(new Error("restart"), { status: 503 }); }
+    };
+    const warn = console.warn;
+    console.warn = () => undefined;
+    try {
+      const client = await open(roster({ a: 1, b: 1 }, { b: "working" }), "a", false, share);
+      await client.update(roster({ a: 2, b: 1 }, { b: "working" }), "a");
+      expect(told).toEqual([[1, "new"], [2, "held"]]);
+
+      // When the person goes away and comes back before the retry.
+      await client.update(roster({ a: 2, b: 1 }, { b: "working" }), "b");
+      await client.update(roster({ a: 2, b: 1 }, { b: "working" }), "a");
+
+      // Then the return is told as a look then, and the held retry it replaced is not sent.
+      expect(told).toEqual([[1, "new"], [2, "held"], [2, "new"]]);
+      await act(async () => { jest.advanceTimersByTime(60_000); });
+      expect(told).toEqual([[1, "new"], [2, "held"], [2, "new"]]);
+    } finally {
+      console.warn = warn;
+    }
+  });
+
+  it("tells a return as a look right away while another pane's share waits for a retry", async () => {
+    // Given finish 2 of pane a told as held, and pane c's finish waiting for a retry.
+    jest.useFakeTimers();
+    const told: [string, number, string | undefined][] = [];
+    let failed = false;
+    const share = async (finish: SeenFinish, presented?: SeenPresentation) => {
+      told.push([finish.pane, finish.id, presented]);
+      if (finish.pane === "c" && !failed) { failed = true; throw Object.assign(new Error("restart"), { status: 503 }); }
+    };
+    const warn = console.warn;
+    console.warn = () => undefined;
+    try {
+      const client = await open(roster({ a: 1, c: 1 }), "a", false, share);
+      await client.update(roster({ a: 2, c: 1 }), "a");
+      await client.update(roster({ a: 2, c: 1 }), "c");
+      expect(told).toEqual([["a", 1, "new"], ["a", 2, "held"], ["c", 1, "new"]]);
+
+      // When the person comes back to a before c's retry.
+      await client.update(roster({ a: 2, c: 1 }), "a");
+
+      // Then the return is told as a look then, not behind c's retry, and c's retry is held.
+      expect(told).toEqual([["a", 1, "new"], ["a", 2, "held"], ["c", 1, "new"], ["a", 2, "new"]]);
+      await act(async () => { jest.advanceTimersByTime(60_000); });
+      expect(told).toEqual([["a", 1, "new"], ["a", 2, "held"], ["c", 1, "new"], ["a", 2, "new"], ["c", 1, "held"]]);
+    } finally {
+      console.warn = warn;
+    }
+  });
+
+  it("keeps a finish told as a look when its answer upgrade is shared as held", async () => {
+    // Given finish 1 of a shared as new without an answer.
+    const told: [number, string | undefined, boolean][] = [];
+    const share = async (finish: SeenFinish, presented?: SeenPresentation) => { told.push([finish.id, presented, finish.answer !== undefined]); };
+    const pane = "proof-upgrade-told";
+    const client = await open(roster({ [pane]: 1, b: 1 }, { b: "working" }), pane, false, share);
+
+    // When its answer arrives while it stays in front, and the person goes away and back.
+    expect(conversationFinishEvidence.accept(seenKey("local", "server-a", pane), 1, {
+      source: "pi-transcript", history_id: "session",
+      turns: [{ role: "assistant", ts: "2026-10-19T00:00:00Z", end_ts: "2026-10-19T00:00:01Z",
+        parts: [{ kind: "text", text: "Finished", phase: "final_answer" }] }],
+    })).toBe(true);
+    await client.update(roster({ [pane]: 1, b: 1 }, { b: "working" }), pane);
+    await client.update(roster({ [pane]: 1, b: 1 }, { b: "working" }), "b");
+    await client.update(roster({ [pane]: 1, b: 1 }, { b: "working" }), pane);
+
+    // Then the return tells nothing more: the finish was already told as a look.
+    expect(told).toEqual([[1, "new", false], [1, "held", true]]);
+  });
+
+  it("keeps a look that answers after its answer upgrade answered first", async () => {
+    // Given finish 1 of a shared as new, its request still unanswered.
+    const told: [number, string | undefined, boolean][] = [];
+    const pending = Promise.withResolvers<void>();
+    const share = (finish: SeenFinish, presented?: SeenPresentation) => {
+      told.push([finish.id, presented, finish.answer !== undefined]);
+      return finish.answer === undefined ? pending.promise : Promise.resolve();
+    };
+    const pane = "proof-upgrade-in-flight";
+    const client = await open(roster({ [pane]: 1, b: 1 }, { b: "working" }), pane, false, share);
+
+    // When its answer upgrade is shared and answers, then the look answers, and the person goes away and back.
+    expect(conversationFinishEvidence.accept(seenKey("local", "server-a", pane), 1, {
+      source: "pi-transcript", history_id: "session",
+      turns: [{ role: "assistant", ts: "2026-10-19T00:00:00Z", end_ts: "2026-10-19T00:00:01Z",
+        parts: [{ kind: "text", text: "Finished", phase: "final_answer" }] }],
+    })).toBe(true);
+    await client.update(roster({ [pane]: 1, b: 1 }, { b: "working" }), pane);
+    await act(async () => { pending.resolve(); await pending.promise; });
+    await client.update(roster({ [pane]: 1, b: 1 }, { b: "working" }), "b");
+    await client.update(roster({ [pane]: 1, b: 1 }, { b: "working" }), pane);
+
+    // Then the look is not told a second time.
+    expect(told).toEqual([[1, "new", false], [1, "held", true]]);
+  });
+
+  it("tells a return as a look while the look in flight at its answer upgrade then fails", async () => {
+    // Given finish 1 of a shared as new, its request still unanswered, and its answer upgrade shared.
+    const told: [number, string | undefined, boolean][] = [];
+    const pending = Promise.withResolvers<void>();
+    const share = (finish: SeenFinish, presented?: SeenPresentation) => {
+      told.push([finish.id, presented, finish.answer !== undefined]);
+      return finish.answer === undefined ? pending.promise : Promise.resolve();
+    };
+    const warn = console.warn;
+    console.warn = () => undefined;
+    try {
+      const pane = "proof-upgrade-lost-look";
+      const client = await open(roster({ [pane]: 1, b: 1 }, { b: "working" }), pane, false, share);
+      expect(conversationFinishEvidence.accept(seenKey("local", "server-a", pane), 1, {
+        source: "pi-transcript", history_id: "session",
+        turns: [{ role: "assistant", ts: "2026-10-19T00:00:00Z", end_ts: "2026-10-19T00:00:01Z",
+          parts: [{ kind: "text", text: "Finished", phase: "final_answer" }] }],
+      })).toBe(true);
+      await client.update(roster({ [pane]: 1, b: 1 }, { b: "working" }), pane);
+
+      // When the person goes away and back while the look is in flight, and the look then fails.
+      await client.update(roster({ [pane]: 1, b: 1 }, { b: "working" }), "b");
+      await client.update(roster({ [pane]: 1, b: 1 }, { b: "working" }), pane);
+      await act(async () => { pending.reject(new TypeError("offline")); await pending.promise.catch(() => undefined); });
+      await client.update(roster({ [pane]: 1, b: 1 }, { b: "working" }), pane);
+
+      // Then the return was told as a look.
+      expect(told).toEqual([[1, "new", false], [1, "held", true], [1, "new", true]]);
+    } finally {
+      console.warn = warn;
+    }
+  });
+
   it("upgrades a shared finish when its same-ID answer fingerprint becomes available", async () => {
     const told: SeenFinish[] = [];
     const share = async (finish: SeenFinish) => { told.push(finish); };
@@ -595,6 +791,33 @@ describe("sidebar finish acknowledgement through React effects", () => {
     };
     expect(conversationFinishEvidence.accept(seenKey("local", "server-a", pane), 1, conversation)).toBe(true);
     await client.update(roster({ [pane]: 1 }), pane);
+    expect(told).toHaveLength(2);
+    expect(told[1]).toMatchObject({ pane, id: 1, answer: expect.any(String) });
+  });
+
+  it("retries a failed share once, with the answer fingerprint that arrived before the retry", async () => {
+    // Given a share of a finish whose answer was not read yet, failed with a transient error.
+    jest.useFakeTimers();
+    const pane = "proof-late-answer";
+    const told: SeenFinish[] = [];
+    const client = await open(roster({ [pane]: 1 }), pane, false, async (finish) => {
+      told.push(finish);
+      if (told.length === 1) throw Object.assign(new Error("restart"), { status: 503 });
+    });
+    expect(told).toEqual([{ pc: "local", epoch: "server-a", pane, id: 1 }]);
+
+    // When the answer is read before the retry is due.
+    expect(conversationFinishEvidence.accept(seenKey("local", "server-a", pane), 1, {
+      source: "pi-transcript", history_id: "session",
+      turns: [{ role: "assistant", ts: "2026-10-19T00:00:00Z", end_ts: "2026-10-19T00:00:01Z",
+        parts: [{ kind: "text", text: "Finished", phase: "final_answer" }] }],
+    })).toBe(true);
+    await client.update(roster({ [pane]: 1 }), pane);
+    expect(told).toHaveLength(1);
+    await act(async () => { jest.advanceTimersByTime(1_000); });
+    await act(async () => { jest.advanceTimersByTime(60_000); });
+
+    // Then the retry shares it once, carrying the answer.
     expect(told).toHaveLength(2);
     expect(told[1]).toMatchObject({ pane, id: 1, answer: expect.any(String) });
   });
@@ -704,6 +927,25 @@ describe("sidebar finish acknowledgement through React effects", () => {
     expect(client.status("a")).toBe("done");
   });
 
+  it("does not cache a retired epoch's scope again while it retires", async () => {
+    const client = await open(roster({ a: 1 }, {}, "retire-1"), "a");
+    const set = Map.prototype.set;
+    let cached: unknown[] = [];
+    const spy = spyOn(Map.prototype, "set").mockImplementation(function (this: Map<unknown, unknown>, key: unknown, value: unknown) {
+      // A scope's cached record maps panes to IDs; a change notice carries its epoch.
+      if (value && typeof value === "object" && !Object.hasOwn(value, "epoch")) cached.push(key);
+      return set.call(this, key, value);
+    });
+    try {
+      for (let epoch = 2; epoch <= 4; epoch++) {
+        cached = [];
+        await client.update(roster({ a: 1 }, {}, `retire-${epoch}`), "a");
+        expect(cached).not.toContain(JSON.stringify(["local", `retire-${epoch - 1}`]));
+        expect(client.status("a")).toBe("idle");
+      }
+    } finally { spy.mockRestore(); }
+  });
+
   it("drops the prior epoch even if pane IDs and finish counters are identical", async () => {
     const client = await open(roster({ a: 1 }), "a");
     await client.update(roster({ a: 1 }, {}, "server-b"));
@@ -799,7 +1041,7 @@ describe("sidebar finish acknowledgement through React effects", () => {
     data.set("ovis:seen:local", '{"a":5}');
     data.set("ovis:settings", "{}");
     for (let i = 0; i <= SEEN_LIMIT; i++) data.set(seenKey("local", "server-a", `p${i}`), JSON.stringify({ id: 1, at: i }));
-    cleanSeen();
+    loadSeen("local", "server-a");
     expect(data.has("ovis:seen:local")).toBe(false);
     expect(data.has(seenKey("local", "server-a", "p0"))).toBe(false);
     expect(data.has(seenKey("local", "server-a", `p${SEEN_LIMIT}`))).toBe(true);

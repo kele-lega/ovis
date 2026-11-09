@@ -30,7 +30,7 @@ try {
   await herdrRpc("pane.send_input", { pane_id: paneId, text: "for n in $(seq 1 180); do printf 'history %03d: record\\n' $n; if [ $n = 12 ] || [ $n = 90 ] || [ $n = 170 ]; then printf 'mark_%s tail mark_%s\\n' needle needle; fi; done; printf 'wide_%s%s%sZ\\n' '界' 'e' '́'; printf 'viewport_%s\\n' ready; exec cat", keys: ["enter"] });
   await ready;
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: "en-US" });
-  await context.addInitScript(() => localStorage.setItem("ovis:settings", JSON.stringify({ language: "en", defaultView: "terminal", alertsOn: false })));
+  await context.addInitScript(() => localStorage.setItem("ovis:settings", JSON.stringify({ language: "en", theme: "light", defaultView: "terminal", alertsOn: false })));
   const page = await context.newPage();
   page.setDefaultTimeout(10000);
   const errors: string[] = [];
@@ -68,6 +68,14 @@ try {
   const firstMetrics = page.waitForResponse((response) => response.url().includes("/api/pane/scroll?") && response.request().method() === "GET");
   await page.goto(`http://127.0.0.1:${server.port}/?pane=${encodeURIComponent(paneId)}`);
   await firstMetrics;
+  const backgrounds = await page.evaluate(() => ({
+    viewport: getComputedStyle(document.querySelector(".xterm-viewport")!).backgroundColor,
+    host: getComputedStyle(document.querySelector(".terminal-host")!).backgroundColor,
+  }));
+  assert.equal(backgrounds.viewport, backgrounds.host, "the terminal gutter follows the light theme instead of showing a black frame");
+  // equal backgrounds prove nothing if both stayed dark: the light theme must actually be on
+  const [r, g, b] = (backgrounds.host.match(/\d+(\.\d+)?/g) ?? []).map(Number);
+  assert.ok((0.2126 * r! + 0.7152 * g! + 0.0722 * b!) / 255 > 0.5, `the light theme paints a light terminal background (got ${backgrounds.host})`);
   assert.ok((await paneScrollInfo(paneId))!.max_offset_from_bottom > 100, "herdr holds the full history");
   const widths = await page.evaluate(() => ({ grid: document.querySelector(".pane-terminal")!.getBoundingClientRect().width, surface: document.querySelector(".terminal-surface")!.getBoundingClientRect().width }));
   assert.equal(widths.grid, widths.surface, "the grid takes the full width, with no column reserved beside it");
@@ -147,7 +155,9 @@ try {
   // The jump button: absent at the bottom, shown above it, and a click returns to the bottom without
   // taking the terminal's focus or sending input to the program.
   const jump = page.getByRole("button", { name: "Jump to bottom", exact: true });
-  assert.equal(await jump.count(), 0, "no jump button at the native bottom");
+  // herdr is at the bottom once paging returns; the page drops the button only after it reads that
+  // page's answer and draws it, so its going is waited for, not sampled
+  await jump.waitFor({ state: "detached" });
   await pageToEdge(1);
   await jump.waitFor();
   const jumpBox = (await jump.boundingBox())!, gridBox = (await page.locator(".pane-terminal").boundingBox())!;
@@ -197,6 +207,38 @@ try {
     await herdrRpc("pane.send_input", { pane_id: paneId, text: "poll_wake", keys: ["enter"] });
     await until(async () => metricsReads.length > beforeOutput, "output wakes the backed-off poll");
     assert.ok(metricsReads[beforeOutput]! - outputAt < 1500, `output brings the next read back within about 1 s, took ${metricsReads[beforeOutput]! - outputAt} ms`);
+
+    // Output alone at the bottom: after its first second a burst reads at the 2 s follow pace, not every 250 ms.
+    let streaming = true;
+    const stream = (async () => {
+      for (let line = 0; streaming; line++) {
+        await herdrRpc("pane.send_input", { pane_id: paneId, text: `follow_${line}`, keys: ["enter"] });
+        // fixed wait: a steady stream of output, one line every 100 ms
+        await Bun.sleep(100);
+      }
+    })();
+    try {
+      // fixed wait: the burst's first second keeps the busy cadence
+      await Bun.sleep(1500);
+      const followFrom = Date.now();
+      // fixed wait: proving the follow pace over a window the busy cadence would fill with 16 reads
+      await Bun.sleep(4000);
+      const followReads = metricsReads.filter((at) => at > followFrom).length;
+      // the follow pace is 2 s, and a read that saw no output in flight backs off by 1 s instead
+      assert.ok(followReads <= 6, `a view following output at the bottom reads metrics at the follow pace, read ${followReads} times in 4 s`);
+      // A page on metrics that output has overtaken reads them again first: the program may have entered its alternate screen.
+      await until(async () => Date.now() - metricsReads.at(-1)! > 400, "the follow pace leaves the metrics older than the busy cadence");
+      const sent: string[] = [];
+      const track = (request: import("playwright-core").Request) => { if (new URL(request.url()).pathname === "/api/pane/scroll") sent.push(request.method()); };
+      page.on("request", track);
+      try {
+        await page.locator(".xterm-helper-textarea").evaluate((node: HTMLTextAreaElement) => node.focus());
+        const pageWrite = page.waitForRequest((request) => request.url().endsWith("/api/pane/scroll") && request.method() === "POST");
+        await page.keyboard.press("ControlOrMeta+Shift+PageUp");
+        await pageWrite;
+      } finally { page.off("request", track); }
+      assert.equal(sent[0], "GET", `a page on stale metrics reads them before scrolling, sent ${sent.join(",")}`);
+    } finally { streaming = false; await stream; }
 
     await pageToEdge(1);
     await until(async () => (await paneScrollInfo(paneId))!.offset_from_bottom > 100, "paging scrolls up before the held-view poll check");

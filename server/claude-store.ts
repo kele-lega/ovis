@@ -13,16 +13,18 @@
  * id is a UUID herdr reports, so at most one file answers to it.
  */
 
-import { dlopen, FFIType, ptr } from "bun:ffi";
 import { createHash } from "node:crypto";
 import { constants, type Dirent } from "node:fs";
-import { open, readFile, readdir, readlink, stat } from "node:fs/promises";
+import { lstat, open, readFile, readdir, readlink, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import nodePath, { basename, dirname, isAbsolute, join, type PlatformPath } from "node:path";
 import { directoryKey, withoutVerbatimPrefix } from "./codex.ts";
+import { darwinStartTime, sysctlCall } from "./darwin-process.ts";
 import { recentProcessTable } from "./gjc-runtime.ts";
 import { processAlive, processStartUpperBoundAsync } from "./process-start.ts";
-import type { ProcessRow } from "./windows-processes.ts";
+import { jobProcessesBelow, type JobProcess } from "./foreground-job.ts";
+import { descendantProcesses, type ProcessRow } from "./windows-processes.ts";
+import { userHome } from "./user-home.ts";
 
 const MAX_PROJECT_NAME = 200;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -39,6 +41,67 @@ export function isClaudeProcess(entry: { name?: string; argv0?: string; argv?: r
   // the native build runs under its version as the name and titles itself "Claude": both its
   // argv0 and its argv[0] say so, which one field alone does not prove
   return /^\d+\.\d+\.\d+$/.test(entry.name ?? "") && entry.argv0 === "Claude" && entry.argv?.[0] === "Claude";
+}
+
+/**
+ * The Claude processes under a Windows pane's shell, from the process table: herdr and herdr-core
+ * name only the shell in front there (windows-processes.ts). The nearest one, and any other not
+ * started by it (two of them: which one a session belongs to cannot be told). The native claude.exe
+ * the shell started can run the session in a child claude.exe, and only that child writes the PID
+ * record: a Claude with no record file in any store hands over to the nearest Claudes below it that
+ * have one (windowsLaunchedClaude). Null when the table says nothing, which is no proof that no
+ * Claude runs there.
+ */
+export async function windowsShellClaude(shellPid: number, table: () => Promise<ProcessRow[]> = recentProcessTable, home = userHome()): Promise<{ pid: number; argv: string[] }[] | null> {
+  const rows = await table();
+  if (rows.length === 0) return null;
+  const claude = nearestOf(rows, descendantProcesses(rows, shellPid).filter(isClaudeProcess));
+  return (await Promise.all(claude.map((entry) => windowsLaunchedClaude(entry, rows, home)))).flat();
+}
+
+/** The first of `claude` (nearest first) and any other it did not start. */
+function nearestOf<T extends { pid: number }>(rows: readonly ProcessRow[], claude: T[]): T[] {
+  const first = claude[0];
+  if (first === undefined) return [];
+  const below = new Set(descendantProcesses(rows, first.pid).map((entry) => entry.pid));
+  return claude.filter((entry) => entry === first || !below.has(entry.pid));
+}
+
+/**
+ * The Claude that runs the session `entry` started: `entry` itself, unless it has no PID record file
+ * in any store and a Claude below it has one: then the nearest such Claude and any other that one
+ * did not start, whatever their records say (the callers check them, and refuse a store that cannot
+ * be told). Only a file's presence counts: a torn or leftover record still marks the Claude that
+ * runs the session, so a Claude that one started (`claude -p`) never takes its place, and a Claude
+ * beside it with no record is still told apart from none. A `claude attach` client writes no record
+ * and names its session by its job: it counts as one that has a record, so it never hands over and
+ * is never passed over.
+ */
+async function windowsLaunchedClaude(entry: { pid: number; argv: string[] }, rows: readonly ProcessRow[], home: string): Promise<{ pid: number; argv: string[] }[]> {
+  const inner = descendantProcesses(rows, entry.pid).filter(isClaudeProcess);
+  const named = (claude: { pid: number; argv: string[] }) => claudeAttachArgs(claude.argv) !== null || hasRecordFile(home, claude.pid);
+  if (inner.length === 0 || await named(entry)) return [entry];
+  const recorded = await Promise.all(inner.map(named));
+  const holders = inner.filter((_, index) => recorded[index]);
+  return holders.length > 0 ? nearestOf(rows, holders) : [entry];
+}
+
+/** Whether any store Claude may use has a PID record file of `pid`, readable or not; one that cannot be looked at counts as there. */
+async function hasRecordFile(home: string, pid: number): Promise<boolean> {
+  const found = await Promise.all((await knownClaudeStores(home)).map((store) => lstat(join(store, "sessions", `${pid}.json`)).then(() => true, (error: unknown) => !absent(error))));
+  return found.includes(true);
+}
+
+/**
+ * The Claude below a herdr-core terminal's foreground process, in its job (foreground-job.ts): a
+ * launcher or script that runs Claude as its child (#3009). Only one Claude there is taken: with two,
+ * which one the terminal shows cannot be told, and none is. Null when the job cannot be read.
+ */
+export async function jobClaude(pid: number): Promise<JobProcess[] | null> {
+  const job = await jobProcessesBelow(pid);
+  if (job === null) return null;
+  const claude = job.filter((entry) => isClaudeProcess({ name: entry.name, argv: entry.argv, ...(entry.argv[0] === undefined ? {} : { argv0: entry.argv[0] }) }));
+  return claude.length === 1 ? claude : [];
 }
 
 /** Java's String.hashCode, which Claude Code uses for the suffix of a long name. */
@@ -194,20 +257,6 @@ export async function claudeRecordOnlyIn(
   return holders.length === 1 && holders[0] === wanted;
 }
 
-/** sysctl(3) from libSystem, opened once, on macOS only. */
-let darwinSysctl: ((name: Int32Array, out: Uint8Array) => number | null) | undefined;
-
-function sysctlCall(): (name: Int32Array, out: Uint8Array) => number | null {
-  if (darwinSysctl) return darwinSysctl;
-  // a system library's C function: nothing native of node's is loaded into Bun
-  const lib = dlopen("/usr/lib/libSystem.B.dylib", { sysctl: { args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.u64], returns: FFIType.i32 } });
-  darwinSysctl = (name, out) => {
-    const size = new BigUint64Array([BigInt(out.byteLength)]);
-    return lib.symbols.sysctl(ptr(name), name.length, ptr(out), ptr(size), null, 0) === 0 ? Number(size[0]) : null;
-  };
-  return darwinSysctl;
-}
-
 /**
  * The environment in a `KERN_PROCARGS2` answer, one entry each: an int argc, the executable's path,
  * its NUL padding, argc arguments, then the environment, each NUL-terminated, up to an empty one or
@@ -247,23 +296,6 @@ function darwinEnvironment(pid: number): string | null {
   const length = call(new Int32Array([1, 49, pid]), answer); // CTL_KERN, KERN_PROCARGS2
   const entries = length === null ? null : procArgsEnvironment(answer.subarray(0, length));
   return entries === null ? null : entries.join("\0");
-}
-
-/** kern.proc.pid begins with extern_proc.p_starttime, a 64-bit Darwin timeval. */
-export function procStartTime(answer: Uint8Array): bigint | null {
-  if (answer.byteLength < 16) return null;
-  const view = new DataView(answer.buffer, answer.byteOffset, answer.byteLength);
-  const seconds = view.getBigInt64(0, true);
-  const micros = view.getInt32(8, true);
-  return seconds > 0n && micros >= 0 && micros < 1_000_000 ? seconds * 1_000_000n + BigInt(micros) : null;
-}
-
-/** The kernel's process birth time, including microseconds that `ps -o lstart` drops. */
-function darwinStartTime(pid: number): bigint | null {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
-  const answer = new Uint8Array(4096);
-  const length = sysctlCall()(new Int32Array([1, 14, 1, pid]), answer); // CTL_KERN, KERN_PROC, KERN_PROC_PID
-  return length === null ? null : procStartTime(answer.subarray(0, length));
 }
 
 export const darwinProcess = { environment: darwinEnvironment, startTime: darwinStartTime };
@@ -348,11 +380,26 @@ async function processRead(pid: number, argv: readonly string[], home: string, p
 export async function processClaudeSource(
   pid: number,
   argv: readonly string[] = [],
-  home = process.env["HOME"] ?? "",
+  home = userHome(),
   platform: string = process.platform,
   table: () => Promise<ProcessRow[]> = recentProcessTable,
 ): Promise<ClaudeSource> {
   return (await processRead(pid, argv, home, platform, table)).source;
+}
+
+/**
+ * The store source a terminal herdr-core starts inherits: the environment of its core process
+ * (`server.status`'s pid), which hc hands every shell it starts (a terminal's own env aside): read
+ * from /proc on Linux and with sysctl on macOS (same user only). Windows lets no one read it, so the
+ * bridge server's own (`env`) stands in, as for herdr.
+ */
+export async function processLaunchSource(pid: number, platform: string = process.platform, proc = "/proc", env: Record<string, string | undefined> = process.env): Promise<ClaudeSource> {
+  if (platform !== "linux" && platform !== "darwin") return env["CLAUDE_CONFIG_DIR"] === undefined ? { state: "absent" } : overrideSource(env["CLAUDE_CONFIG_DIR"]);
+  let environ: string | null = null;
+  try { environ = platform === "linux" ? await readFile(join(proc, String(pid), "environ"), "utf8") : darwinProcess.environment(pid); } catch { /* gone, or not ours */ }
+  // read empty: a process gone or not ours, not one without the variable
+  if (!environ) return { state: "unreadable" };
+  return (await environSource(environ)).source;
 }
 
 /** herdrLaunchSource's answer by proc root and socket, with the listening socket's inodes it was read for. */
@@ -416,7 +463,7 @@ export type PaneProcess = { pid: number; name?: string | null; argv0?: string | 
  */
 export async function paneClaudeSource(
   processes: readonly PaneProcess[],
-  home = process.env["HOME"] ?? "",
+  home = userHome(),
   platform: string = process.platform,
   table: () => Promise<ProcessRow[]> = recentProcessTable,
 ): Promise<ClaudeSource | null> {
@@ -440,7 +487,7 @@ export async function paneClaudeSource(
  */
 export async function claudeStoreOf(
   source: ClaudeSource | null,
-  home = process.env["HOME"] ?? "",
+  home = userHome(),
   env: Record<string, string | undefined> = process.env,
 ): Promise<{ dir: string; env: { CLAUDE_CONFIG_DIR: string } | null; key: string; place: string; chosen: boolean } | null> {
   const chosen = source ?? (env["CLAUDE_CONFIG_DIR"] === undefined ? { state: "absent" as const } : { state: "override" as const, dir: env["CLAUDE_CONFIG_DIR"] });
@@ -469,7 +516,7 @@ export async function claudeStoreOf(
 export async function processClaudeConfigDir(
   pid: number,
   argv: readonly string[] = [],
-  home = process.env["HOME"] ?? "",
+  home = userHome(),
   platform: string = process.platform,
   table: () => Promise<ProcessRow[]> = recentProcessTable,
 ): Promise<string | null> {
@@ -499,17 +546,21 @@ const CONTINUED_TAIL_BYTES = 64 * 1024;
  * user or assistant turn after it. Only the file's tail is read, since this runs on every lookup.
  * A file that cannot be read names no continuation: its own reader reports the failure.
  */
-async function transcriptTail(path: string): Promise<string | null> {
+/** A transcript's tail and the exact `dev:ino` of the file it was read from (#3402). */
+async function transcriptTail(path: string): Promise<{ text: string; identity: string } | null> {
   try {
-    const file = await open(path, constants.O_RDONLY);
+    // no links and no blocking: a FIFO in its place must not hold the lookup (as branchedFrom)
+    const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
     try {
-      const size = (await file.stat()).size;
+      const info = await file.stat({ bigint: true });
+      if (!info.isFile()) return null;
+      const size = Number(info.size);
       const start = Math.max(0, size - CONTINUED_TAIL_BYTES);
       const buffer = Buffer.alloc(size - start);
       const { bytesRead } = await file.read(buffer, 0, buffer.length, start);
       const text = buffer.subarray(0, bytesRead).toString("utf8");
       // a tail that starts mid-line drops that partial line
-      return start > 0 ? text.slice(text.indexOf("\n") + 1) : text;
+      return { text: start > 0 ? text.slice(text.indexOf("\n") + 1) : text, identity: `${info.dev}:${info.ino}` };
     } finally {
       await file.close();
     }
@@ -518,12 +569,14 @@ async function transcriptTail(path: string): Promise<string | null> {
   }
 }
 
-async function continuedInSession(path: string): Promise<string | null> {
-  const text = await transcriptTail(path);
-  if (text === null) return null;
+/** The session a transcript continues in (or null), and the exact identity of the file whose tail said so (#3402). */
+async function continuedInSession(path: string): Promise<{ next: string | null; identity: string | null }> {
+  const tail = await transcriptTail(path);
+  if (tail === null) return { next: null, identity: null };
   let continued: string | null = null;
-  for (const line of text.split("\n")) {
-    if (!line.includes('"type"')) continue;
+  for (const line of tail.text.split("\n")) {
+    // every record is read as JSON reads it, however its keys are written (#2130)
+    if (line.trim() === "") continue;
     try {
       const entry = JSON.parse(line) as { type?: unknown; continuedInSessionId?: unknown };
       if (entry.type === "user" || entry.type === "assistant") continued = null;
@@ -532,7 +585,7 @@ async function continuedInSession(path: string): Promise<string | null> {
       }
     } catch { /* a torn tail line cannot name the active session */ }
   }
-  return continued;
+  return { next: continued, identity: tail.identity };
 }
 
 /**
@@ -542,14 +595,16 @@ async function continuedInSession(path: string): Promise<string | null> {
  * single match is taken, and the job's state.json, when it names a transcript, must agree.
  */
 async function backgroundJobTranscript(path: string, configDir: string): Promise<string | null> {
-  const text = await transcriptTail(path);
+  const text = (await transcriptTail(path))?.text ?? null;
   if (text === null) return null;
   // each continued-in record claims only the output printed since the previous record, so an
   // earlier /resume's job id never names a later continuation
   let pending: string | undefined;
   let id: string | undefined;
   for (const line of text.split("\n")) {
-    if (line.includes('"type":"continued-in"')) {
+    let type: unknown;
+    try { type = (JSON.parse(line) as { type?: unknown }).type; } catch { /* a torn line, or no record */ }
+    if (type === "continued-in") {
       id = pending;
       pending = undefined;
     } else {
@@ -564,7 +619,10 @@ async function backgroundJobTranscript(path: string, configDir: string): Promise
   if (matches.length !== 1) return null;
   const job = join(dirname(path), matches[0]!);
   try {
-    const state = JSON.parse(await readFile(join(configDir, "jobs", id, "state.json"), "utf8")) as { linkScanPath?: unknown };
+    // bounded, and no FIFO or link in its place: a state that cannot be read so cannot agree (#1876)
+    const raw = await readSmallFile(join(configDir, "jobs", id, "state.json"), MAX_JOB_STATE_BYTES);
+    if (raw === null) return null;
+    const state = JSON.parse(raw) as { linkScanPath?: unknown };
     if (typeof state.linkScanPath === "string" && state.linkScanPath !== job) return null;
   } catch (error) {
     if (!(error instanceof SyntaxError || absent(error))) return null;
@@ -572,8 +630,67 @@ async function backgroundJobTranscript(path: string, configDir: string): Promise
   return await isFile(job) ? job : null;
 }
 
+/** How much of a transcript's start is read for the session it was branched from: a branch's first record carries it after the message. */
+const BRANCH_HEAD_BYTES = 1024 * 1024;
+/** Branches of branches followed back towards the session Herdr reported. */
+const MAX_BRANCH_DEPTH = 8;
+const MAX_BRANCH_PARENTS = 256;
+/** Transcript file → the session its copied records came from, with the head that said so, checked again on each use. */
+const branchParents = new Map<string, { dev: number; ino: number; length: number; digest: string; parent: string | null }>();
+const headDigest = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
+
+/**
+ * The session `/branch` copied this transcript from: Claude Code (2.1.311) writes the conversation so far into a
+ * new transcript in the same project, each copied record carrying `forkedFrom.sessionId`, and goes on in it. Only
+ * the first conversation record (user or assistant) decides, and only when it is the file's own session's: Null when
+ * it names no such session, belongs to another, or is not within BRANCH_HEAD_BYTES (no guess on a cut record).
+ * Non-blocking and no symlinks, as readSmallFile.
+ */
+async function branchedFrom(path: string): Promise<string | null> {
+  let file;
+  try { file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW); } catch { return null; }
+  try {
+    const info = await file.stat();
+    if (!info.isFile()) return null;
+    const known = branchParents.get(path);
+    if (known && known.dev === info.dev && known.ino === info.ino && info.size >= known.length) {
+      // the same file, unless its head was written again: reading the head back costs that one record
+      const head = Buffer.alloc(known.length);
+      const { bytesRead } = await file.read(head, 0, head.length, 0);
+      if (bytesRead === head.length && headDigest(head) === known.digest) return known.parent;
+    }
+    const bytes = Buffer.alloc(Math.min(info.size, BRANCH_HEAD_BYTES));
+    let length = 0;
+    while (length < bytes.length) {
+      const { bytesRead } = await file.read(bytes, length, bytes.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    const own = basename(path, ".jsonl");
+    // only whole lines: the last one may still be being written, or cut by the cap
+    let end = 0;
+    for (let next = bytes.indexOf(10, 0); next !== -1 && next < length; end = next + 1, next = bytes.indexOf(10, end)) {
+      const line = bytes.subarray(end, next).toString("utf8");
+      // every record is read as JSON reads it: a key written with escapes (`"\u0074ype"`) is the same key (#2130)
+      if (line.trim() === "") continue;
+      let entry: { type?: unknown; sessionId?: unknown; forkedFrom?: { sessionId?: unknown } | null };
+      try { entry = JSON.parse(line); } catch { return null; }
+      if (entry.type !== "user" && entry.type !== "assistant") continue;
+      const parent = entry.forkedFrom?.sessionId;
+      const answer = entry.sessionId === own && typeof parent === "string" && SESSION_ID.test(parent) ? parent : null;
+      if (branchParents.size >= MAX_BRANCH_PARENTS) branchParents.delete(branchParents.keys().next().value!);
+      branchParents.set(path, { dev: info.dev, ino: info.ino, length: next + 1, digest: headDigest(bytes.subarray(0, next + 1)), parent: answer });
+      return answer;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally { await file.close(); }
+}
+
 export function forgetClaudeSessions(): void {
   found.clear();
+  branchParents.clear();
   attachedJobs.clear();
   processDirs.clear();
   launchSources.clear();
@@ -595,6 +712,7 @@ async function darwinProcessStart(pid: number): Promise<string | null> {
 
 /** Drops what a project scan remembered about one transcript file: the scan runs again if it is ever asked for. */
 export function forgetClaudeSessionFile(path: string): void {
+  branchParents.delete(path);
   for (const [key, value] of found) if (value === path) found.delete(key);
 }
 
@@ -740,6 +858,22 @@ const JOB_ID_START = /^[a-f0-9]{1,8}$/;
 
 const optionLike = (arg: string): boolean => arg.length > 1 && arg.startsWith("-");
 
+/**
+ * Whether every argument from `at` on is a debug option, or `--setting-sources` with its value: Claude
+ * reads those wherever they stand, and still reads the argument before them as a job's name (#1876).
+ * Any other argument there keeps the pane on its terminal, a debug value apart from `-d`/`--debug` too:
+ * Claude (2.1.311) takes it for an extra argument and then looks no name up (#2125).
+ */
+function onlyDebugOptions(args: readonly string[], at: number): boolean {
+  for (let index = at; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === "-d" || arg === "--debug" || arg === "-d2e" || arg === "--debug-to-stderr" || arg.startsWith("--debug=") || arg.startsWith("--setting-sources=")) continue;
+    if (arg === "--setting-sources" && args[index + 1] !== undefined && !optionLike(args[index + 1]!)) { index++; continue; }
+    return false;
+  }
+  return true;
+}
+
 /** The index of the last argument the option at `at` takes: its own, when it takes no value. */
 function optionEnd(args: readonly string[], at: number): number {
   const option = args[at];
@@ -783,8 +917,8 @@ export type ClaudeAttach = { ref: string; behindOptions: boolean; byName: boolea
  * `node <script>` for an npm install); null for any other Claude. `attach` is the first argument that
  * is neither an option nor an option's value. With root options before it, each must be one Claude
  * allows there and the job must be named by its whole eight-digit id. With none, the argument may be
- * the start of an id, or, when nothing follows it, part of a job's name: Claude also lets debug
- * options and `--setting-sources` follow a name, which this reads as no name (#1645).
+ * the start of an id, or, when nothing but debug options and `--setting-sources` follow it, part of a
+ * job's name (#1645, #1876).
  */
 export function claudeAttachArgs(argv: readonly string[] | null | undefined): ClaudeAttach | null {
   const program = argv?.[0];
@@ -795,7 +929,7 @@ export function claudeAttachArgs(argv: readonly string[] | null | undefined): Cl
   const ref = args[at + 1];
   // help, an unknown option or nothing: Claude prints its usage and exits
   if (ref === undefined || ref === "" || ref.startsWith("-")) return null;
-  if (at === 0) return { ref, behindOptions: false, byName: args.length === 2 };
+  if (at === 0) return { ref, behindOptions: false, byName: onlyDebugOptions(args, 2) };
   if (args[at - 1] === "--" || !JOB_ID.test(ref)) return null;
   for (let index = 0; index < at; index = optionEnd(args, index) + 1) {
     if (!optionBeforeVerb(args[index]!)) return null;
@@ -921,7 +1055,7 @@ async function findAttachedJob(configDir: string, { ref, byName }: ClaudeAttach,
  */
 const attachedJobs = new Map<string, { pid: number; started: number; job: string | null; at: number }>();
 const MAX_ATTACHED_JOBS = 256;
-/** Two reads of one process's start differ by up to a second: macOS's ps counts whole seconds. */
+/** Two reads of one process's start: Linux's differ by a tick or two; macOS's are the kernel's own, kept to the margin they had when `ps` counted whole seconds. */
 const SAME_START_MS = 2000;
 const ATTACH_MISS_MS = 10_000;
 
@@ -1027,19 +1161,23 @@ export async function claudeAttachSession(
 
 /**
  * The session a pane's one Claude process names in its own PID record, which Claude rewrites when
- * /clear or /resume switches it to another session in the same process; null when the pane has no
- * single Claude process or the record cannot be trusted (claudeProcessSession).
+ * /clear or /resume switches it to another session in the same process, or, for a `claude attach`
+ * client, the session of the job it opened (claudeAttachSession); null when the pane has no single
+ * Claude process or neither can be trusted (claudeProcessSession).
  */
 export async function claudeForegroundSession(
   processes: readonly { pid: number; name?: string | null; argv0?: string | null; argv?: readonly string[] | null }[],
-  home = process.env["HOME"] ?? "",
+  home = userHome(),
 ): Promise<string | null> {
   const claude = processes.filter((entry) => isClaudeProcess({ name: entry.name ?? undefined, argv0: entry.argv0 ?? undefined, argv: entry.argv ?? undefined }));
   if (claude.length !== 1) return null;
   const only = claude[0]!;
   try {
-    const dir = await processClaudeConfigDir(only.pid, only.argv ?? [only.argv0 ?? only.name ?? ""], home);
-    return await claudeProcessSession(home, only.pid, dir || defaultClaudeConfigDir(home));
+    const dir = await processClaudeConfigDir(only.pid, only.argv ?? [only.argv0 ?? only.name ?? ""], home) || defaultClaudeConfigDir(home);
+    // a `claude attach` client keeps no PID record: its job's state names the session it shows (#1876)
+    const attach = await claudeAttachSession(dir, only.pid, only.argv);
+    if (attach !== null) return attach.session;
+    return await claudeProcessSession(home, only.pid, dir);
   } catch {
     // two stores claim the process, or one cannot be read: no session to pin
     return null;
@@ -1051,8 +1189,18 @@ export async function claudeForegroundSession(
  * in turn, else in whichever project holds it. Null when no project does (a session that has not
  * written its first message yet). Such a session is scanned again on every poll, so the scan
  * stays off the event loop.
+ *
+ * `live` is the session the pane's Claude process names in its own PID record. `/branch` moves the
+ * process to a copy of the conversation, and Herdr's report can stay on the session it was copied
+ * from (#2020): the live session's transcript is taken when its records say they were branched
+ * from this one (or from a branch of it) in the same project. A live session that is no branch of
+ * it, as after a `/resume` back, changes nothing.
  */
-export async function claudeTranscriptFile(home: string, session: string, cwds: readonly (string | null | undefined)[], configDir = join(home, ".claude")): Promise<string | null> {
+export async function claudeTranscriptFile(
+  home: string, session: string, cwds: readonly (string | null | undefined)[], configDir = join(home, ".claude"), live: string | null = null,
+  /** filled with each file whose tail was read, by path: the exact identity it was proven through (#3402) */
+  proofs?: Map<string, string>,
+): Promise<string | null> {
   const projects = join(configDir, "projects");
   const locate = async (id: string): Promise<string | null> => {
     const file = `${id}.jsonl`;
@@ -1080,19 +1228,142 @@ export async function claudeTranscriptFile(home: string, session: string, cwds: 
     return null;
   };
 
-  const seen = new Set<string>([session]);
-  let path = await locate(session);
-  while (path !== null) {
-    const next = await continuedInSession(path);
-    if (next === null || seen.has(next)) return path;
-    seen.add(next);
-    // a continuation whose file is not there keeps the transcript that named it, unless a
-    // /resume of a background session names that job's own transcript
-    const nextPath = await locate(next) ?? await backgroundJobTranscript(path, configDir);
-    if (nextPath === null) return path;
-    path = nextPath;
+  /** `from`: the file checked to be a branch, whose continuations are taken beside it first (#2130) */
+  /** `prove`: whether the tail it reads proves the path it returns; a branch walk's own evidence is read apart (#3402) */
+  const follow = async (start: string, seen: Set<string>, from?: string, prove = true): Promise<string | null> => {
+    // this walk's own reads: the path it returns carries this walk's proof, or none, never another walk's
+    const walk = new Map<string, string>();
+    const settle = (found: string): string => {
+      proofs?.delete(found);
+      const identity = walk.get(found);
+      if (prove && identity !== undefined) proofs?.set(found, identity);
+      return found;
+    };
+    seen.add(start);
+    let path = from ?? await locate(start);
+    while (path !== null) {
+      const { next, identity } = await continuedInSession(path);
+      if (identity !== null) walk.set(path, identity);
+      if (next === null || seen.has(next)) return settle(path);
+      seen.add(next);
+      // a branch's continuation goes on beside it: the same id in a project an earlier cwd names is another
+      // conversation (#2130). One whose file is not there keeps the transcript that named it, unless a
+      // /resume of a background session names that job's own transcript
+      const beside = join(dirname(path), `${next}.jsonl`);
+      const nextPath = (from !== undefined && await isFile(beside) ? beside : await locate(next)) ?? await backgroundJobTranscript(path, configDir);
+      if (nextPath === null) return settle(path);
+      path = nextPath;
+    }
+    return null;
+  };
+
+  const seen = new Set<string>();
+  const path = await follow(session, seen);
+  // a Claude started inside the pane inherits HERDR_PANE_ID and can take Herdr's report of the pane: a session
+  // with no transcript, or one print mode wrote, is no conversation of the pane's own Claude (#3260)
+  // the live session is looked for only where the pane's conversation can be: beside the report, or with no
+  // report in the folders of the pane's own cwds, never in another project
+  const folders = path !== null ? [dirname(path)]
+    : cwds.flatMap((cwd) => cwd ? [join(projects, claudeProjectDir(cwd))] : []);
+  const own = await ownSessionInstead(path, live, seen, folders, follow);
+  if (own !== null) return own;
+  if (path === null || live === null || !SESSION_ID.test(live) || seen.has(live)) return path;
+  // a branch stays in its project: only that folder is looked in, and what cannot be read there is no evidence of one
+  const inProject = async (id: string): Promise<string | null> => {
+    const candidate = join(dirname(path), `${id}.jsonl`);
+    try { return await isFile(candidate) ? candidate : null; } catch { return null; }
+  };
+  const livePath = await inProject(live);
+  let branch = livePath;
+  for (let depth = 0; branch !== null && depth < MAX_BRANCH_DEPTH; depth++) {
+    const parent = await branchedFrom(branch);
+    if (parent === null) return path;
+    if (seen.has(parent)) {
+      // from the very file found to be the branch: the same id may name another file elsewhere
+      // the branch was told by branchedFrom's own read, not this tail's: the path it gives carries no proof (#3402)
+      try { return await follow(live, seen, livePath!, false) ?? path; } catch { return path; }
+    }
+    branch = await inProject(parent);
   }
-  return null;
+  return path;
+}
+
+/** How much of a transcript's end `lastEntrypoint` reads. */
+const ENTRYPOINT_TAIL_BYTES = 256 * 1024;
+
+/**
+ * The `entrypoint` the newest record within a transcript's last ENTRYPOINT_TAIL_BYTES names ("cli", "sdk-cli"),
+ * or null when none does or the file cannot be read. Whole records only, read as JSON reads them (#2130).
+ * Non-blocking and no symlinks, as branchedFrom.
+ */
+async function lastEntrypoint(path: string): Promise<string | null> {
+  let file;
+  try { file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW); } catch { return null; }
+  try {
+    const info = await file.stat();
+    if (!info.isFile()) return null;
+    const length = Math.min(info.size, ENTRYPOINT_TAIL_BYTES);
+    const bytes = Buffer.alloc(length);
+    let read = 0;
+    while (read < length) {
+      const { bytesRead } = await file.read(bytes, read, length - read, info.size - length + read);
+      if (bytesRead === 0) break;
+      read += bytesRead;
+    }
+    const lines = bytes.subarray(0, read).toString("utf8").split("\n");
+    // the first line may be cut by the read, the last one may still be being written: neither parses, and is passed by
+    for (let index = lines.length - 1; index >= 0; index--) {
+      const line = lines[index]!.trim();
+      if (line === "") continue;
+      let entry: { entrypoint?: unknown };
+      try { entry = JSON.parse(line); } catch { continue; }
+      if (typeof entry?.entrypoint === "string") return entry.entrypoint;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally { await file.close(); }
+}
+
+/** Whether print mode or the SDK (`claude -p`) wrote a transcript's newest records: an `sdk-…` entrypoint, as claude-transcript.ts tells an SDK prompt. */
+async function printModeTranscript(path: string): Promise<boolean> {
+  return (await lastEntrypoint(path))?.startsWith("sdk") === true;
+}
+
+/**
+ * The transcript of the session the pane's Claude process names in its PID record (`live`), in place of the one
+ * Herdr reports, when that report cannot be the pane's conversation: no project holds its transcript, or print
+ * mode or the SDK wrote its newest records. A Claude started inside the pane (`claude -p` from a hook, a script or
+ * the agent itself) inherits HERDR_PANE_ID, and its SessionStart can take the pane's report (#3260). Null keeps
+ * the answer as it was: no PID record, a live session the report's chain already holds, a live session with no
+ * transcript either or, beside a print-mode report, one print mode wrote too; an interactive report always stands,
+ * as after a /resume back (#2020).
+ */
+async function ownSessionInstead(
+  reported: string | null, live: string | null, seen: ReadonlySet<string>, folders: readonly string[],
+  follow: (start: string, seen: Set<string>, from?: string) => Promise<string | null>,
+): Promise<string | null> {
+  if (live === null || !SESSION_ID.test(live) || seen.has(live)) return null;
+  if (reported !== null && !await printModeTranscript(reported)) return null;
+  let found: string | null = null;
+  for (const folder of folders) {
+    const candidate = join(folder, `${live}.jsonl`);
+    // a regular file of its own, not a link to something else
+    try { if ((await lstat(candidate)).isFile()) { found = candidate; break; } } catch { /* not there */ }
+  }
+  if (found === null) return null;
+  const path = await follow(live, new Set<string>(), found);
+  if (path === null || reported === null) return path;
+  // beside a print-mode report, a live session print mode wrote too tells neither apart
+  return await printModeTranscript(path) ? null : path;
+}
+
+/** Where `claudeSessionTempDir` looks for this user's `claude-<uid>` folder. */
+const claudeTempRoots = (): string[] => [...new Set([tmpdir(), "/tmp"])];
+
+/** The `claude-<uid>` folders every session's temp folder (`claudeSessionTempDir`) lies in; none on Windows, which has no uid. */
+export function claudeTempBases(uid: number | undefined = process.getuid?.()): string[] {
+  return uid === undefined ? [] : claudeTempRoots().map((root) => join(root, `claude-${uid}`));
 }
 
 /**
@@ -1104,7 +1375,7 @@ export async function claudeTranscriptFile(home: string, session: string, cwds: 
  */
 export async function claudeSessionTempDir(
   transcript: string,
-  roots: readonly string[] = [...new Set([tmpdir(), "/tmp"])],
+  roots: readonly string[] = claudeTempRoots(),
   uid: number | undefined = process.getuid?.(),
 ): Promise<string | null> {
   if (uid === undefined || !transcript.endsWith(".jsonl")) return null;

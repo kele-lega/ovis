@@ -7,7 +7,8 @@
 .key-bar-settings-list {
   margin: 0;
   padding: 0;
-  overflow: hidden;
+  /* Clip the rounded corners without trapping a row swipe in a nested scroll container. */
+  overflow: clip;
   list-style: none;
   border: var(--hairline) solid var(--border);
   border-radius: var(--radius-md);
@@ -22,16 +23,51 @@
   align-items: center;
   gap: var(--space-2);
   min-height: var(--touch-target);
-  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+  padding: var(--space-1);
 }
 
 .key-bar-settings-row + .key-bar-settings-row {
   border-top: var(--hairline) solid var(--border);
 }
 
+.key-bar-settings-handle {
+  display: flex;
+  flex: 0 0 var(--touch-target);
+  align-items: center;
+  justify-content: center;
+  min-width: var(--touch-target);
+  min-height: var(--touch-target);
+  color: var(--text-dim);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.key-bar-settings-handle svg {
+  width: var(--icon-size);
+  height: var(--icon-size);
+  pointer-events: none;
+}
+
+.key-bar-settings-row.is-dragging {
+  background: var(--bg-elevated);
+}
+
+.key-bar-settings-row.is-dragging .key-bar-settings-handle {
+  cursor: grabbing;
+}
+
+.key-bar-settings-row.drop-before {
+  box-shadow: inset 0 var(--space-1) var(--accent);
+}
+
+.key-bar-settings-row.drop-after {
+  box-shadow: inset 0 calc(-1 * var(--space-1)) var(--accent);
+}
+
 .key-bar-settings-cap {
   min-width: 0;
-  overflow: hidden;
+  overflow: clip;
   color: var(--text-strong);
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
@@ -168,4 +204,45 @@
   .key-bar-settings-combo-actions {
     flex-wrap: wrap;
   }
+}
+
+/* PhonePreview: a phone in miniature beside a key bar setting */
+.key-bar-phone {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 22px;
+  height: 36px;
+  padding: 2px;
+  border: 1.5px solid var(--text-dim);
+  border-radius: 5px;
+}
+
+.key-bar-phone-screen {
+  flex: 1 1 auto;
+  border-radius: 1px;
+  background: var(--bg-hover);
+}
+
+.key-bar-phone-bar {
+  flex: none;
+  height: 4px;
+  border-radius: 1px;
+  background: var(--accent);
+}
+
+.key-bar-phone[data-bar="folded"] .key-bar-phone-bar {
+  height: 1px;
+}
+
+.key-bar-phone-keyboard {
+  flex: none;
+  height: 12px;
+  border-radius: 1px;
+  background: var(--text-dim);
+  opacity: 0.55;
+}
+
+.key-bar-phone[data-keyboard="down"] .key-bar-phone-keyboard {
+  display: none;
 }

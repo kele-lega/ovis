@@ -21,6 +21,7 @@ export const SKILL_SYNTAX: Readonly<Record<string, SkillSyntax>> = {
   omp: { skillTriggers: ["/"], inline: ["/"], namespaced: true, chipForms: [] },
   gjc: { skillTriggers: ["/"], inline: [], namespaced: true, chipForms: [] },
   devin: { skillTriggers: ["/"], inline: [], namespaced: true, chipForms: [] },
+  cmd: { skillTriggers: ["/"], inline: [], namespaced: true, chipForms: [] },
   hermes: { skillTriggers: ["/"], inline: [], namespaced: true, chipForms: [] },
   opencode: { skillTriggers: ["/"], inline: [], namespaced: false, chipForms: [] },
   grok: { skillTriggers: ["/"], inline: [], namespaced: false, chipForms: [] },
@@ -28,6 +29,8 @@ export const SKILL_SYNTAX: Readonly<Record<string, SkillSyntax>> = {
   // its menu opens only on a leading `/`, and lists skills as bare `/<skill-id>` rows
   // (letta-code 0.34.23, src/cli/components/SlashCommandAutocomplete.tsx)
   letta: { skillTriggers: ["/"], inline: [], namespaced: false, chipForms: [] },
+  // a direct-call skill joins its command menu as a leading `/name` (dsh-tui 0.17.0 user guide, Skills)
+  "dsh-tui": { skillTriggers: ["/"], inline: [], namespaced: false, chipForms: [] },
 };
 
 export function skillSyntax(agent: string | null | undefined): SkillSyntax {

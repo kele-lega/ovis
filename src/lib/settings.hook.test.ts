@@ -1,22 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { createElement } from "react";
+import { createElement, StrictMode } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { AGENT_COMMANDS_STORAGE_KEY, DEFAULT_SETTINGS, SettingsProvider, useSettings, type Settings } from "./settings.ts";
-import { launchAgent } from "./agentLaunchMode.ts";
+import { COMPOSER_ARTIFACTS_STORAGE_KEY, DEFAULT_SETTINGS, ENTER_SENDS_STORAGE_KEY, enterSendsOn, SettingsProvider, useSettings, VOICE_ENGINE_STORAGE_KEY, type Settings } from "./settings.ts";
 import { SETTINGS_STORAGE_KEY } from "./themeBoot.ts";
 
 describe("settings across tabs", () => {
   const descriptors = new Map<string, PropertyDescriptor | undefined>();
   let records: Map<string, string>;
   let events: EventTarget;
-  let renderers: ReactTestRenderer[];
+  let renderer: ReactTestRenderer | undefined;
   let settings: Settings;
+  let update: (patch: Partial<Settings> | ((current: Settings) => Partial<Settings>)) => void;
   let writes: number;
-  let commandWrites: number;
-  let writeAttempts: number;
-  let storageBlocked: boolean;
-  let quotaKey: string | null;
-  type Client = Pick<ReturnType<typeof useSettings>, "settings" | "update">;
+  let full: boolean;
+  let unreadable: boolean;
 
   beforeEach(() => {
     for (const key of ["window", "document", "navigator", "getComputedStyle", "IS_REACT_ACT_ENVIRONMENT"]) {
@@ -24,29 +21,16 @@ describe("settings across tabs", () => {
     }
     records = new Map();
     events = new EventTarget();
-    renderers = [];
     settings = DEFAULT_SETTINGS;
     writes = 0;
-    commandWrites = 0;
-    writeAttempts = 0;
-    storageBlocked = false;
-    quotaKey = null;
+    full = false;
+    unreadable = false;
     Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
     Object.defineProperty(globalThis, "navigator", { configurable: true, value: { languages: ["en-US"] } });
     Object.defineProperty(globalThis, "window", { configurable: true, value: {
       localStorage: {
-        getItem: (key: string) => {
-          if (storageBlocked) throw new Error("Storage is blocked");
-          return records.get(key) ?? null;
-        },
-        setItem: (key: string, value: string) => {
-          writeAttempts++;
-          if (storageBlocked) throw new Error("Storage is blocked");
-          if (quotaKey === "all" || quotaKey === key) throw new DOMException("Storage quota exceeded", "QuotaExceededError");
-          writes++;
-          if (key === AGENT_COMMANDS_STORAGE_KEY) commandWrites++;
-          records.set(key, value);
-        },
+        getItem: (key: string) => { if (unreadable) throw new Error("SecurityError"); return records.get(key) ?? null; },
+        setItem: (key: string, value: string) => { if (full) throw new Error("QuotaExceededError"); writes++; records.set(key, value); },
       },
       addEventListener: events.addEventListener.bind(events),
       removeEventListener: events.removeEventListener.bind(events),
@@ -59,7 +43,8 @@ describe("settings across tabs", () => {
   });
 
   afterEach(async () => {
-    await act(async () => { for (const renderer of renderers) renderer.unmount(); });
+    await act(async () => { renderer?.unmount(); });
+    renderer = undefined;
     for (const [key, descriptor] of descriptors) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);
       else Reflect.deleteProperty(globalThis, key);
@@ -67,17 +52,13 @@ describe("settings across tabs", () => {
     descriptors.clear();
   });
 
-  async function open(): Promise<Client> {
-    const client: Client = { settings: DEFAULT_SETTINGS, update: () => { throw new Error("not mounted"); } };
+  async function open(strict = false): Promise<void> {
     function Probe() {
-      const context = useSettings();
-      settings = context.settings;
-      client.settings = context.settings;
-      client.update = context.update;
+      ({ settings, update } = useSettings());
       return null;
     }
-    await act(async () => { renderers.push(create(createElement(SettingsProvider, null, createElement(Probe)))); });
-    return client;
+    const tree = createElement(SettingsProvider, null, createElement(Probe));
+    await act(async () => { renderer = create(strict ? createElement(StrictMode, null, tree) : tree); });
   }
 
   async function storage(key: string | null): Promise<void> {
@@ -117,6 +98,203 @@ describe("settings across tabs", () => {
     expect(settings.shortcutOverrides).toEqual({});
   });
 
+  it("keeps another tab's change when this tab saves an unrelated setting", async () => {
+    // Given a tab opened before another tab chose a wide chat and the Artifacts chip.
+    await open();
+    records.set(SETTINGS_STORAGE_KEY, JSON.stringify({ language: "en", chatWidth: "wide" }));
+    records.set(COMPOSER_ARTIFACTS_STORAGE_KEY, "true");
+
+    // When this tab changes its terminal font size.
+    await act(async () => { update({ terminalFontSize: 20 }); });
+
+    // Then the stored settings hold both tabs' changes.
+    const stored = JSON.parse(records.get(SETTINGS_STORAGE_KEY) ?? "{}") as Partial<Settings>;
+    expect([stored.chatWidth, stored.language, stored.terminalFontSize]).toEqual(["wide", "en", 20]);
+    expect(records.get(COMPOSER_ARTIFACTS_STORAGE_KEY)).toBe("true");
+    expect(settings.terminalFontSize).toBe(20);
+  });
+
+  it("leaves another tab's change when this tab is handed a value it already holds", async () => {
+    // Given an open tab, and another tab that chose Korean since.
+    await open();
+    records.set(SETTINGS_STORAGE_KEY, JSON.stringify({ language: "ko" }));
+
+    // When this tab is handed the language it already shows, and another setting.
+    await act(async () => { update({ language: DEFAULT_SETTINGS.language, terminalFontSize: 20 }); });
+
+    // Then the other tab's language stays stored.
+    const stored = JSON.parse(records.get(SETTINGS_STORAGE_KEY) ?? "{}") as Partial<Settings>;
+    expect([stored.language, stored.terminalFontSize]).toEqual(["ko", 20]);
+  });
+
+  it("stores a change whose save failed with this tab's next save", async () => {
+    // Given a tab whose font size change found storage full.
+    await open();
+    full = true;
+    await act(async () => { update({ terminalFontSize: 20 }); });
+    full = false;
+
+    // When it saves another setting once storage has room.
+    await act(async () => { update({ chatWidth: "wide" }); });
+
+    // Then both changes are stored.
+    const stored = JSON.parse(records.get(SETTINGS_STORAGE_KEY) ?? "{}") as Partial<Settings>;
+    expect([stored.terminalFontSize, stored.chatWidth]).toEqual([20, "wide"]);
+  });
+
+  it("reads what this tab holds for a change made from it, while storage refuses every write (#2977)", async () => {
+    // Given a tab whose storage refuses writes, and a lock it holds only in memory.
+    await open();
+    full = true;
+    await act(async () => { update({ lockedAgents: ["pc:w1:p1"] }); });
+
+    // When two changes are made from what it holds, in one turn.
+    await act(async () => {
+      update((current) => ({ lockedAgents: current.lockedAgents.map((key) => key === "pc:w1:p1" ? "pc:w2:p1" : key) }));
+      update((current) => ({ lockedAgents: [...current.lockedAgents, "pc:w1:p3"] }));
+    });
+
+    // Then each reads the one before it: the lock moved, and the second one is kept with it.
+    expect(settings.lockedAgents).toEqual(["pc:w2:p1", "pc:w1:p3"]);
+  });
+
+  const move = (current: Settings): Partial<Settings> => ({ lockedAgents: current.lockedAgents.map((key) => key === "pc:w1:p1" ? "pc:w2:p1" : key) });
+
+  it.each([false, true])("makes a change from what another tab saved since this one heard, keeping the rest of it (#2977), StrictMode %p", async (strict) => {
+    // Given a tab opened before another tab of this browser locked two panes.
+    await open(strict);
+    records.set(SETTINGS_STORAGE_KEY, JSON.stringify({ lockedAgents: ["pc:w1:p1", "pc:w1:p2"] }));
+
+    // When this tab moves one pane's lock.
+    await act(async () => { update(move); });
+
+    // Then both locks are kept, the moved one under its new ID, in this tab and in storage.
+    expect(settings.lockedAgents).toEqual(["pc:w2:p1", "pc:w1:p2"]);
+    expect((JSON.parse(records.get(SETTINGS_STORAGE_KEY) ?? "{}") as Partial<Settings>).lockedAgents).toEqual(["pc:w2:p1", "pc:w1:p2"]);
+  });
+
+  it("keeps what this tab holds when storage stops reading after it loaded (#2977)", async () => {
+    // Given a tab that loaded two locks, and storage that then refuses reads and writes.
+    records.set(SETTINGS_STORAGE_KEY, JSON.stringify({ lockedAgents: ["pc:w1:p1", "pc:w1:p2"] }));
+    await open();
+    unreadable = true;
+    full = true;
+
+    // When the pane moves.
+    await act(async () => { update(move); });
+
+    // Then both locks are kept, the moved one under its new ID.
+    expect(settings.lockedAgents).toEqual(["pc:w2:p1", "pc:w1:p2"]);
+  });
+
+  it("keeps what this tab holds when the stored record is broken", async () => {
+    // Given a tab that loaded two locks, and a record that then no longer parses.
+    records.set(SETTINGS_STORAGE_KEY, JSON.stringify({ lockedAgents: ["pc:w1:p1", "pc:w1:p2"] }));
+    await open();
+    records.set(SETTINGS_STORAGE_KEY, "{broken");
+
+    // When the pane moves.
+    await act(async () => { update(move); });
+
+    // Then both locks are kept, the moved one under its new ID.
+    expect(settings.lockedAgents).toEqual(["pc:w2:p1", "pc:w1:p2"]);
+  });
+
+  it("keeps this tab's change that storage refused over storage's older copy", async () => {
+    // Given a lock this tab stored, then removed while storage refused the write.
+    await open();
+    await act(async () => { update({ lockedAgents: ["pc:w1:p1"] }); });
+    full = true;
+    await act(async () => { update({ lockedAgents: [] }); });
+
+    // When the pane moves.
+    await act(async () => { update(move); });
+
+    // Then the removed lock does not come back from storage.
+    expect(settings.lockedAgents).toEqual([]);
+  });
+
+  it("breaks the line on Return on a touch screen until this device chooses, and Enter still sends on a desk", async () => {
+    // Given a record an older version saved whole after an unrelated change: its enterSends: true was never chosen.
+    records.set(SETTINGS_STORAGE_KEY, JSON.stringify({ enterSends: true, terminalFontSize: 20 }));
+
+    // When the tab opens.
+    await open();
+
+    // Then nothing is chosen: a touch screen's Return breaks the line, a desk's Enter sends.
+    expect(settings.enterSends).toBeNull();
+    expect([enterSendsOn(settings, true), enterSendsOn(settings, false)]).toEqual([false, true]);
+
+    // And an unrelated save stores no choice for it, and leaves the record the boolean an older tab reads.
+    await act(async () => { update({ chatWidth: "wide" }); });
+    expect(records.get(ENTER_SENDS_STORAGE_KEY)).toBe("null");
+    expect((JSON.parse(records.get(SETTINGS_STORAGE_KEY) ?? "{}") as Partial<Settings>).enterSends).toBe(true);
+  });
+
+  it("keeps this device's choice when an older tab rewrites the record it loaded before", async () => {
+    // Given an older tab that loaded the unchosen record (enterSends: true).
+    records.set(SETTINGS_STORAGE_KEY, JSON.stringify({ enterSends: true }));
+    const stale = records.get(SETTINGS_STORAGE_KEY)!;
+
+    // When this version chooses Return breaks the line, and the older tab then saves an unrelated setting whole.
+    await open();
+    await act(async () => { update({ enterSends: false }); });
+    records.set(SETTINGS_STORAGE_KEY, JSON.stringify({ ...JSON.parse(stale), terminalFontSize: 18 }));
+    await act(async () => { renderer?.unmount(); });
+    await open();
+
+    // Then the choice holds after the reload.
+    expect(settings.enterSends).toBe(false);
+    expect(settings.terminalFontSize).toBe(18);
+  });
+
+  it("keeps a choice made before: the old record's false, and this key's own true or false", async () => {
+    // Given Return set to break the line under the old version, which could only be chosen.
+    records.set(SETTINGS_STORAGE_KEY, JSON.stringify({ enterSends: false }));
+    await open();
+
+    // Then it holds on a touch screen and a desk alike.
+    expect([enterSendsOn(settings, true), enterSendsOn(settings, false)]).toEqual([false, false]);
+
+    // When this device turns Enter sends back on.
+    await act(async () => { update({ enterSends: true }); });
+
+    // Then the choice is stored in its own key and survives the next load, a touch screen's included.
+    expect(records.get(ENTER_SENDS_STORAGE_KEY)).toBe("true");
+    await act(async () => { renderer?.unmount(); });
+    await open();
+    expect(settings.enterSends).toBe(true);
+    expect(enterSendsOn(settings, true)).toBe(true);
+  });
+
+  it("follows Return's choice made in another tab", async () => {
+    // Given an open tab with nothing chosen.
+    await open();
+    expect(settings.enterSends).toBeNull();
+
+    // When another tab chooses Return breaks the line.
+    records.set(ENTER_SENDS_STORAGE_KEY, "false");
+    await storage(ENTER_SENDS_STORAGE_KEY);
+
+    // Then this tab's composer follows it without writing anything.
+    expect(settings.enterSends).toBe(false);
+    expect(writes).toBe(0);
+  });
+
+  it("follows the speech recognition chosen in another tab", async () => {
+    // Given an open tab on Auto.
+    await open();
+    expect(settings.voiceEngine).toBe("auto");
+
+    // When another tab chooses the browser's recognition.
+    records.set(VOICE_ENGINE_STORAGE_KEY, JSON.stringify("browser"));
+    await storage(VOICE_ENGINE_STORAGE_KEY);
+
+    // Then this tab's next dictation uses it too, without writing anything.
+    expect(settings.voiceEngine).toBe("browser");
+    expect(writes).toBe(0);
+  });
+
   it("ignores storage events for unrelated keys", async () => {
     // Given an open tab and a settings record not announced by this event.
     await open();
@@ -127,190 +305,5 @@ describe("settings across tabs", () => {
 
     // Then the shortcut state stays as it was.
     expect(settings.shortcutOverrides).toEqual({});
-  });
-
-  it("adopts another tab's saved command without echoing storage or changing unrelated settings", async () => {
-    const a = await open();
-    const b = await open();
-    const agentCommands = { codex: "  wrapper --profile 'work profile'  " };
-    await act(async () => { a.update({ agentCommands }); });
-    expect(b.settings.agentCommands).toEqual({});
-    const savedWrites = writes;
-
-    await storage(AGENT_COMMANDS_STORAGE_KEY);
-
-    expect(b.settings.agentCommands).toEqual(agentCommands);
-    expect(launchAgent("codex", b.settings)).toEqual({ kind: "codex", command: agentCommands.codex });
-    expect(b.settings.terminalFontSize).toBe(DEFAULT_SETTINGS.terminalFontSize);
-    expect(writes).toBe(savedWrites);
-  });
-
-  it("keeps another tab's latest command on an unrelated edit before a storage event arrives", async () => {
-    // No preferences-sync hook is mounted: shared localStorage is the only connection between tabs.
-    const a = await open();
-    const b = await open();
-    const agentCommands = { codex: "  wrapper --profile work  " };
-    await act(async () => { a.update({ agentCommands }); });
-    expect(b.settings.agentCommands).toEqual({});
-    expect(commandWrites).toBe(1);
-
-    await act(async () => { b.update({ terminalFontSize: 22 }); });
-
-    expect(JSON.parse(records.get(AGENT_COMMANDS_STORAGE_KEY)!)).toEqual(agentCommands);
-    expect(b.settings.agentCommands).toEqual(agentCommands);
-    expect(launchAgent("codex", b.settings)).toEqual({ kind: "codex", command: agentCommands.codex });
-    expect(b.settings.terminalFontSize).toBe(22);
-    expect(commandWrites).toBe(1);
-    const savedWrites = writes;
-    await storage(AGENT_COMMANDS_STORAGE_KEY);
-    expect(b.settings.agentCommands).toEqual(agentCommands);
-    expect(writes).toBe(savedWrites);
-  });
-
-  it("lets an explicit Clear win from a stale tab and does not resurrect it on a missed event", async () => {
-    const a = await open();
-    const b = await open();
-    await act(async () => { a.update({ agentCommands: { codex: "wrapper" } }); });
-    // B still has {}, but its explicit Clear must replace the newer saved command.
-    await act(async () => { b.update({ agentCommands: {} }); });
-    expect(JSON.parse(records.get(AGENT_COMMANDS_STORAGE_KEY)!)).toEqual({});
-    expect(b.settings.agentCommands).toEqual({});
-    expect(commandWrites).toBe(2);
-
-    await act(async () => { a.update({ terminalFontSize: 22 }); });
-
-    expect(a.settings.agentCommands).toEqual({});
-    expect(launchAgent("codex", a.settings)).not.toHaveProperty("command");
-    expect(JSON.parse(records.get(AGENT_COMMANDS_STORAGE_KEY)!)).toEqual({});
-    expect(commandWrites).toBe(2);
-  });
-
-  it("persists an explicit remote-preferences command patch over the saved map and shares its clearing", async () => {
-    const a = await open();
-    const b = await open();
-    await act(async () => { a.update({ agentCommands: { codex: "local-wrapper" } }); });
-    const agentCommands = { claude: "  remote-wrapper --profile 'two words'  " };
-    // usePreferencesSync applies remote settings through this same explicit update patch.
-    await act(async () => { b.update({ agentCommands }); });
-    expect(JSON.parse(records.get(AGENT_COMMANDS_STORAGE_KEY)!)).toEqual(agentCommands);
-    expect(b.settings.agentCommands).toEqual(agentCommands);
-    await act(async () => { a.update({ terminalFontSize: 22 }); });
-    expect(launchAgent("claude", a.settings)).toEqual({ kind: "claude", command: agentCommands.claude });
-
-    await act(async () => { b.update({ agentCommands: {} }); });
-    const savedWrites = writes;
-    await storage(AGENT_COMMANDS_STORAGE_KEY);
-    expect(a.settings.agentCommands).toEqual({});
-    expect(launchAgent("claude", a.settings)).not.toHaveProperty("command");
-    expect(JSON.parse(records.get(AGENT_COMMANDS_STORAGE_KEY)!)).toEqual({});
-    expect(writes).toBe(savedWrites);
-  });
-
-  it.each([AGENT_COMMANDS_STORAGE_KEY, null])("clears mounted commands without writing when storage is removed with key %j", async (key) => {
-    records.set(AGENT_COMMANDS_STORAGE_KEY, JSON.stringify({ codex: "wrapper" }));
-    const client = await open();
-    expect(client.settings.agentCommands).toEqual({ codex: "wrapper" });
-    records.clear();
-
-    await storage(key);
-
-    expect(client.settings.agentCommands).toEqual({});
-    expect(launchAgent("codex", client.settings)).not.toHaveProperty("command");
-    expect(writes).toBe(0);
-  });
-
-  it("sanitizes a command storage event without saving a corrective map", async () => {
-    const client = await open();
-    records.set(AGENT_COMMANDS_STORAGE_KEY, JSON.stringify({ codex: "bad\ncommand", claude: "  wrapper  " }));
-
-    await storage(AGENT_COMMANDS_STORAGE_KEY);
-
-    expect(client.settings.agentCommands).toEqual({ claude: "  wrapper  " });
-    expect(writes).toBe(0);
-  });
-
-  it.each(["all", AGENT_COMMANDS_STORAGE_KEY])("keeps an explicit session command through quota failures at %s until a later update persists it", async (key) => {
-    const client = await open();
-    quotaKey = key;
-    const agentCommands = { codex: "  wrapper --profile 'session only'  " };
-    await act(async () => { client.update({ agentCommands }); });
-    expect(client.settings.agentCommands).toEqual(agentCommands);
-    expect(window.localStorage.getItem(AGENT_COMMANDS_STORAGE_KEY)).toBeNull();
-
-    await act(async () => { client.update({ terminalFontSize: 22 }); });
-    expect(client.settings.agentCommands).toEqual(agentCommands);
-    expect(launchAgent("codex", client.settings)).toEqual({ kind: "codex", command: agentCommands.codex });
-    const attempts = writeAttempts;
-    await storage(AGENT_COMMANDS_STORAGE_KEY);
-    await storage(null);
-    expect(client.settings.agentCommands).toEqual(agentCommands);
-    expect(writeAttempts).toBe(attempts);
-
-    quotaKey = null;
-    await act(async () => { client.update({ terminalFontSize: 23 }); });
-    expect(JSON.parse(records.get(AGENT_COMMANDS_STORAGE_KEY)!)).toEqual(agentCommands);
-    expect(commandWrites).toBe(1);
-    // Once persisted, the map is no longer pending: a later other-tab save can replace it.
-    records.set(AGENT_COMMANDS_STORAGE_KEY, JSON.stringify({ codex: "other-tab-wrapper" }));
-    const persistedAttempts = writeAttempts;
-    await storage(AGENT_COMMANDS_STORAGE_KEY);
-    expect(client.settings.agentCommands).toEqual({ codex: "other-tab-wrapper" });
-    expect(writeAttempts).toBe(persistedAttempts);
-  });
-
-  it.each(["all", AGENT_COMMANDS_STORAGE_KEY])("keeps explicit Clear in session when the old saved map is readable but writes fail at %s", async (key) => {
-    const previous = { codex: "previous-wrapper" };
-    records.set(AGENT_COMMANDS_STORAGE_KEY, JSON.stringify(previous));
-    const client = await open();
-    quotaKey = key;
-    await act(async () => { client.update({ agentCommands: {} }); });
-    expect(client.settings.agentCommands).toEqual({});
-    expect(JSON.parse(window.localStorage.getItem(AGENT_COMMANDS_STORAGE_KEY)!)).toEqual(previous);
-
-    await act(async () => { client.update({ terminalFontSize: 22 }); });
-    const attempts = writeAttempts;
-    await storage(AGENT_COMMANDS_STORAGE_KEY);
-    await storage(null);
-    expect(client.settings.agentCommands).toEqual({});
-    expect(launchAgent("codex", client.settings)).not.toHaveProperty("command");
-    expect(writeAttempts).toBe(attempts);
-
-    quotaKey = null;
-    await act(async () => { client.update({ terminalFontSize: 23 }); });
-    expect(JSON.parse(records.get(AGENT_COMMANDS_STORAGE_KEY)!)).toEqual({});
-    expect(commandWrites).toBe(1);
-    records.set(AGENT_COMMANDS_STORAGE_KEY, JSON.stringify({ codex: "new-other-tab-wrapper" }));
-    await storage(AGENT_COMMANDS_STORAGE_KEY);
-    expect(client.settings.agentCommands).toEqual({ codex: "new-other-tab-wrapper" });
-  });
-
-  it("replaces a quota-pending command with a newer explicit remote-preferences patch", async () => {
-    const client = await open();
-    quotaKey = AGENT_COMMANDS_STORAGE_KEY;
-    await act(async () => { client.update({ agentCommands: { codex: "local-session-wrapper" } }); });
-    const agentCommands = { claude: "remote-wrapper" };
-    await act(async () => { client.update({ agentCommands }); });
-    await storage(AGENT_COMMANDS_STORAGE_KEY);
-    expect(client.settings.agentCommands).toEqual(agentCommands);
-    quotaKey = null;
-
-    await act(async () => { client.update({ terminalFontSize: 22 }); });
-
-    expect(client.settings.agentCommands).toEqual(agentCommands);
-    expect(JSON.parse(records.get(AGENT_COMMANDS_STORAGE_KEY)!)).toEqual(agentCommands);
-    expect(launchAgent("claude", client.settings)).toEqual({ kind: "claude", command: agentCommands.claude });
-  });
-
-  it("keeps session-only commands on unrelated edits when storage cannot be read", async () => {
-    const client = await open();
-    storageBlocked = true;
-    const agentCommands = { codex: "wrapper" };
-    await act(async () => { client.update({ agentCommands }); });
-
-    await act(async () => { client.update({ terminalFontSize: 22 }); });
-
-    expect(client.settings.agentCommands).toEqual(agentCommands);
-    expect(client.settings.terminalFontSize).toBe(22);
-    expect(writes).toBe(0);
   });
 });

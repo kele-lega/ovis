@@ -1,7 +1,8 @@
 /**
  * The key bar's keyboard control (#1046) on the real client over the demo's fixture transport, as a
  * phone: Show focuses the field of the current input mode inside the tap, Hide blurs this pane's
- * field, the pressed state follows what lib/viewport.ts measured, and none of it sends a key,
+ * field, the label and pressed state say what the tap asked for (lib/keyboardControl.ts holds the
+ * tap's word until the measurement confirms it or the settle window runs out), and none of it sends
  * changes the input mode, fits or resizes the shared grid. A composition in either field refuses
  * the tap and keeps its word; a sibling pane's field is never touched; an observer has no control,
  * and a held, ended or offline pane a disabled one. Chromium's synthetic viewport geometry stands
@@ -21,6 +22,7 @@ import panes from "../site/demo/fixtures/panes.json";
 import { buildDemoApp } from "./demo-build.ts";
 import { chromePath } from "./chrome-path.ts";
 import { appFaces } from "./app-faces.ts";
+import { shownRow, shownRows } from "./shown-rows.ts";
 
 const SETTINGS_KEY = "ovis:settings";
 const PREFIX = "/herdr-web-ui/demo/app/";
@@ -127,7 +129,7 @@ async function open(context: BrowserContext, clock = false): Promise<{ page: Pag
   if (clock) await page.clock.install();
   await page.goto(`${origin}?pane=${encodeURIComponent(panes.shell)}&view=terminal`);
   await page.locator(".conn-live").waitFor({ state: "attached" });
-  await page.locator(".pane-frame:not(.is-hidden) .xterm-rows").waitFor();
+  await page.locator(shownRows(".pane-frame:not(.is-hidden)")).waitFor();
   await appFaces(page);
   return { page, errors };
 }
@@ -152,10 +154,32 @@ const nextRender = (page: Page): Promise<void> => page.evaluate(() => new Promis
 const keyOf = (page: Page): Locator => page.locator('.pane-frame:not(.is-hidden) .key-bar [data-key="keyboard"]');
 const lineOf = (page: Page): Locator => page.locator(".pane-frame:not(.is-hidden) .terminal-input-text");
 
+/**
+ * Taps the control and reads its own label, pressed state and the field in the same evaluate, as
+ * the direct-commit check does with key.click(): the tap's word must be read inside its settle
+ * window, which the page's real clock could otherwise outlast in a slow run and flip the assertion
+ * into the settled state. React commits the store's change after the click returns (its microtask,
+ * then its scheduler's MessageChannel task), so the label is read once both have run.
+ */
+const tapAndState = (page: Page): Promise<{ label: string | null; pressed: string | null; active: string | null; keyboard: boolean }> =>
+  page.evaluate(async () => {
+    const key = document.querySelector<HTMLButtonElement>('.pane-frame:not(.is-hidden) .key-bar [data-key="keyboard"]')!;
+    key.click();
+    const active = document.activeElement;
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    await new Promise<void>((resolve) => { const channel = new MessageChannel(); channel.port1.onmessage = () => resolve(); channel.port2.postMessage(null); });
+    return {
+      label: key.getAttribute("aria-label"),
+      pressed: key.getAttribute("aria-pressed"),
+      active: active instanceof HTMLElement && active !== document.body ? active.className : null,
+      keyboard: document.documentElement.hasAttribute("data-keyboard"),
+    };
+  });
+
 const ready = (page: Page): Promise<unknown> =>
   page.waitForFunction(() => document.querySelector<HTMLButtonElement>('.pane-frame:not(.is-hidden) .key-bar [data-key="keyboard"]')?.disabled === false);
 
-const control = (page: Page): Promise<ControlState> => page.evaluate(() => {
+const control = (page: Page): Promise<ControlState> => page.evaluate((row) => {
   const frame = document.querySelector(".pane-frame:not(.is-hidden)");
   const key = frame?.querySelector<HTMLButtonElement>('.key-bar [data-key="keyboard"]') ?? null;
   const active = document.activeElement;
@@ -171,11 +195,11 @@ const control = (page: Page): Promise<ControlState> => page.evaluate(() => {
     keyboard: document.documentElement.hasAttribute("data-keyboard"),
     active: active instanceof HTMLElement && active !== document.body ? active.className : null,
     direct: document.querySelector("[data-direct-typing]") !== null,
-    grid: { rows: frame?.querySelectorAll(".xterm-rows > div").length ?? 0, width: Math.round(screen?.width ?? 0), height: Math.round(screen?.height ?? 0) },
+    grid: { rows: document.querySelectorAll(row).length, width: Math.round(screen?.width ?? 0), height: Math.round(screen?.height ?? 0) },
     settings: localStorage.getItem("ovis:settings"),
     frames: (window as unknown as QaWindow).sentFrames.map((frame) => frame.type),
   };
-});
+}, shownRow(".pane-frame:not(.is-hidden)"));
 
 const lineState = (page: Page): Promise<[string, number | null, number | null]> =>
   lineOf(page).evaluate((node: HTMLTextAreaElement) => [node.value, node.selectionStart, node.selectionEnd]);
@@ -230,14 +254,24 @@ const role = (page: Page, mode: "observe" | "interact"): Promise<void> =>
 /**
  * The mode switch beside the control. The input line's slot keeps a row of the grid: leaving or
  * entering line mode changes the host, and the fit that follows resizes the pty. That resize is
- * the switch's own, so a cycle's baseline is taken after it is on the wire.
+ * the switch's own, so a cycle's baseline is taken after it is on the wire. With the keyboard
+ * measured up the grid under it is held (#1045): no fit, and no resize, follows the switch then.
  */
 async function switchMode(page: Page, to: "line" | "direct"): Promise<void> {
   const before = await control(page);
   await page.locator('.pane-frame:not(.is-hidden) .key-bar [data-key="direct"]').tap();
   if (to === "direct") await page.locator("[data-direct-typing]").waitFor();
   else await page.locator("[data-direct-typing]").waitFor({ state: "detached" });
-  await page.waitForFunction((rows) => document.querySelectorAll(".pane-frame:not(.is-hidden) .xterm-rows > div").length !== rows, before.grid.rows);
+  if (before.keyboard) {
+    await ready(page);
+    // whatever the switch scheduled (a fit RESIZE_SETTLE_MS later) has run before the grid is read
+    await flushTimers(page);
+    const after = await control(page);
+    assert.deepEqual(after.grid, before.grid, `the switch under a keyboard keeps the grid (#1045)`);
+    assert.deepEqual(after.frames.slice(before.frames.length).filter((type) => type === "resize"), [], "and sends no resize");
+    return;
+  }
+  await page.waitForFunction(({ rows, row }) => document.querySelectorAll(row).length !== rows, { rows: before.grid.rows, row: shownRow(".pane-frame:not(.is-hidden)") });
   await page.waitForFunction((count) => (window as unknown as QaWindow).sentFrames.filter((frame) => frame.type === "resize").length > count, before.frames.filter((type) => type === "resize").length);
   await ready(page);
 }
@@ -253,8 +287,8 @@ async function currentModeKeyboard(browser: Browser): Promise<Record<string, unk
     const cycles: Record<string, unknown>[] = [];
     for (const mode of ["line", "direct"] as const) {
       if (mode === "direct") {
-        // the switch beside it is the other control: it changes the typing, and focuses the grid
-        // as it turns on; the cycle starts as a reader has it, keyboard down and nothing focused
+        // the switch beside it is the other control: it changes the typing, and with the keyboard
+        // down focuses nothing; the cycle starts as a reader has it, keyboard down and nothing focused
         await switchMode(page, "direct");
         await blur(page);
       }
@@ -263,10 +297,9 @@ async function currentModeKeyboard(browser: Browser): Promise<Record<string, unk
       assert.deepEqual([before.keyboard, before.pressed, before.label, before.active], [false, "false", "Show keyboard", null], `${mode}: at rest, keyboard down (${JSON.stringify(before)})`);
       assert.deepEqual([before.title, before.tabIndex], ["Show keyboard", 0], `${mode}: the icon-only control has its name as a tooltip and is a Tab stop`);
       assert.equal(before.direct, mode === "direct");
-      await key.tap();
-      const shown = await control(page);
+      const shown = await tapAndState(page);
       assert.equal(shown.active, field, `${mode}: Show focuses the mode's own field inside the tap`);
-      assert.deepEqual([shown.pressed, shown.label], ["false", "Show keyboard"], `${mode}: a focus alone is not a keyboard: the state waits for the measurement`);
+      assert.deepEqual([shown.pressed, shown.label], ["true", "Hide keyboard"], `${mode}: the tap's word is the truth at once: the control puts the keyboard away on the next tap`);
       let draft: [string, number | null, number | null] | null = null;
       if (mode === "line") {
         await page.keyboard.type("echo 한글 draft");
@@ -280,10 +313,9 @@ async function currentModeKeyboard(browser: Browser): Promise<Record<string, unk
       assert.equal(up.title, "Hide keyboard", `${mode}: the tooltip follows the measured state`);
       assert.deepEqual(up.grid, before.grid, `${mode}: the grid under the keyboard stays (#1045)`);
       if (mode === "line") assert.deepEqual(await lineState(page), draft, `${mode}: the draft and its caret stay`);
-      await key.tap();
-      const hidden = await control(page);
+      const hidden = await tapAndState(page);
       assert.notEqual(hidden.active, field, `${mode}: Hide blurs the field`);
-      assert.deepEqual([hidden.pressed, hidden.label], ["true", "Hide keyboard"], `${mode}: the state stays the measured one until the keyboard is gone, not a guess`);
+      assert.deepEqual([hidden.pressed, hidden.label], ["false", "Show keyboard"], `${mode}: the blur left no field focused anywhere, so the keyboard is going, and the label says so at once`);
       if (mode === "line") assert.deepEqual(await lineState(page), draft, `${mode}: a blurred line keeps its draft and caret`);
       await lower(page);
       const down = await control(page);
@@ -312,9 +344,254 @@ async function currentModeKeyboard(browser: Browser): Promise<Record<string, unk
     assert.deepEqual([routeAfter.active, routeAfter.direct, routeAfter.settings], ["terminal-input-text", false, routeBefore.settings], "Enter on the control focused from the keyboard shows the line's keyboard, mode and settings unchanged");
     assert.deepEqual(routeAfter.frames.slice(routeBefore.frames.length).filter((type) => FORBIDDEN.has(type)), [], `the keyboard route sends nothing (${routeAfter.frames.slice(routeBefore.frames.length).join(", ") || "no frame"})`);
     console.log(`PASS keyboard route: Tab reaches the control (${route.join(" -> ")}) with a focus-visible ring, and Enter on it focuses the input line, sending nothing`);
+
+    // Android's back gesture puts the keyboard away and leaves the field focused (as the route left
+    // it): the field keeps its focus through the down, and Show re-raises the keyboard by blur and
+    // refocus inside the tap, the new input session a phone raises for
+    const gesture = await control(page);
+    assert.deepEqual([gesture.active, gesture.keyboard], ["terminal-input-text", false], "the gesture model: the field keeps its focus with the keyboard measured down");
+    // the already focused branch must do more than nothing: the line loses and takes the focus again
+    // inside the tap — the blur-and-refocus that is a phone's new input session
+    await page.evaluate(() => {
+      const line = document.querySelector<HTMLTextAreaElement>(".pane-frame:not(.is-hidden) .terminal-input-text")!;
+      const counts = { focusin: 0, focusout: 0 };
+      line.addEventListener("focusin", () => counts.focusin++);
+      line.addEventListener("focusout", () => counts.focusout++);
+      (window as unknown as { lineMoves: typeof counts }).lineMoves = counts;
+    });
+    const tapWord = await tapAndState(page);
+    await raise(page);
+    const reRaised = await control(page);
+    const moves = await page.evaluate(() => (window as unknown as { lineMoves: { focusin: number; focusout: number } }).lineMoves);
+    assert.deepEqual([tapWord.pressed, tapWord.label], ["true", "Hide keyboard"], "the tap's word is the truth at once, before the geometry answers");
+    assert.deepEqual([reRaised.active, reRaised.keyboard], ["terminal-input-text", true], "Show on the already focused field re-raises the keyboard inside the tap");
+    assert.deepEqual(moves, { focusin: 1, focusout: 1 }, `the re-raise is the blur-and-refocus branch, not a no-op tap (${JSON.stringify(moves)})`);
+    await lineOf(page).evaluate((node: HTMLTextAreaElement) => node.setSelectionRange(node.value.length, node.value.length));
+    await page.keyboard.type(" now");
+    const reTyped = await lineState(page);
+    assert.deepEqual(reTyped, ["echo 한글 draft now", "echo 한글 draft now".length, "echo 한글 draft now".length], "typing lands in the re-raised session's line, the caret at its typed end");
+    console.log("PASS back gesture: Show on a focused field with the keyboard down raises it again, and the line takes keyboard types");
+
+    // the mode switch with the keyboard up: the grid takes it in place, then direct to line hands
+    // it back to the line, focus and all — any drop and raise of the keyboard across the switches
+    // (the one-frame loss a real phone would show) is counted
+    await switchMode(page, "direct");
+    const directUp = await control(page);
+    assert.deepEqual([directUp.active, directUp.keyboard], ["xterm-helper-textarea", true], "line to direct: the grid takes the keyboard in place, which stays up");
+    await page.evaluate(() => {
+      const drops = { removed: 0 };
+      const observer = new MutationObserver(() => { if (!document.documentElement.hasAttribute("data-keyboard")) drops.removed++; });
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-keyboard"] });
+      (window as unknown as { keyDrops: typeof drops }).keyDrops = drops;
+    });
+    await switchMode(page, "line");
+    const handed = await control(page);
+    assert.deepEqual([handed.active, handed.keyboard], ["terminal-input-text", true], "direct to line with the keyboard up: the handoff gives the keyboard to the line, focus and all");
+    await flushTimers(page);
+    const drops = await page.evaluate(() => (window as unknown as { keyDrops: { removed: number } }).keyDrops);
+    assert.deepEqual((await control(page)).keyboard, true, "the keyboard is up after the switch and everything it scheduled");
+    assert.deepEqual(drops.removed, 0, `the keyboard was never dropped across the handoff (${drops.removed})`);
+    console.log("PASS mode handoff: direct to line gives the grid's keyboard to the line, focus and all, with no removal of the measured state across the switch");
+    await key.tap();
+    await lower(page);
+    await blur(page);
+    await flushTimers(page);
+
+    // the mode switch with the keyboard down, a field still focused (the back gesture's state): no
+    // field is focused for the new mode either way, where a focus would raise the keyboard the user
+    // put away
+    await lineOf(page).focus();
+    const lineDown = await control(page);
+    assert.deepEqual([lineDown.active, lineDown.keyboard, lineDown.label], ["terminal-input-text", false, "Show keyboard"], "the line focused with the keyboard measured down");
+    await switchMode(page, "direct");
+    await flushTimers(page);
+    const directDown = await control(page);
+    assert.deepEqual([directDown.direct, directDown.active, directDown.keyboard], [true, null, false], `line to direct with the keyboard down: the grid is not focused, so the keyboard stays down (${JSON.stringify(directDown.active)})`);
+    await page.locator(".pane-frame:not(.is-hidden) .xterm-helper-textarea").focus();
+    const gridDown = await control(page);
+    assert.deepEqual([gridDown.active, gridDown.keyboard, gridDown.label], ["xterm-helper-textarea", false, "Show keyboard"], "the grid focused with the keyboard measured down");
+    await switchMode(page, "line");
+    await flushTimers(page);
+    const lineAgain = await control(page);
+    assert.deepEqual([lineAgain.direct, lineAgain.active, lineAgain.keyboard], [false, null, false], `direct to line with the keyboard down: the line is not focused, so the keyboard stays down (${JSON.stringify(lineAgain.active)})`);
+    console.log("PASS mode switch, keyboard down: neither direction focuses the new mode's field, though the old one kept the focus");
     assert.deepEqual(errors, []);
     return { scenario: "current-mode-keyboard", cycles, keyboardRoute: { route, before: routeBefore, after: routeAfter } };
   } finally { await context.close(); }
+}
+
+// ---- scenario: Settings > Terminal > Keyboard only from the key bar (#1635) ------------------------
+
+/** The mode's field: its inputmode and whether it has the focus. */
+const fieldState = (page: Page, field: string): Promise<{ inputmode: string | null; focused: boolean }> => page.evaluate((field) => {
+  const node = document.querySelector<HTMLElement>(`.pane-frame:not(.is-hidden) .${field}`)!;
+  return { inputmode: node.getAttribute("inputmode"), focused: document.activeElement === node };
+}, field);
+
+/** Taps the control and reads the field's inputmode as the tap's own focus() runs, inside the click. */
+const tapAndInputmode = (page: Page, field: string): Promise<{ atFocus: string | null | undefined; focused: boolean }> => page.evaluate((field) => {
+  const node = document.querySelector<HTMLElement>(`.pane-frame:not(.is-hidden) .${field}`)!;
+  let atFocus: string | null | undefined;
+  node.addEventListener("focus", () => { atFocus = node.getAttribute("inputmode"); }, { once: true });
+  document.querySelector<HTMLButtonElement>('.pane-frame:not(.is-hidden) .key-bar [data-key="keyboard"]')!.click();
+  return { atFocus, focused: document.activeElement === node };
+}, field);
+
+async function keyboardOnRequest(browser: Browser): Promise<Record<string, unknown>> {
+  const results: Record<string, unknown>[] = [];
+  for (const onRequest of [false, true]) {
+    const context = await phone(browser, { language: "en", theme: "dark", terminalInputMode: "line", defaultView: "terminal" });
+    if (onRequest) await context.addInitScript(() => { localStorage.setItem("ovis:terminal-keyboard-on-request", "true"); });
+    try {
+      const { page, errors } = await open(context, true);
+      await ready(page);
+      const held = onRequest ? "none" : null;
+      for (const mode of ["line", "direct"] as const) {
+        if (mode === "direct") await switchMode(page, "direct");
+        await blur(page);
+        await flushTimers(page);
+        const field = mode === "line" ? "terminal-input-text" : "xterm-helper-textarea";
+        const label = `${onRequest ? "on" : "off"}, ${mode}`;
+        assert.equal((await fieldState(page, field)).inputmode, held, `${label}: at rest the field ${onRequest ? "raises no keyboard" : "raises the keyboard as on main"}`);
+        // a tap on the field itself (the line, or the grid in direct typing) focuses it, keyboard or not
+        await page.locator(`.pane-frame:not(.is-hidden) ${mode === "line" ? ".terminal-input-text" : ".xterm-screen"}`).tap();
+        await page.waitForFunction((field) => document.activeElement?.classList.contains(field) === true, field);
+        await flushTimers(page);
+        assert.deepEqual(await fieldState(page, field), { inputmode: held, focused: true }, `${label}: a tap on the field focuses it, ${onRequest ? "with no keyboard" : "raising the keyboard"}`);
+        assert.equal((await control(page)).label, "Show keyboard", `${label}: the control still offers the keyboard`);
+        // Show: the field may raise the keyboard by the time the tap's own focus runs
+        const shown = await tapAndInputmode(page, field);
+        assert.deepEqual(shown, { atFocus: null, focused: true }, `${label}: Show focuses the field with no inputmode inside the tap (${JSON.stringify(shown)})`);
+        await raise(page);
+        await flushTimers(page);
+        assert.deepEqual(await fieldState(page, field), { inputmode: null, focused: true }, `${label}: with the keyboard up the field keeps it`);
+        // the back gesture: the keyboard goes, the field keeps the focus, and the hold comes back
+        await lower(page);
+        await flushTimers(page);
+        assert.deepEqual(await fieldState(page, field), { inputmode: held, focused: true }, `${label}: the keyboard put away by the system holds the field again`);
+        // a keyboard the measurement is blind to (a floating keyboard, a zoomed page): Show's request
+        // outlives the control's settle window, which falls back to the measured "down"
+        await blur(page);
+        await tapAndInputmode(page, field);
+        await flushTimers(page);
+        assert.equal((await control(page)).label, "Show keyboard", `${label}: unmeasured, the control falls back to the measurement`);
+        assert.deepEqual(await fieldState(page, field), { inputmode: null, focused: true }, `${label}: an unmeasured keyboard Show raised is not taken back`);
+        // leaving the pane's fields ends the request: the next tap on them raises nothing
+        await blur(page);
+        await flushTimers(page);
+        assert.equal((await fieldState(page, field)).inputmode, held, `${label}: the focus gone from the pane's fields holds them again`);
+        // Show again, then Hide from the control: the hold comes back as the keyboard goes
+        await tapAndInputmode(page, field);
+        await raise(page);
+        await flushTimers(page);
+        await keyOf(page).tap();
+        await lower(page);
+        await flushTimers(page);
+        assert.deepEqual(await fieldState(page, field), { inputmode: held, focused: false }, `${label}: Hide blurs the field and holds it again`);
+        results.push({ onRequest, mode, field });
+      }
+      if (onRequest) {
+        // offline the control is disabled: the line still takes a draft, so it is not held
+        await switchMode(page, "line");
+        await blur(page);
+        await page.clock.pauseAt(await page.evaluate(() => Date.now()) + FLUSH_MS);
+        await page.evaluate(() => { (window as unknown as QaWindow).recordedSockets.at(-1)!.close(); });
+        await page.waitForFunction(() => document.querySelector<HTMLButtonElement>('.pane-frame:not(.is-hidden) .key-bar [data-key="keyboard"]')?.disabled === true);
+        await lineOf(page).tap();
+        await page.waitForFunction(() => document.activeElement?.classList.contains("terminal-input-text") === true);
+        await nextRender(page);
+        assert.deepEqual(await fieldState(page, "terminal-input-text"), { inputmode: null, focused: true }, "on, offline: with the control disabled a tap on the line raises the keyboard for a draft");
+        await page.keyboard.type("echo draft");
+        await page.clock.resume();
+        // the reconnect is no tap: the line being typed in keeps its keyboard
+        await ready(page);
+        await flushTimers(page);
+        assert.deepEqual(await fieldState(page, "terminal-input-text"), { inputmode: null, focused: true }, "on, back online: the line typed in offline keeps its keyboard");
+      }
+      assert.deepEqual(errors, []);
+      console.log(`PASS keyboard only from the key bar ${onRequest ? "on" : "off"}: line and grid ${onRequest ? "carry inputmode=none until Show, again after Hide or the system's dismissal" : "carry no inputmode, as on main"}`);
+    } finally { await context.close(); }
+  }
+  return { scenario: "keyboard-on-request", results };
+}
+
+// ---- scenario: Settings > Terminal > Fold the key bar (#1531) ---------------------------------------
+
+interface FoldState { bar: boolean; barModeFirst: boolean; lineKeys: string | null; gridHeight: number; slotBottom: number; padBottom: number; viewport: number }
+
+const foldState = (page: Page): Promise<FoldState> => page.evaluate(() => {
+  const frame = document.querySelector(".pane-frame:not(.is-hidden)")!;
+  const line = frame.querySelector(".terminal-input");
+  return {
+    bar: frame.querySelector(".key-bar") !== null,
+    barModeFirst: frame.querySelector('.key-bar-row > [data-key="direct"]:first-child') !== null,
+    lineKeys: frame.querySelector(".terminal-input-keys")?.getAttribute("aria-pressed") ?? null,
+    gridHeight: Math.round(frame.querySelector(".xterm-screen")!.getBoundingClientRect().height),
+    slotBottom: Math.round(frame.querySelector(".terminal-input-slot")?.getBoundingClientRect().bottom ?? 0),
+    padBottom: line ? parseFloat(getComputedStyle(line).paddingBottom) : 0,
+    viewport: window.innerHeight,
+  };
+});
+
+async function foldKeyBar(browser: Browser): Promise<Record<string, unknown>> {
+  const results: Record<string, unknown> = {};
+  for (const fold of [false, true]) {
+    const context = await phone(browser, { language: "en", theme: "dark", terminalInputMode: "line", defaultView: "terminal" });
+    if (fold) await context.addInitScript(() => { localStorage.setItem("ovis:terminal-fold-key-bar", "true"); });
+    try {
+      const { page, errors } = await open(context);
+      const keys = page.locator(".pane-frame:not(.is-hidden) .terminal-input-keys");
+      const bar = page.locator(".pane-frame:not(.is-hidden) .key-bar");
+      if (fold) await keys.waitFor();
+      else await ready(page);
+      await settled(page);
+      const rest = await foldState(page);
+      results[fold ? "on" : "off"] = rest;
+      if (!fold) {
+        assert.deepEqual([rest.bar, rest.barModeFirst, rest.lineKeys], [true, true, null], "off: the key bar stays under the line with its mode key first, as on main");
+        assert.deepEqual(errors, []);
+        console.log("PASS fold the key bar off: the key bar and its mode key under the input line, as on main");
+        continue;
+      }
+      const off = results["off"] as FoldState;
+      assert.deepEqual([rest.bar, rest.lineKeys], [false, "false"], "on: the key bar is folded, Terminal keys sits in the line");
+      assert.equal(rest.slotBottom, rest.viewport, "on: the input line is the screen's bottom row");
+      assert.ok(rest.padBottom >= 8, `on: the folded line keeps at least --space-2 under its controls (${rest.padBottom})`);
+      assert.ok(rest.gridHeight > off.gridHeight, `on: the terminal gets the key bar's row back (${off.gridHeight} -> ${rest.gridHeight})`);
+      // Terminal keys opens the whole row, mode key first, pressed while open; a second tap folds it
+      await keys.tap();
+      await bar.waitFor();
+      await ready(page);
+      await settled(page);
+      const opened = await foldState(page);
+      assert.deepEqual([opened.barModeFirst, opened.lineKeys], [true, "true"], "on: Terminal keys opens the key bar, pressed, its mode key first");
+      assert.ok(opened.slotBottom < opened.viewport, "on, open: the line stands over the key bar again");
+      await keys.tap();
+      await bar.waitFor({ state: "detached" });
+      assert.equal((await foldState(page)).lineKeys, "false", "on: a second tap folds the key bar again");
+      // a folded row holds no modifier it no longer shows: Ctrl armed in the open row is let go by the fold
+      await keys.tap();
+      const ctrl = page.locator('.pane-frame:not(.is-hidden) .key-bar [data-key="Control"]');
+      await ctrl.tap();
+      await page.waitForFunction(() => document.querySelector('.pane-frame:not(.is-hidden) .key-bar [data-key="Control"]')?.getAttribute("aria-pressed") === "true");
+      await keys.tap();
+      await bar.waitFor({ state: "detached" });
+      await keys.tap();
+      assert.equal(await ctrl.getAttribute("aria-pressed"), "false", "on: folding the row lets go of the modifier it held");
+      // left open, the bar's mode key switches to direct typing: the whole bar, no Terminal keys
+      await page.locator('.pane-frame:not(.is-hidden) .key-bar [data-key="direct"]').tap();
+      await page.locator("[data-direct-typing]").waitFor();
+      assert.deepEqual([(await foldState(page)).barModeFirst, (await foldState(page)).lineKeys], [true, null], "on, direct typing: the whole key bar, mode key first, and no input line");
+      // and back: the line, with the row folded again rather than left open
+      await page.locator('.pane-frame:not(.is-hidden) .key-bar [data-key="direct"]').tap();
+      await page.locator("[data-direct-typing]").waitFor({ state: "detached" });
+      await bar.waitFor({ state: "detached" });
+      assert.equal((await foldState(page)).lineKeys, "false", "on: back in the line the row is folded again");
+      assert.deepEqual(errors, []);
+      console.log(`PASS fold the key bar on: folded under a bottom input line (+${rest.gridHeight - off.gridHeight}px of grid), Terminal keys opens and folds it, a fold lets go of held modifiers, direct typing keeps the whole bar`);
+    } finally { await context.close(); }
+  }
+  return { scenario: "fold-key-bar", results };
 }
 
 // ---- scenario: composing, or no field to show the keyboard for --------------------------------------
@@ -327,13 +604,16 @@ async function composingOrUnavailableTarget(browser: Browser): Promise<Record<st
     await ready(page);
     let key = keyOf(page);
 
-    // a hardware keyboard, or an occlusion the browser cannot report: the field is focused, nothing is claimed
-    await key.tap();
+    // a hardware keyboard, or an occlusion the browser cannot report: the tap's word is claimed at
+    // once, and leaves again at the settle window the measurement never answered
+    const claimed = await tapAndState(page);
+    assert.deepEqual([claimed.active, claimed.pressed, claimed.label], ["terminal-input-text", "true", "Hide keyboard"], "the tap's word: the control claims the keyboard while the measurement has not answered");
     await page.keyboard.type("git status");
     await lineOf(page).evaluate((node: HTMLTextAreaElement) => node.setSelectionRange(4, 4));
+    await page.waitForFunction(() => document.querySelector('.pane-frame:not(.is-hidden) .key-bar [data-key="keyboard"]')?.getAttribute("aria-label") === "Show keyboard", undefined, { timeout: 3_000 });
     await settled(page);
     const hardware = await control(page);
-    assert.deepEqual([hardware.active, hardware.pressed, hardware.label, hardware.keyboard], ["terminal-input-text", "false", "Show keyboard", false], "no occlusion measured: the control does not claim a keyboard because the focus succeeded");
+    assert.deepEqual([hardware.active, hardware.pressed, hardware.label, hardware.keyboard], ["terminal-input-text", "false", "Show keyboard", false], "no occlusion measured: after the settle window the control answers to what it knows, the field still focused");
     checks["hardwareKeyboard"] = hardware;
     console.log("PASS no-occlusion geometry: a focused field with no keyboard measured stays Show keyboard, not pressed");
 
@@ -364,8 +644,11 @@ async function composingOrUnavailableTarget(browser: Browser): Promise<Record<st
 
     // direct typing: a commit still on its way (the tick after compositionend) refuses the tap too.
     // The keyboard is measured up first, so the tap would be a Hide that blurs the grid: only the
-    // refusal keeps the focus, and with it the commit xterm is about to read
+    // refusal keeps the focus, and with it the commit xterm is about to read. The switch, the
+    // keyboard down, focuses nothing: Show focuses the grid
     await switchMode(page, "direct");
+    await flushTimers(page);
+    await key.tap();
     await raise(page);
     const direct = await control(page);
     assert.deepEqual([direct.active, direct.keyboard, direct.pressed], ["xterm-helper-textarea", true, "true"], "direct typing, grid focused, keyboard measured up: the control is Hide");
@@ -403,7 +686,7 @@ async function composingOrUnavailableTarget(browser: Browser): Promise<Record<st
     }, panes.shell);
     assert.equal(made.status, 200, `/api/pane/split answered ${made.status}`);
     await page.locator(".pane-frame.is-hidden").waitFor({ state: "attached" });
-    await page.locator(".pane-frame:not(.is-hidden) .xterm-rows").waitFor();
+    await page.locator(shownRows(".pane-frame:not(.is-hidden)")).waitFor();
     await ready(page);
     const shownFrame = (await page.locator(".pane-frame:not(.is-hidden)").getAttribute("data-layout-pane"))!;
     const hiddenFrame = (await page.locator(".pane-frame.is-hidden").getAttribute("data-layout-pane"))!;
@@ -416,19 +699,30 @@ async function composingOrUnavailableTarget(browser: Browser): Promise<Record<st
       return { active: active instanceof HTMLElement ? active.className : null, frame: frame?.getAttribute("data-layout-pane") ?? null, draft: field ? [field.value, field.selectionStart, field.selectionEnd] : null, hiddenFocused: hidden !== null && hidden === active };
     });
     const shellDraft = (frame: string) => frame === panes.shell ? ["git status", 4, 4] : ["", 0, 0];
-    await keyOf(page).tap();
+    await flushTimers(page);
+    // this pane's Show stays in flight through the switch below: the clock holds still before the
+    // tap, inside its settle window, the keyboard still measured down. A droplet the demo's turn
+    // raised would stay over the tab strip with the clock held: it is not drawn (as in openForCapture)
+    await page.addStyleTag({ content: ".droplet { visibility: hidden !important; }" });
+    await page.clock.pauseAt(await page.evaluate(() => Date.now()) + 200);
+    const inFlight = await tapAndState(page);
+    assert.deepEqual([inFlight.pressed, inFlight.label, inFlight.keyboard], ["true", "Hide keyboard", false], "the tapped pane's Show is in flight, the keyboard still measured down");
     const sibling = await focusedPane();
     assert.deepEqual(sibling, { active: "terminal-input-text", frame: shownFrame, draft: shellDraft(shownFrame), hiddenFocused: false }, `Show focuses the shown pane's own line, with its own draft, never the sibling's (${JSON.stringify(sibling)})`);
     // the other pane shown instead: its control focuses its line, with the draft and caret that line has
-    await page.locator(".tab-strip-menu:visible").tap();
+    // a phone's header lists the tabs: More carries the open tab's panes
+    await page.locator(".header-more-button").tap();
     const sheet = page.getByRole("dialog");
     await sheet.waitFor();
-    await sheet.locator('.row-sheet-item:not([aria-current="true"])').first().tap();
+    await sheet.locator(`.row-sheet-item[data-item="pane:${hiddenFrame}"]`).tap();
     await page.locator(`.pane-frame:not(.is-hidden)[data-layout-pane="${hiddenFrame}"]`).waitFor();
     await ready(page);
+    const other = await control(page);
+    assert.deepEqual([other.label, other.pressed, other.keyboard], ["Show keyboard", "false", false], `the pane now shown reads the keyboard: the other pane's Show, in flight when it was left, is not its word (${JSON.stringify([other.label, other.pressed])})`);
     await keyOf(page).tap();
     const switched = await focusedPane();
     assert.deepEqual(switched, { active: "terminal-input-text", frame: hiddenFrame, draft: shellDraft(hiddenFrame), hiddenFocused: false }, `after the switch, the control focuses the pane now shown, whose draft and caret are its own (${JSON.stringify(switched)})`);
+    await page.clock.resume();
     checks["siblingPane"] = { shownFrame, hiddenFrame, sibling, switched };
     console.log("PASS split tab: the control focuses only the shown pane's field, before and after a pane switch");
     assert.deepEqual(errors, []);
@@ -507,14 +801,17 @@ async function focusReports(browser: Browser): Promise<Record<string, unknown>> 
       .filter((frame) => types.includes(frame.type)).map((frame) => `${frame.type}:${JSON.stringify(frame.text ?? "")}`), { from, types: [...FORBIDDEN] });
     const frameCount = (): Promise<number> => page.evaluate(() => (window as unknown as QaWindow).sentFrames.length);
     const nothingFocused = (): Promise<boolean> => page.evaluate(() => document.activeElement === null || document.activeElement === document.body);
+    // input-ready precedes fixture playback, whose last frame can outlast flushTimers. Let the clock
+    // run until that frame is drawn before adding output its cursor moves could overwrite.
+    await page.locator(shownRows(".pane-frame:not(.is-hidden)"), { hasText: "0 fail" }).waitFor();
     // a known start: whatever the load leaves for later has run, then nothing is focused when the mode
     // goes on, so no focus or blur of the load's can report inside the window the assertions read
     await flushTimers(page);
     await blur(page);
     assert.equal(await nothingFocused(), true, "nothing focused before focus reporting goes on");
     // xterm parses its input in order: the marker after DECSET 1004 drawn is proof the mode is on
-    await socket(page, { type: "pty-data", pane_id: panes.shell, data: "\u001b[?1004hfocus reporting on" });
-    await page.locator(".pane-frame:not(.is-hidden) .xterm-rows", { hasText: "focus reporting on" }).waitFor();
+    await socket(page, { type: "pty-data", pane_id: panes.shell, data: "\r\n\u001b[?1004hfocus reporting on" });
+    await page.locator(shownRows(".pane-frame:not(.is-hidden)"), { hasText: "focus reporting on" }).waitFor();
     await flushTimers(page);
     assert.equal(await nothingFocused(), true, "still nothing focused once the mode is on");
     const xterm = page.locator(".pane-frame:not(.is-hidden) .xterm-helper-textarea");
@@ -537,11 +834,11 @@ async function focusReports(browser: Browser): Promise<Record<string, unknown>> 
     const lineMode = await inputs(from);
     assert.deepEqual(lineMode, [], `line mode: Show from the focused grid and Hide send nothing (${lineMode.join(", ")})`);
 
-    // direct typing: Show focuses the grid and Hide blurs it, and neither reports
+    // direct typing: Show focuses the grid and Hide blurs it, and neither reports (the switch, the
+    // keyboard down, focuses nothing)
     await switchMode(page, "direct");
-    await raise(page);
-    await key.tap();
-    await lower(page);
+    await flushTimers(page);
+    assert.equal(await nothingFocused(), true, "the switch to direct typing with the keyboard down focuses nothing");
     from = await frameCount();
     await key.tap();
     await raise(page);
@@ -553,6 +850,20 @@ async function focusReports(browser: Browser): Promise<Record<string, unknown>> 
     assert.deepEqual(directMode, [], `direct typing: Show (grid focus) and Hide (grid blur) send nothing (${directMode.join(", ")})`);
     assert.notEqual((await control(page)).active, "xterm-helper-textarea");
 
+    // direct typing, the grid already focused with the keyboard measured down (the back-gesture
+    // state): Show's blur-and-refocus inside the tap reports nothing either, though it is a focus
+    // change like a user's
+    await xterm.focus();
+    await page.waitForFunction((from) => (window as unknown as QaWindow).sentFrames.slice(from).some((frame) => frame.type === "input"), from);
+    from = await frameCount();
+    await key.tap();
+    await raise(page);
+    await key.tap();
+    await lower(page);
+    await flushTimers(page);
+    const focusedBranch = await inputs(from);
+    assert.deepEqual(focusedBranch, [], `direct typing, the grid already focused with the keyboard down: the blur-and-refocus reports nothing (${focusedBranch.join(", ")})`);
+
     // and the user's own focus still reports after the control was used
     from = await frameCount();
     await xterm.focus();
@@ -560,8 +871,8 @@ async function focusReports(browser: Browser): Promise<Record<string, unknown>> 
     const userAgain = await inputs(from);
     assert.deepEqual(userAgain, [`input:${JSON.stringify("\u001b[I")}`], "a user's focus still reports after the control was used");
     assert.deepEqual(errors, []);
-    console.log("PASS focus reporting (DECSET 1004): Show and Hide send no ESC [ I / ESC [ O in line or direct mode, and a user's own focus still reports");
-    return { scenario: "focus-reports", userFocus, lineMode, directMode, userAgain };
+    console.log("PASS focus reporting (DECSET 1004): Show and Hide send no ESC [ I / ESC [ O in line or direct mode, an already focused Show's blur-and-refocus sends none, and a user's own focus still reports");
+    return { scenario: "focus-reports", userFocus, lineMode, directMode, focusedBranch, userAgain };
   } finally { await context.close(); }
 }
 
@@ -622,10 +933,10 @@ async function captureSet(browser: Browser, dir: string): Promise<Capture[]> {
       for (const word of [" && git log --oneline -20", " && bun test ./src/lib/keyboard.test.ts", " && echo a line long enough to wrap the box", " && echo the last line of a long draft"]) await page.keyboard.type(word);
       await lineOf(page).evaluate((node: HTMLTextAreaElement) => { node.scrollTop = node.scrollHeight; });
       await shot(page, `390-${theme}-line-long-draft-end`, meta("line mode, keyboard up, a long draft scrolled to its end"));
-      await page.evaluate(() => { const bar = document.querySelector<HTMLElement>(".pane-frame:not(.is-hidden) .key-bar")!; bar.scrollLeft = bar.scrollWidth; });
-      await page.waitForFunction(() => document.querySelector(".pane-frame:not(.is-hidden) .key-bar")?.hasAttribute("data-overflow-start"));
+      await page.evaluate(() => { const bar = document.querySelector<HTMLElement>(".pane-frame:not(.is-hidden) .key-bar-row")!; bar.scrollLeft = bar.scrollWidth; });
+      await page.waitForFunction(() => document.querySelector(".pane-frame:not(.is-hidden) .key-bar-row")?.hasAttribute("data-overflow-start"));
       await shot(page, `390-${theme}-bar-end`, meta("line mode, keyboard up, the key bar scrolled to its end"));
-      await page.evaluate(() => { document.querySelector<HTMLElement>(".pane-frame:not(.is-hidden) .key-bar")!.scrollLeft = 0; });
+      await page.evaluate(() => { document.querySelector<HTMLElement>(".pane-frame:not(.is-hidden) .key-bar-row")!.scrollLeft = 0; });
       await key.tap();
       await lower(page);
       // the ring: the control is a Tab stop, reached from the input line by Tab alone
@@ -659,7 +970,8 @@ async function captureSet(browser: Browser, dir: string): Promise<Capture[]> {
       await socket(page, { type: "input-ready", pane_id: panes.shell });
       await ready(page);
       // offline, held through its capture: the clock stops before the socket goes, so the reconnect it
-      // schedules waits until resumed, and the state is read on both sides of the screenshot
+      // schedules waits until resumed, and the state is read on both sides of the screenshot. The header still
+      // says live: a drop is said only once it outlasts the grace (src/lib/reconnectGrace.ts), whose clock stopped too
       await page.clock.pauseAt(await page.evaluate(() => Date.now()) + FLUSH_MS);
       await page.evaluate(() => { (window as unknown as QaWindow).recordedSockets.at(-1)!.close(); });
       await page.waitForFunction(() => document.querySelector<HTMLButtonElement>('.pane-frame:not(.is-hidden) .key-bar [data-key="keyboard"]')?.disabled === true);
@@ -668,9 +980,14 @@ async function captureSet(browser: Browser, dir: string): Promise<Capture[]> {
         document.querySelector(".conn-reconnecting") !== null,
         document.querySelector(".conn-live") !== null,
       ]);
-      assert.deepEqual(await offlineNow(), [true, true, false], "offline before the capture: control disabled, header reconnecting");
-      await shot(page, `390-${theme}-disabled-offline`, meta("direct typing, the connection dropped (reconnect held): the bar and the control disabled, the header reconnecting"), true);
-      assert.deepEqual(await offlineNow(), [true, true, false], "still offline after the capture: the screenshot shows the offline state");
+      assert.deepEqual(await offlineNow(), [true, false, true], "offline before the capture: control disabled, header not yet saying it within the grace");
+      await shot(page, `390-${theme}-disabled-offline`, meta("direct typing, the connection dropped (reconnect held, inside the grace): the bar and the control disabled"), true);
+      assert.deepEqual(await offlineNow(), [true, false, true], "still offline after the capture: the screenshot shows the offline state");
+      // a key pressed meanwhile ends the grace at once, the clock still stopped: the person acting is told the
+      // connection is down (a bare Shift, so nothing is typed into the held draft)
+      await page.keyboard.press("Shift");
+      await page.waitForFunction(() => document.querySelector(".conn-reconnecting") !== null && document.querySelector(".conn-live") === null);
+      await page.getByText("Reconnecting to Ovis…").waitFor();
       await page.clock.resume();
       await page.waitForFunction(() => document.querySelector<HTMLButtonElement>('.pane-frame:not(.is-hidden) .key-bar [data-key="keyboard"]')?.disabled === false, undefined, { timeout: 20_000 });
       await role(page, "observe");
@@ -748,7 +1065,7 @@ try {
     } else {
       const browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
       try {
-        const reports = [await currentModeKeyboard(browser), await composingOrUnavailableTarget(browser), await focusReports(browser)];
+        const reports = [await currentModeKeyboard(browser), await keyboardOnRequest(browser), await foldKeyBar(browser), await composingOrUnavailableTarget(browser), await focusReports(browser)];
         if (evidence) {
           mkdirSync(evidence, { recursive: true });
           for (const report of reports) writeFileSync(join(evidence, `terminal-keyboard-${report["scenario"]}.json`), JSON.stringify({ ...report, synthetic: "Chromium with scripted visualViewport geometry; not a native keyboard" }, null, 2));

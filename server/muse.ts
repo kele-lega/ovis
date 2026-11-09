@@ -16,9 +16,10 @@
  * reader takes in another shape, throws MuseUnavailable: Chat then uses Terminal rather than show
  * part of the conversation.
  */
-import { closeSync, openSync, readSync } from "node:fs";
+import { closeSync, readSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type { ConversationPart, ConversationTurn } from "../shared/protocol.ts";
+import { openBound } from "./conversation-shared.ts";
 import { trimOutput } from "./tool-output.ts";
 import { toolSummary } from "./transcript-records.ts";
 
@@ -33,12 +34,13 @@ export class MuseUnavailable extends Error {
   constructor() { super("Muse log is in a shape the reader does not know"); this.name = "MuseUnavailable"; }
 }
 
-/** Every record Muse 1.4.2 to 1.4.13 writes to a session log, as 160 logs of those builds hold them. */
+/** Every record Muse 1.4.2 to 1.4.13 writes to a session log, as 160 logs of those builds and the recorded 1.4.13 `/fork` hold them. */
 const RECORDS = new Set(["approval_wait.effect.started", "approval_wait.effect.terminal", "async.owner.attempt_admitted", "command.invoked",
   "peer_message.admission.requested", "peer_message.admission.settled", "reminder.cleanup_effect.started", "reminder.cleanup_effect.terminal",
   "run.model.configured", "runtime.branch_seed.diagnostics", "runtime.command_intake.branch.received",
   "runtime.command_intake.conversation_rewind.received", "runtime.command_intake.received", "runtime.command_intake.session_name.received",
-  "runtime.command_intake.settled", "runtime.model_reconfigure.completed", "runtime.retained_fact", "runtime.session",
+  "runtime.command_intake.settled", "runtime.model_reconfigure.completed", "runtime.model_selection.initialized",
+  "runtime.reasoning_effort_reconfigure", "runtime.retained_fact", "runtime.session",
   "runtime.session.capture_selection", "runtime.session.message_receipt.read", "runtime.session.message_receipt.state",
   "runtime.session.metadata", "runtime.session.route_facts", "runtime.session.task", "runtime.session.task_source_committed",
   "runtime.session_handoff.goal_safety", "runtime.session_start.intake_v2", "runtime.session_start.intake_v3",
@@ -220,7 +222,8 @@ export function museToolOutput(path: string, ref: string): string | null {
   const id = JSON.stringify(ref);
   const session = museSession(path);
   let fd: number;
-  try { fd = openSync(path, "r"); } catch { return null; }
+  // another file than the one the lookup is bound to (openBound) holds none of its calls
+  try { fd = openBound(path); } catch { return null; }
   try {
     const chunk = Buffer.alloc(1024 * 1024);
     let carry = Buffer.alloc(0);

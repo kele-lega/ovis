@@ -19,6 +19,19 @@ scripts/self-hosted-runner/run.sh --once                  # one container per sl
 
 The image `herdr-ci-runner:local` is built when missing or with `--build`. Ctrl+C stops the containers and deletes any runner of this host (`herdr-ci-<host>-*`) still registered.
 
+A slot whose container is still running (one an earlier launcher started, say, still in its job)
+waits for it to end before it starts the next: the new runner would register the same name
+(`--replace`) and take the running job's registration. So a launcher can be restarted under running
+jobs by killing its main process alone (`kill -KILL`; its stop trap would stop every container), after
+which systemd starts it again and each slot moves over once its job ends. That relies on the unit's
+`KillMode=mixed`: systemd then SIGKILLs the old launcher's slot loops and `docker run` clients, which
+leaves their containers running. With `KillMode=control-group` they would get SIGTERM, which the
+clients pass on to their containers, ending the jobs. A container that holds a slot's name without
+running (created, or stopped) is removed, so it never holds the slot. Restart with the same `--count`: a container in a
+slot above the new count is no one's to wait for, and the new launcher's stop removes its runner. A
+launcher started with `--build-cache` serves the jobs it took over too, once its first cache refresh is
+done (up to `--cache-wait`).
+
 A slot that cannot fetch a registration token retries after 30 s, doubling up to 10 minutes: GitHub
 limits these requests per hour, and eight slots retrying every 30 s keep the account over that limit,
 which blocks every other API call too. After the repository is renamed, restart the launcher with
@@ -35,7 +48,17 @@ launcher starts first and stops last. The runners therefore share a loopback, an
 `CHECK_MAX_RUNS` and wait for a slot, instead of each runner believing it has the PC to itself.
 The namespace is not the host's: a job still cannot reach a service on the host's loopback. The
 `--shm-size 2g` Docker setting sizes `/dev/shm` for browser scratch space; it is not a total RAM
-limit. The container still has a pids limit of 8192.
+limit. The container still has a pids limit of 8192, and `--ulimit core=0`: a crash never leaves a
+core file in the checkout, where `scripts/check.ts` would count it as a source change.
+
+`--work-tmpfs SIZE` (say `4g`) puts each container's work folder (`/w`, the checkout) and `/tmp` in
+RAM, each capped at SIZE. A job's files end with its container anyway; on disk, its checkout, Bun
+cache copy and browser profiles are most of what a busy host writes. Only what a job writes takes
+memory (about 1-1.5 GB for the busiest jobs measured), and it is freed when the container exits.
+The caps are not reserved, but they are not a memory limit either: pick SIZE so that
+`--count` x 2 x SIZE stays below the host's free RAM (18 runners at `4g` can hold up to 144 GB).
+Below about 1g the checkout plus the seeded Bun cache no longer fits, and seeding falls back to
+downloading every package.
 
 ## Prepared tools and caches
 
@@ -46,28 +69,111 @@ download fallback. Rebuild with `--build` after changing the tool pins or Playwr
 The image's `BUN_VERSION` must match the default in `.github/actions/setup-ci/action.yml`, and
 `PLAYWRIGHT_VERSION` must match the lockfile.
 
+### Runner version
+
+Runners register with `--disableupdate`, so `RUNNER_VERSION` in the Dockerfile decides the
+actions/runner version. Without it, a runner older than GitHub's latest release starts the update
+only after it is handed a job, and GitHub cancels that job about 3.5 minutes later with no runner
+name and no step (seen with 2.338.0 once 2.338.2 was out: every container downloaded the update).
+GitHub stops sending jobs to a runner more than 30 days behind a release, so raise
+`RUNNER_VERSION` and `RUNNER_SHA256` (the `linux-x64` SHA in the release notes) when actions/runner
+releases, then rebuild with `--build`.
+
 Bun dependencies are installed from `bun.lock`, with the local install-cache directory at
 `.ci-cache/bun` retained inside the checkout. Only hosted jobs restore and save that directory as
-a remote dependency cache. Disposable self-hosted jobs install fresh with the frozen lockfile:
-on the measured connection, that took 7–20s versus 37–43s to transfer the cache archive. Hosted
+a remote dependency cache: on the measured connection, transferring the archive took 37–43s.
+Self-hosted jobs start it from the host's copy instead (Host caches, below). Hosted
 browser caches use `.ci-cache/playwright`; self-hosted jobs skip that remote cache because the
 browser is already in the image. Workspace-relative archives avoid restoring home-directory paths
 from a different checkout depth (GitHub's workspace versus `/w`).
 
-This removes per-job tool/browser downloads, not all network traffic: checkout, dependency
-installation and artifact transfers still use the network. Compare setup time, test time and retries separately
-on the same commit before claiming an end-to-end speedup. No persistent host cache is mounted into
-the disposable containers.
+## Host caches
+
+Every job used to fetch the same bytes: about 45 MB of git objects for its shallow checkout,
+105 MB of packages for `bun install`, and another 45 MB for Fast checks' tag fetch. Twenty runners
+on one ~100 Mbit/s line saturated it, and a Fast checks job ran out of its 10 minutes in checkout
+and that fetch. So the launcher keeps two caches on the host, per repository in
+`<--cache-dir>/OWNER/NAME` (default `~/.cache/ovis-ci-runner/OWNER/NAME`), and mounts that
+directory read-only at `/cache` in every runner container:
+
+- `git/repo.git`, a bare mirror of the repository's branches and tags (no pull request refs),
+  fetched from GitHub before the first runner starts and every minute after. Runners get
+  `GIT_ALTERNATE_OBJECT_DIRECTORIES=/cache/git/repo.git/objects`, so `actions/checkout` and every
+  other git command of a job read objects from the mirror and fetch only what it lacks: a pull
+  request's new commits. Measured: checkout 44.7 MB to 0.01 MB, the tag fetch 44.9 MB to 0.06 MB.
+  A job's checkout then holds only the objects the mirror lacks, so a step that clears the `GIT_*`
+  variables cannot read that checkout's history. Git never collects the mirror's objects on its
+  own (a job may still read one of a deleted or force-pushed branch); past 50 packs the launcher
+  joins them, keeping every object. A mirror whose origin is not this repository is set up again.
+- `bun/<blob of bun.lock>`, Bun's install cache for the default branch's lockfile, with `current`
+  pointing at it. The default branch is the one GitHub names on that refresh (`ls-remote --symref
+  origin HEAD`), and only once the mirror holds it: a refresh that fails or gets no answer builds
+  nothing, never from the mirror's own HEAD. It is built when that lockfile changes, in a throwaway container of the runner
+  image with the runners' hardening, as the host user, from a checkout of the mirror:
+  `bun install --frozen-lockfile --ignore-scripts`, which resolves nothing beyond the lockfile,
+  checks every download's integrity against it and runs no package script. A failed build (a
+  crash or the OOM killer included) is retried after 30 minutes; one the launcher's own stop ended
+  is not counted. Bun cannot install from a read-only cache, so setup-ci
+  (`scripts/ci-seed-bun-cache.sh`) copies `current` into the job's `.ci-cache/bun`, under that name
+  only once complete; `bun install --frozen-lockfile` then downloads only what the job's own
+  lockfile adds. Measured: 105 MB in 11s to nothing in about 3s. A replaced version stays an
+  hour after it was replaced, for jobs copying it at that moment.
+
+A cache the launcher cannot refresh (GitHub or the registry unreachable or stalled) only means more
+downloads: runners still start, jobs fetch what the caches lack, and the journal says
+`[cache] ...`. The first runners wait for the first refresh up to `--cache-wait` seconds (default
+120), then start without it. Git gives up on a transfer slower than 1 KB/s for a minute and on any
+fetch after 15 minutes, and the Bun cache build is stopped after 15 minutes. On a stop, the launcher
+waits for the refresh's git and docker clients (one that ignores SIGTERM is killed 5 s later) and
+removes the build container before it exits. A cache directory the
+launcher cannot use runs the runners without caches. `--no-cache` turns both off. Artifact uploads and the actions' own archives (about 8 MB a job)
+still use the network.
+
+## Build cache
+
+Fast checks, Integration tests and both Browser regression jobs each run `bun run build` on the same
+commit: about 60 CPU seconds apiece on the P620. `run.sh --build-cache DIR --build-cache-writer LOGIN`
+lets the first of them build it and the others restore its `dist/` in a fraction of a second
+(`scripts/build-cache.ts`). Point it at RAM (`/dev/shm/ovis-build-cache`); `--build-cache-mb`
+(default 2048, about 50 builds) bounds it, least recently used first. Measured (four builds of one
+commit, as one run's jobs do): 246-266 CPU s without it, 53-70 CPU s with it; four started at once
+build once.
+
+Every runner container gets `DIR/OWNER/NAME/entries` (the cache) **read-only** at `/build-cache`, the
+Docker volume `herdr-ci-<host>-build-cache-locks` (a 16 MiB tmpfs: which job builds a key, the others
+wait for it) and its slot's own outbox, on disk under `~/.local/state/ovis-ci-runner/build-outbox/`. A
+job that built a commit leaves `<key>.tar` and `<key>.claim` (its run) in that outbox, and the launcher
+(`build-cache-promote.sh`, every second) takes it in only when GitHub says that runner is running a
+job of that run and the run is trusted: a push to the default branch, or a pull request from this
+repository that `--build-cache-writer` opened and started. Without the flag only pushes write. The
+launcher unpacks only files and directories and writes the sha256 of each into the entry's
+`.manifest`; a restore refuses an entry with a link, a missing, changed or extra file. Every other
+outbox file is deleted. One claim per outbox is judged per pass, and a refusal is remembered (the
+run and attempt for a day, the slot for ten minutes), so a job claiming over and over costs no
+GitHub calls on the launcher's token, which also registers the runners. A restore says it used an entry with an empty `used-<key>` in its own
+outbox, which the launcher stamps into `used/` (never written through a directory other jobs share).
+Pull request runs and pushes to main read it; a tag's release validation and manual runs always
+build, and a run whose build the launcher would refuse (another author's pull request, say) builds
+at once instead of waiting on the lock.
+
+An entry is named after the commit, Bun's version, the variables Vite reads and any `.env` file; a
+checkout with uncommitted changes, or with ignored files where Vite reads, never uses it. The
+key does not hash `node_modules`: it takes it to be what `bun install --frozen-lockfile` makes of the
+commit's `bun.lock` and patches, as in every CI job, so a hand-edited `node_modules` is not one to use it with.
 
 ## Routing jobs to it
 
-`ci.yml`'s Linux jobs go to `["self-hosted","self-hosted-ovis"]` by default, the launcher's default
-label. The repository variable overrides that:
+`ci.yml`'s Linux jobs of a push go to `["self-hosted","self-hosted-ovis"]` by default, the launcher's
+default label. A same-repository pull request goes there only while at most
+`CI_SELF_HOSTED_CAPACITY` (default 10) minus its four Linux jobs are queued or running on that label,
+and GitHub-hosted otherwise. Set the capacity to the number of `self-hosted-ovis` runners you keep
+online. The repository variable overrides the choice:
 
 ```sh
 gh variable set CI_SELF_HOSTED_LABELS --body '"ubuntu-24.04"'   # PC offline: everything GitHub-hosted
-gh variable set CI_SELF_HOSTED_LABELS --body '["self-hosted","self-hosted-ovis"]'   # pages.yml and release.yml too
+gh variable set CI_SELF_HOSTED_LABELS --body '["self-hosted","self-hosted-ovis"]'   # every pull request, pages.yml and release.yml too
 gh variable delete CI_SELF_HOSTED_LABELS   # back to the default
+gh variable set CI_SELF_HOSTED_CAPACITY --body 10   # self-hosted-ovis runners online
 ```
 
 Pushes to main can have runners of their own, so a merge's CI never queues behind pull request runs.
@@ -94,7 +200,7 @@ share `check.ts`'s slots (`CHECK_HOST_MAX_RUNS`) with theirs, so they can wait t
 On the maintainer PC the launcher runs as the systemd user unit `ovis-ci-runner.service`
 (`run.sh --repo devswha/ovis --count 4 --labels self-hosted-ovis` from a copy of this directory in
 `~/.local/share/ovis-ci-runner`): four slots let one CI run's four Linux jobs start together, and
-`check.ts`'s shared slots still cap its herdr-backed lanes at three. Copy the directory again and
+`check.ts`'s shared slots cap its herdr-backed lanes at `ci.yml`'s `CHECK_MAX_RUNS`. Copy the directory again and
 restart the unit after changing these files.
 
 ## Per-host limits
@@ -110,6 +216,10 @@ replace the workflow's values for the run, and a host without the file keeps `ci
 | `CHECK_HOST_TEST_SHARDS` | `HERDR_TEST_SHARDS` | Integration tests |
 | `CHECK_HOST_BROWSER_WORKERS` | `BROWSER_WORKERS` | both browser jobs (capped at their script count) |
 | `CHECK_HOST_UNIT_WORKERS` | `UNIT_TEST_WORKERS` | Fast checks |
+
+`run.sh --cpuset-cpus LIST` (docker run's own option, `0-95` say) keeps every container it starts on
+those CPUs, the runners and the cache builds alike, so work beside them keeps the rest. A list docker
+cannot give is refused at start (exit 2), before any slot asks for a registration token.
 
 Every runner of a host must read the same file, since they share the slots. Keep it outside this
 directory (`~/.config/ovis-ci-runner/host.env`), so copying the directory again leaves it alone.
@@ -149,4 +259,14 @@ A manual run can override the variable with the `self_hosted_labels` workflow_di
 
 ## Security model
 
-This is a public repository. A fork PR's run uses the fork's workflow files and `scripts/ci-runner-route.sh`, so it can choose `runs-on` itself. The runner therefore enforces the boundary: `job-started.sh` runs before every job (`ACTIONS_RUNNER_HOOK_JOB_STARTED`, set in the image, outside the workflow's control) and refuses any job whose event names another head repository (a fork pull request, a deleted head repository, a `workflow_run` of a fork). It fails closed: any exit before it explicitly allows the job, an error of its own included (a missing or unreadable event file, broken JSON, an unset variable), refuses it, and the refusal kills the worker before it logs anything, with SIGPIPE and termination signals ignored, so a closed output cannot stop it halfway. A failing hook alone is not enough: runner v2.338 marks only its "Set up runner" step failed and still runs the job's `if: always()` and `if: failure()` steps. So the hook SIGKILLs the job's `Runner.Worker` before it returns; the job then ends as failed within seconds with no step run and an empty log, and the refusal is written to the container's output (`journalctl --user -u ovis-ci-runner`). Both were checked on a live runner with a refused job: the old exit-only hook ran the `always()` and `failure()` steps, the killing hook ran none. Fork PR runs also need maintainer approval (repository setting: all outside collaborators); never approve one that changes `runs-on`. Containers are ephemeral (`--ephemeral`, `--rm`), unprivileged (`--cap-drop ALL`, `no-new-privileges`, no `--privileged`), have no host mounts and no Docker socket, and the image has no sudo. The registration token reaches the container on stdin, never through its environment, so a job cannot read it from `/proc/1/environ`.
+This is a public repository. A fork PR's run uses the fork's workflow files and `scripts/ci-runner-route.sh`, so it can choose `runs-on` itself. The runner therefore enforces the boundary: `job-started.sh` runs before every job (`ACTIONS_RUNNER_HOOK_JOB_STARTED`, set in the image, outside the workflow's control) and refuses any job whose event names another head repository (a fork pull request, a deleted head repository, a `workflow_run` of a fork). It fails closed: any exit before it explicitly allows the job, an error of its own included (a missing or unreadable event file, broken JSON, an unset variable), refuses it, and the refusal kills the worker before it logs anything, with SIGPIPE and termination signals ignored, so a closed output cannot stop it halfway. A failing hook alone is not enough: runner v2.338 marks only its "Set up runner" step failed and still runs the job's `if: always()` and `if: failure()` steps. So the hook SIGKILLs the job's `Runner.Worker` before it returns; the job then ends as failed within seconds with no step run and an empty log, and the refusal is written to the container's output (`journalctl --user -u ovis-ci-runner`). Both were checked on a live runner with a refused job: the old exit-only hook ran the `always()` and `failure()` steps, the killing hook ran none. Fork PR runs also need maintainer approval (repository setting: all outside collaborators); never approve one that changes `runs-on`. Containers are ephemeral (`--ephemeral`, `--rm`), unprivileged (`--cap-drop ALL`, `no-new-privileges`, no `--privileged`), have no host mounts but the read-only host caches and no Docker socket, and the image has no sudo. The registration token reaches the container on stdin, never through its environment, so a job cannot read it from `/proc/1/environ`.
+
+The host caches cannot carry one job's code into another's: runners mount them read-only, and only
+the launcher writes them, the mirror from GitHub and the Bun cache from downloads checked against
+the default branch's lockfile. A git object is named by its hash, so the mirror cannot change the
+commit a job checks out; Bun does not check a cached package again, which is why only that
+lockfile, never a job, fills the Bun cache. A job's copy of it is its own. The build cache (with
+`--build-cache`) is read-only to jobs as well: only the launcher writes it, from the builds of runs
+GitHub names as trusted (above). A job can write its own outbox (on disk, as its workspace is) and the
+16 MiB locks volume, so at worst it makes the jobs waiting on a key wait up to five minutes and build
+themselves.

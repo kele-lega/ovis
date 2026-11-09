@@ -16,6 +16,29 @@
   unicode-range: U+E000-F8FF, U+F0000-FFFFD;
 }
 
+/* Hangul in a coding face (HANGUL_FAMILY in lib/fontFamily.ts): the syllables and compatibility
+   jamo of D2Coding 1.3.2, renamed as its license asks (THIRD_PARTY_NOTICES.md). The range holds
+   no Latin, so it never sizes a cell, and a weight is fetched only once a pane prints Korean that
+   reaches it, which a Korean font installed ahead of it in the stack keeps from it;
+   lib/terminalGlyphs.ts measures again when it arrives. Blocked rather than swapped, as the
+   icon font: past a swap face's short block period WebKit reports it failed while it still loads,
+   and the terminal could not tell when to measure again */
+@font-face {
+  font-family: "Ovis Hangul Mono";
+  src: url("../fonts/OvisHangulMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-display: block;
+  unicode-range: U+3131-318E, U+AC00-D7A3;
+}
+
+@font-face {
+  font-family: "Ovis Hangul Mono";
+  src: url("../fonts/OvisHangulMono-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-display: block;
+  unicode-range: U+3131-318E, U+AC00-D7A3;
+}
+
 .terminal-stack {
   display: flex;
   flex-direction: column;
@@ -164,9 +187,10 @@
   visibility: hidden;
 }
 
-/* no scrollback (PaneTerminal.tsx), so the viewport never scrolls: hide the track that would
-   otherwise sit over the last columns on platforms with classic scrollbars */
+/* the native viewport never scrolls (xterm draws its own scrollbar for a herdr-core pane's history):
+   hide the track that would otherwise sit over the last columns on platforms with classic scrollbars */
 .pane-terminal .xterm-viewport {
+  background-color: var(--term-bg);
   scrollbar-width: none;
 }
 
@@ -349,23 +373,6 @@
   pointer-events: auto;
 }
 
-/* the hint a message's "Rewind in terminal" leaves (Claude Code, grok, agy): a sentence and its dismiss control,
-   so a control-bearing box like the held-input row; the sentence takes what the pane has and wraps,
-   the button stays beside it */
-.terminal-banner-rewind {
-  height: auto;
-  flex-wrap: nowrap;
-  gap: var(--space-2);
-  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-2);
-  border-radius: var(--radius-md);
-  pointer-events: auto;
-}
-
-.terminal-banner-rewind > span {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
 /* a terminal command's peek head (PaneTerminal.tsx): what ran, whether the chat comes back by itself,
    and the two ways on. The words take what the pane has; the actions move under them when it is narrow */
 .terminal-banner-command {
@@ -525,3 +532,22 @@
     display: none;
   }
 }
+
+/* Settings > Terminal > Draw with libghostty (lib/ghostty/overlay.ts): xterm keeps its screen, selection,
+   input and link layers; only its text and cursor are hidden under libghostty's own rows and pictures.
+   The layer takes no pointer: every click, drag and wheel still reaches xterm under it. */
+.pane-terminal[data-renderer="ghostty"] .xterm-rows { visibility: hidden; }
+/* a folded mirror draws its own rows over xterm's: the libghostty layer, drawn at the grid's width, steps aside */
+.pane-terminal[data-folded] .ghostty-layer { visibility: hidden; }
+.pane-terminal .ghostty-layer { position: absolute; inset: 0 auto auto 0; pointer-events: none; overflow: hidden; z-index: 1; }
+.pane-terminal .ghostty-layer > * { position: absolute; inset: 0; }
+.pane-terminal .ghostty-row { position: relative; height: var(--ghostty-ch); line-height: var(--ghostty-ch); white-space: pre; font-variant-ligatures: none; }
+.pane-terminal .ghostty-row > span { position: absolute; top: 0; height: 100%; }
+.pane-terminal .ghostty-wide { display: inline-block; width: calc(var(--ghostty-cw) * 2); text-align: center; letter-spacing: 0; text-decoration: inherit; }
+/* an inline-block takes no underline or strikethrough from the run around it: each asks for its own (terminalGlyphs.ts) */
+.pane-terminal .ghostty-fit { display: inline-block; text-decoration: inherit; }
+/* clipped to its cell, it would sit on its bottom edge as on a baseline: it takes the row's top and height instead, as xterm's fitted icons do */
+.pane-terminal .ghostty-icon { display: inline-block; width: var(--ghostty-cw); height: var(--ghostty-ch); vertical-align: top; overflow: hidden; text-align: center; letter-spacing: 0; text-decoration: inherit; }
+.pane-terminal .ghostty-image { position: absolute; image-rendering: auto; }
+.pane-terminal .ghostty-cursor { inset: auto; opacity: 0.6; }
+.pane-terminal[data-renderer="ghostty"] .composition-view { z-index: 2; }

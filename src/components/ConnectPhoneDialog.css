@@ -1,0 +1,234 @@
+.connect-phone-dialog {
+  width: min(100%, 520px);
+}
+
+/* opened from Settings only, so above it even where Settings is raised over a file preview (SettingsDialog.css) */
+.modal-scrim:has(> .connect-phone-dialog) {
+  z-index: calc(var(--z-modal) + 3);
+}
+
+.connect-phone-dialog:focus {
+  outline: none;
+}
+
+.connect-phone-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  overflow-y: auto;
+}
+
+.connect-phone-gate {
+  margin: 0;
+}
+
+/* the identity reset is the relay's last and quietest action */
+.connect-phone-reset {
+  padding-top: var(--space-2);
+  border-top: var(--hairline) solid var(--border);
+}
+
+.connect-phone-relay,
+.connect-phone-code {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.connect-phone-relay p,
+.connect-phone-code p {
+  margin: 0;
+}
+
+/* on a phone: this phone's own one-tap relay pairing, then the link for another device under a hairline */
+.connect-phone-self,
+.relay-pairing-phone {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.relay-pairing-phone {
+  padding-top: var(--space-3);
+  border-top: var(--hairline) solid var(--border);
+}
+
+/* signed in: the new device signs in and is approved once; the code waits behind a link */
+.connect-signin {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.connect-signin-lead {
+  margin: 0;
+  color: var(--text-strong);
+  font-weight: var(--fw-semibold);
+}
+
+.connect-link {
+  align-self: flex-start;
+  padding-inline: 0;
+  color: var(--accent);
+}
+
+.connect-signin-nudge,
+.connect-relay-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.connect-signin-nudge {
+  padding: var(--space-2) var(--space-3);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+/* Add a connection's ways, one tab each across the top, as herdr's Add a machine */
+.connect-tabs {
+  align-self: stretch;
+}
+
+.connect-tabs > button {
+  flex: 1;
+}
+
+.connect-tab {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.connect-tab p {
+  margin: 0;
+}
+
+/* a tab not chosen stays mounted (its pairing code is kept), hidden: the flex above would show it */
+.connect-tab[hidden] {
+  display: none;
+}
+
+.connect-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.connect-section + .connect-section {
+  padding-top: var(--space-3);
+  border-top: var(--hairline) solid var(--border);
+}
+
+/* the PCs a way found: its name, how it is reached, where it was found, then Add, Connect or Added */
+.connect-found {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.connect-found-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.connect-found-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--row-h);
+}
+
+.connect-found-name {
+  color: var(--text-strong);
+  font-weight: var(--fw-medium);
+}
+
+.connect-found-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connect-found-name + .connect-found-source {
+  margin-inline-start: auto;
+}
+
+.connect-found-source {
+  flex: none;
+  padding: 0 var(--space-2);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-pill);
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+
+.connect-found-added {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--status-done);
+  font-size: var(--fs-sm);
+}
+
+.connect-found-added svg {
+  width: 14px;
+  height: 14px;
+}
+
+.connect-ssh-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.connect-ssh-field {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.connect-found-failed {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.connect-ssh-field > .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.connect-signin-button {
+  align-self: flex-start;
+}
+
+/* on a phone the address goes under the name, so the name, its source and its button keep one line */
+@media (max-width: 480px) {
+  .connect-found-row {
+    flex-wrap: wrap;
+    row-gap: 0;
+    padding-block: var(--space-1);
+  }
+
+  .connect-found-detail {
+    order: 1;
+    flex-basis: 100%;
+  }
+
+  .connect-found-source {
+    margin-inline-start: auto;
+  }
+}

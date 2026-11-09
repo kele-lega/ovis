@@ -13,6 +13,7 @@ import { OpenFileContext } from "../lib/filePaths.ts";
 import { MachineContext } from "../lib/machineContext.tsx";
 import { useT } from "../lib/i18n.ts";
 import { readerFromSearch, readerHref, resolveFromDocument, type ReaderTarget } from "../lib/fileReader.ts";
+import { pageSearch } from "../lib/pageQuery.ts";
 import type { AccessRefusal } from "../../shared/protocol.ts";
 
 const close = (): void => {};
@@ -40,7 +41,7 @@ export function FileReader({ target }: { target: ReaderTarget }) {
 
   useEffect(() => {
     const onPop = (): void => {
-      const next = readerFromSearch(window.location.search);
+      const next = readerFromSearch(pageSearch());
       if (next !== null) setPath(next.path);
     };
     window.addEventListener("popstate", onPop);
@@ -58,7 +59,7 @@ export function FileReader({ target }: { target: ReaderTarget }) {
   }, [path, target.machine]);
 
   if (locked === null) return <main className="file-reader"><p className="file-viewer-note" role="status">{t("Opening…")}</p></main>;
-  if (locked) return <AccessGate reason={lockReason} initialCode="" onUnlocked={() => setLocked(false)} />;
+  if (locked) return <AccessGate reason={lockReason} initialCode="" consumePairCode={() => ""} pairingUnconfirmed={false} onUnlocked={() => setLocked(false)} />;
   // the app's update line is not here, so a part that cannot load (math, a diagram) is told on its own
   return <div className="file-reader-frame">
     <ChunkFailureNotice />

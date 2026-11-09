@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as client from "./herdr/client.ts";
 import { isGjcProcess } from "./gjc-runtime.ts";
-import { loginPathProbe, paneShell, parseLoginPath, shellAgentExecutable, ShellAgentLocator, shellCommandLine, startShellAgent, type LoginPathProbe, type LoginPathResult } from "./shell-agent.ts";
+import { loginPathProbe, paneShell, parseLoginPath, powershellNativeArgs, shellAgentExecutable, ShellAgentLocator, shellCommandLine, startShellAgent, type LoginPathProbe, type LoginPathResult } from "./shell-agent.ts";
 import { descendantArgv, descendantProcesses, parseProcessTable, windowsArgv, windowsProcessTable } from "./windows-processes.ts";
 
 it("tells a pane's shell from the program herdr reports in front", () => {
@@ -25,6 +25,48 @@ it("writes the line each shell runs as a command, not as a string", () => {
   // cmd cannot carry these inside quotes
   expect(() => shellCommandLine("cmd", "C:\\gjc\\gjc.exe", ["%PATH%"])).toThrow();
   expect(() => shellCommandLine("cmd", "C:\\gjc\\gjc.exe", ['say "hi"'])).toThrow();
+});
+
+it("gives a native program its arguments through Windows PowerShell 5.1 as they were, and none 5.1 would split or PowerShell 7 might change", () => {
+  // each as it arrived intact at node.exe from 5.1.26100 (live-verified)
+  expect(powershellNativeArgs("powershell", ['say "hi"', "", "C:\\dir with space\\", "trail\\", "x y\\\\", 'a\\"b', "it's", "a\u00a0b\\", "a\ufeffb\\"])).toEqual([
+    // 5.1 escapes no quote for the program's own parser, and drops an empty argument
+    'say \\"hi\\"',
+    '""',
+    // the backslash ending an argument 5.1 quotes would escape the quote it closes it with; unquoted, it is read as it is
+    "C:\\dir with space\\\\",
+    "trail\\",
+    "x y\\\\\\\\",
+    // the backslashes before a quote are doubled, and one more escapes it
+    'a\\\\\\"b',
+    "it's",
+    // 5.1 quotes for what .NET calls whitespace: a no-break space, not a byte-order mark
+    "a\u00a0b\\\\",
+    "a\ufeffb\\",
+  ]);
+  expect(shellCommandLine("powershell", "codex", powershellNativeArgs("powershell", ["--", 'fix the "x" bug']))).toBe(`& 'codex' '--' 'fix the \\"x\\" bug'`);
+  // 5.1 counts the escaped quotes too: whitespace only after an odd number of them goes unquoted, and the argument arrives split
+  for (const arg of ['"fix the bug"', 'x="a b"', 'a"b c']) expect(() => powershellNativeArgs("powershell", [arg])).toThrow();
+  // one whitespace after an even number of them is enough for 5.1 to quote it
+  expect(powershellNativeArgs("powershell", ['"a b" c', 'say "hi"'])).toEqual(['\\"a b\\" c', 'say \\"hi\\"']);
+  // PowerShell 7 escapes them itself from 7.3, and passes them as 5.1 does before that
+  expect(powershellNativeArgs("pwsh", ["--model", "a b", "trail\\", "it's"])).toEqual(["--model", "a b", "trail\\", "it's"]);
+  for (const arg of ['say "hi"', "", "C:\\dir with space\\"]) expect(() => powershellNativeArgs("pwsh", [arg])).toThrow();
+  // cmd reads an agent's arguments again when PowerShell finds it as a .cmd file: `&` there runs the rest
+  for (const program of ["powershell", "pwsh"] as const) {
+    // and inside its quotes too: % and !NAME! expand, and a shim's `call` doubles a ^
+    for (const arg of ['fix "a&echo ran&b" now', "a&b", "x|y", "a<b", "a>b", "^caret", "%PATH%", "a b %OS%", "a & !OS!", "up ^ caret"]) expect(() => powershellNativeArgs(program, [arg])).toThrow();
+    // unless PowerShell puts it in quotes, for a space, where cmd reads & | < > as text
+    // (live-verified, 5.1.26100 and 7.6 to an npm-style .cmd shim): a profile folder named R&D (#3084)
+    const settings = "C:\\Users\\R&D\\AppData\\Local\\ovis\\claude settings\\a.json";
+    const quoted = [settings, "fix A & B", "x | y", "a < b > c"];
+    expect(powershellNativeArgs(program, quoted)).toEqual(quoted);
+    // but a `"` in any argument of the line toggles cmd's quotes, which run across arguments, and so
+    // does a `!Q!` delayed expansion turns into one (#3092)
+    for (const args of [['x"', "a & calc & rem"], ['"', " & echo INJECTED & rem "], ["--append-system-prompt", 'a 12" screen', "--settings", settings], ["!Q!", "a & calc & rem"]]) {
+      expect(() => powershellNativeArgs(program, args)).toThrow();
+    }
+  }
 });
 
 it("recognizes gjc as Windows reports it", () => {
@@ -191,6 +233,37 @@ it("service miss resolves the same executable for offer and start", async () => 
   expect(runs()).toBe(1);
 });
 
+it("finds a kind installed on the kept login PATH after a miss, with no new login shell", async () => {
+  const f = fixture();
+  const { probe, runs } = counted(async () => ({ path: `${f.loginBin}:/usr/bin` }));
+  const locator = new ShellAgentLocator({ platform: "linux", servicePath: f.servicePath, probe });
+  // omo is not installed yet: a miss, from one login-shell run
+  expect(await locator.executable("omo")).toBeNull();
+  // its installer puts it on the login PATH (~/.local/bin and the like) a moment later
+  writeFileSync(join(f.loginBin, "omo"), "#!/bin/sh\n", { mode: 0o755 });
+  // the next read, still within the kept minute, finds it there, as the install catalog does
+  expect(await locator.executable("omo")).toBe(join(f.loginBin, "omo"));
+  expect(runs()).toBe(1);
+});
+
+it("a refresh asked for while a run is out runs a new one after it, which every later read waits for", async () => {
+  const f = fixture();
+  const { probe, runs, found } = manual();
+  let clock = 0;
+  const locator = new ShellAgentLocator({ platform: "linux", servicePath: f.servicePath, probe, now: () => clock });
+  const first = locator.executable("omo");
+  // the install lands while that run, which read the PATH before it, is out
+  const refreshed = locator.refresh();
+  found(`${f.root}:/usr/bin`);
+  expect(await first).toBeNull();
+  writeFileSync(join(f.loginBin, "omo"), "#!/bin/sh\n", { mode: 0o755 });
+  expect(runs()).toBe(2);
+  found(`${f.loginBin}:/usr/bin`);
+  await refreshed;
+  expect(await locator.executable("omo")).toBe(join(f.loginBin, "omo"));
+  expect(runs()).toBe(2);
+});
+
 it("runs no login shell until asked, and again only once its answer is older than the TTL", async () => {
   const f = fixture();
   const { probe, runs } = counted(async () => ({ path: `${f.loginBin}:/usr/bin` }));
@@ -248,13 +321,14 @@ it("concurrent callers share one probe", async () => {
   writeFileSync(join(f.root, "gjc"), "#!/bin/sh\n", { mode: 0o755 });
   expect(await locator.executable("gjc")).toBeNull();
   expect(runs()).toBe(2);
-  // the next run sees it gone, and the one after sees it again once it is back
+  // the next run sees it gone; once it is back on that run's PATH it is found at once, as an install is
   clock += 60_000;
   let read = locator.executable("gjc");
   found(`${f.loginBin}:/usr/bin`);
   expect(await read).toBeNull();
   writeFileSync(f.gjc, "#!/bin/sh\n", { mode: 0o755 });
-  expect(await locator.executable("gjc")).toBeNull();
+  expect(await locator.executable("gjc")).toBe(f.gjc);
+  expect(runs()).toBe(3);
   clock += 60_000;
   read = locator.executable("gjc");
   found(`${f.loginBin}:/usr/bin`);

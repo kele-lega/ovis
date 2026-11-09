@@ -9,6 +9,9 @@
   --side-action: var(--space-6);
   --side-hover: color-mix(in srgb, var(--bg-hover) 50%, var(--bg-panel));
   --side-selected: var(--bg-hover);
+  /* Until resized, Agents keeps today's half-shell allocation when both lists are long. The PCs
+     take the rest, but never reserve height beyond their rows: Agents can use what they leave free.
+     The PCs grow first (below), so a long roster does not change today's default split. */
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -76,8 +79,9 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   color: var(--text);
 }
 
-/* The filter over both lists (MachineSidebar.tsx): its word, then one field the height of a row, in the rows'
-   gutter, and its clear inside the field's trailing cell. It never grows: a long query scrolls inside the field. */
+/* The filter over both lists (MachineSidebar.tsx): one field the height of a row, in the rows' gutter, its glass
+   inside the field's leading cell and its clear inside the trailing one, and no word beside it: the placeholder
+   says what it filters. It never grows: a long query scrolls inside the field. */
 .sidebar-filter {
   position: relative;
   display: flex;
@@ -87,17 +91,15 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   padding: var(--space-2) var(--side-gutter) 0;
 }
 
-/* the field's label stays in view whatever is typed: the section head's words (Agents) */
-.sidebar-filter-label {
-  flex: none;
+/* the glass sits in the field's leading cell, out of the pointer's way: a press on it lands in the field */
+.sidebar-filter-glass {
+  position: absolute;
+  top: calc(var(--space-2) + (var(--side-row) - var(--icon-size)) / 2);
+  left: calc(var(--side-gutter) + (var(--side-row) - var(--icon-size)) / 2);
+  width: var(--icon-size);
+  height: var(--icon-size);
   color: var(--text-dim);
-  font-size: var(--fs-input);
-  line-height: var(--lh-tight);
-}
-
-/* the size of the field's own text beside it, as .input steps down on a wide screen */
-@media (min-width: 641px) {
-  .sidebar-filter-label { font-size: var(--fs-md); }
+  pointer-events: none;
 }
 
 .sidebar-filter-input {
@@ -105,6 +107,7 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   min-width: 0;
   height: var(--side-row);
   padding-right: var(--side-row);
+  padding-left: var(--side-row);
   text-overflow: ellipsis;
 }
 
@@ -273,6 +276,47 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   height: 1em;
 }
 
+/* Settings → Background workspaces apart: the workspaces a launcher tagged role=background stand after the
+   rest, under a heading like the Agents list's Background agents one (AgentSidebar.css) that folds them and
+   says how many there are; its caret takes the leading cell */
+.workspace-background-toggle {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: var(--side-row);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: var(--tracking-caps);
+  line-height: var(--lh-tight);
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.workspace-background-caret {
+  flex: none;
+  width: var(--space-4);
+  height: var(--space-4);
+  margin-inline: calc((var(--side-box) - var(--space-4)) / 2);
+}
+
+.workspace-background-count {
+  width: var(--side-box);
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+@media (hover: hover) {
+  .workspace-background-toggle:hover { color: var(--text); }
+}
+
 .workspace {
   display: flex;
   flex-direction: column;
@@ -348,6 +392,137 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   height: var(--hairline);
 }
 
+/* Settings > Appearance > Agents under workspaces (#773): a workspace's agents hang one level under its
+   row on the same dim branch a worktree hangs from, a tee for each and an elbow for the last unless the
+   repository's worktrees go on below them. A worktree's agents sit a level further in, its own branch
+   passing by them to the next worktree. Each is a row's height, its state in the rows' trailing cell. */
+.workspace-agents {
+  --agent-indent: var(--side-box);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.worktree-children .workspace-agents { --agent-indent: calc(2 * var(--side-box)); }
+
+.workspace-agent {
+  position: relative;
+  border-radius: var(--radius-md);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+.workspace-agent-select {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-width: 0;
+  min-height: var(--side-row);
+  padding: 0 var(--side-box) 0 var(--agent-indent);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-agent-select > .sidebar-mark { margin-inline-end: calc(-1 * var(--space-2)); }
+.workspace-agent-select:focus-visible { outline-offset: calc(var(--ring-offset) * -1); }
+.workspace-agent-select:disabled { cursor: default; }
+
+.workspace-agent-select > .sidebar-pane-meta {
+  position: absolute;
+  inset-block: 0;
+  right: 0;
+  justify-content: center;
+  width: var(--side-box);
+}
+
+.workspace-agent-title,
+.workspace-agent-place {
+  min-width: 0;
+  overflow: hidden;
+  line-height: var(--lh-tight);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* the title keeps a few characters in the narrowest sidebar; the tab's name and the counts give way first */
+.workspace-agent-title {
+  flex: 0 1 auto;
+  min-width: calc(4 * var(--space-4));
+  font-size: var(--fs-md);
+}
+
+.workspace-agent-badges {
+  display: inline-flex;
+  flex: 0 1000 auto;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.workspace-agent-place {
+  flex: 0 1000 auto;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+
+.workspace-agent-select::before,
+.workspace-agent-select::after,
+.worktree-children .workspace-group:not(:last-child) .workspace-agent::before {
+  position: absolute;
+  content: "";
+  background: var(--border-strong);
+  pointer-events: none;
+}
+
+.workspace-agent-select::before {
+  top: 0;
+  bottom: 0;
+  left: calc(var(--agent-indent) - var(--side-box) / 2);
+  width: var(--hairline);
+}
+
+.workspace-agents:not([data-more]) > .workspace-agent:last-child > .workspace-agent-select::before { bottom: 50%; }
+
+.workspace-agent-select::after {
+  top: 50%;
+  left: calc(var(--agent-indent) - var(--side-box) / 2);
+  width: calc(var(--side-box) / 2 - var(--space-1));
+  height: var(--hairline);
+}
+
+.worktree-children .workspace-group:not(:last-child) .workspace-agent::before {
+  top: 0;
+  bottom: 0;
+  left: calc(var(--side-box) / 2);
+  width: var(--hairline);
+}
+
+@media (hover: hover) {
+  .workspace-agent:has(> .workspace-agent-select:enabled):hover { background: var(--side-hover); }
+}
+
+/* the selected agent's row carries the selection's fill; its workspace's row keeps the place in its words */
+.workspace-agent.is-selected { background: var(--side-selected); }
+.workspace-agent.is-selected .workspace-agent-title { color: var(--text-strong); }
+
+.workspace-group.is-selected.has-selected-agent > .workspace-header { background: transparent; }
+
+@media (hover: hover) {
+  .workspace-group.has-selected-agent > .workspace-header:hover { background: var(--side-hover); }
+}
+
+.machine-group:not(.is-offline) .workspace-agent.is-filter-context .workspace-agent-title,
+.machine-group:not(.is-offline) .workspace-agent.is-filter-context .sidebar-mark,
+.machine-group:not(.is-offline) .workspace-agent.is-filter-context .sidebar-mark .agent-mark {
+  color: var(--text-dim);
+}
+
 /* The face that leads a workspace row is also the fold when linked worktrees sit under it: under a
    pointer or keyboard focus it turns to the folder that says so, open while the worktrees show and
    closed while they are folded; on touch, where nothing hovers, the folder always shows. */
@@ -417,6 +592,32 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   }
 
   .workspace-select:focus-visible { outline: none; }
+}
+
+/* forced colors (Windows high contrast) repaint fills as Canvas, which would erase the selection: there it keeps a
+   leading border in the system's Highlight, pulled into the gutter so the row's content stays put, and as
+   wide as the ring plus the bar while keyboard focus draws its ring over that edge (#1618) */
+@media (forced-colors: active) {
+  .workspace-group.is-selected > .workspace-header {
+    margin-inline-start: calc(-2 * var(--hairline));
+    border-inline-start: calc(2 * var(--hairline)) solid Highlight;
+  }
+
+  .workspace-group.is-selected > .workspace-header:has(> .workspace-select:focus-visible) {
+    margin-inline-start: calc(-1 * (var(--ring-offset) + 2 * var(--hairline)));
+    border-inline-start-width: calc(var(--ring-offset) + 2 * var(--hairline));
+  }
+
+  /* the tree's selected agent takes the bar from its workspace's row, as it takes the fill */
+  .workspace-group.is-selected.has-selected-agent > .workspace-header {
+    margin-inline-start: 0;
+    border-inline-start: 0;
+  }
+
+  .workspace-agent.is-selected {
+    margin-inline-start: calc(-2 * var(--hairline));
+    border-inline-start: calc(2 * var(--hairline)) solid Highlight;
+  }
 }
 
 .workspace-copy {
@@ -691,9 +892,10 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   100% { opacity: 1; }
 }
 
-/* background tasks still running, and a pane's plan: a number beside the state, quieter than it */
+/* background tasks still running, a pane's plan and its context left: a number beside the state, quieter than it */
 .background-count,
-.plan-count {
+.plan-count,
+.context-count {
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
@@ -706,7 +908,8 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
 }
 
 .background-count svg,
-.plan-count svg {
+.plan-count svg,
+.context-count svg {
   width: var(--space-3);
   height: var(--space-3);
 }
@@ -719,7 +922,7 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   overflow-wrap: anywhere;
 }
 
-/* the footer's actions are rows on the same grid */
+/* the footer is one row on the same grid: the Settings gear and the plan meters */
 .sidebar-footer {
   position: relative;
   display: flex;
@@ -728,10 +931,24 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   padding: var(--space-2) var(--side-gutter) calc(var(--space-2) + env(safe-area-inset-bottom, 0px));
 }
 
-/* Keep the footer at the bottom when both lists are short after the upper section folds. */
-.sidebar-shell:not(:has(.machine-list .machine-workspaces)) .sidebar-footer {
-  margin-top: auto;
+/* The PCs get free space first, up to their rows; Agents starts with half the whole shell,
+   as before, and gets the space a short PCs list leaves. Neither grows past its own content. */
+.sidebar-shell > .pcs-sidebar {
+  flex: var(--pcs-flex, 1000 1 0);
+  min-height: var(--split-pcs-min, 0px);
+  max-height: var(--section-max, max-content);
 }
+.sidebar-shell > .agents-sidebar {
+  flex: var(--agents-flex, 1 1 50%);
+  min-height: var(--split-agents-min, 0px);
+  max-height: var(--section-max, max-content);
+}
+.sidebar-shell > .agents-sidebar:is(.is-collapsed, .is-empty) { flex: 0 1 auto; min-height: 0; }
+
+/* When neither list fills its allocation, keep Agents docked to the footer as before. Grouped
+   Agents stays on top, and the footer still stays at the foot of the sidebar. */
+.sidebar-shell:not(.is-agents-first) > .sidebar-split { margin-top: auto; }
+.sidebar-shell.is-agents-first > .sidebar-footer { margin-top: auto; }
 
 .sidebar-footer-action {
   justify-content: flex-start;
@@ -756,6 +973,28 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   .sidebar-footer-action:hover:not(:disabled) { background: var(--side-hover); }
 }
 
+/* which PC of the phone's several this is, and the way back to their list: a row above the gear */
+.sidebar-footer-pc {
+  min-height: var(--side-row);
+  margin-bottom: var(--space-1);
+}
+
+.sidebar-footer-pc-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-align: start;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-footer-pc-action {
+  flex: 0 0 auto;
+  margin-inline-start: var(--space-2);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
 /* the gear first, the plan meters filling the rest */
 .sidebar-footer-row {
   display: flex;
@@ -773,13 +1012,6 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
 
 .sidebar-footer-settings svg { margin-inline: auto; }
 
-.sidebar-install-help {
-  margin: 0;
-  padding: 0 var(--space-2) var(--space-1) var(--side-box);
-  color: var(--text-dim);
-  font-size: var(--fs-xs);
-}
-
 @media (pointer: coarse) {
   .sidebar-shell {
     --side-row: var(--touch-target);
@@ -794,6 +1026,20 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
     flex-basis: var(--touch-target);
     width: var(--touch-target);
     margin-inline: calc((var(--side-box) - var(--touch-target)) / 2);
+  }
+
+  /* The gear stays its --side-box column and takes a finger's --touch-target width through an
+     invisible expander that grows into the footer's gutter at its inline start, never toward the
+     plan meters after it. */
+  .sidebar-footer-row > .sidebar-footer-settings {
+    position: relative;
+  }
+
+  .sidebar-footer-row > .sidebar-footer-settings::before {
+    content: "";
+    position: absolute;
+    inset-block: min(0px, calc((100% - var(--touch-target)) / 2));
+    inset-inline: min(0px, calc(100% - var(--touch-target))) 0;
   }
 
   /* Row menus stay visible on touch. */
@@ -831,4 +1077,24 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
 
 .plan-count.is-done svg {
   color: var(--status-done);
+}
+
+/* the composer's context ring at the badges' size (Composer.css .composer-context): plain until little is left */
+.context-count-track,
+.context-count-used {
+  fill: none;
+  stroke-width: 2.5;
+}
+
+.context-count-track {
+  stroke: var(--border-strong);
+}
+
+.context-count-used {
+  stroke: currentColor;
+  stroke-linecap: round;
+}
+
+.context-count.is-low {
+  color: var(--status-blocked);
 }

@@ -1,5 +1,5 @@
 import type { AgentStatus, HerdrPane } from "../shared/protocol.ts";
-import { HerdrError, sessionSnapshot, subscribeEvents, type EventFrame, type Subscription } from "./herdr/client.ts";
+import { focusFromMove, HerdrError, sessionSnapshot, subscribeEvents, type EventFrame, type Subscription } from "./herdr/client.ts";
 
 /**
  * Collects agent status for EVERY pane in the session, not just the attached ones.
@@ -85,9 +85,28 @@ export interface StatusCollectorHandlers {
    */
   onReconciled?: (panes: readonly HerdrPane[]) => void;
   onPaneEnded: (paneId: string) => void;
+  /**
+   * A pane closed with no exit frame (herdr's `pane.close`, hc's `terminal.kill`): what it held goes,
+   * but nothing ended by itself, so no "terminal ended" alert. It can follow `onPaneEnded` for a
+   * program that ended and whose pane then closed.
+   */
+  onPaneClosed?: (paneId: string) => void;
+  /**
+   * herdr moved a pane under a new ID (`pane_moved` to another workspace, from anywhere): told before the
+   * structure change it is part of, so what is kept under the old ID can follow it first.
+   */
+  onPaneMoved?: (previousPaneId: string, paneId: string) => void;
   onStructureChange: () => void;
+  /**
+   * Which herdr answers on the lifecycle subscription while it is open: `onChange` gets herdr's identity
+   * (`identity`, read from its socket) when the subscription starts, only if it is still the one read before
+   * that connection was attempted, and null when it closes or is refused. A herdr that died closes it,
+   * while its socket file can stay behind; a file replaced meanwhile names none.
+   */
+  herdrLive?: { identity: () => string | null; onChange: (identity: string | null) => void };
   /** herdr's focus moved onto this pane: whoever is at its terminal has it in front */
-  onFocus?: (paneId: string) => void;
+  /** `passing`: herdr's focus passed over the pane while a move took the focused one out and back (`focusFromMove`). */
+  onFocus?: (paneId: string, passing: boolean) => void;
 }
 
 /** What the collector talks to, and how long it waits: tests swap both. */
@@ -197,6 +216,7 @@ function resilientSubscription(
   onRestart: () => void,
   isStopped: () => boolean,
   onFirstStart?: () => void,
+  liveness?: { identity: () => string | null; onChange: (identity: string | null) => void },
 ): { close: () => void } {
   let subscription: Subscription | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -208,16 +228,23 @@ function resilientSubscription(
     if (isStopped()) return;
     const retry = attempted;
     attempted = true;
+    // the herdr this connection is attempted to: the one that answers it is no other
+    const attemptedTo = liveness?.identity() ?? null;
     subscription = deps.subscribe(subscriptions, {
       onEvent,
       onStarted: () => {
         delay = deps.reconnectMinMs;
+        if (liveness) {
+          const now = liveness.identity();
+          liveness.onChange(attemptedTo !== null && now === attemptedTo ? now : null);
+        }
         if (retry) onRestart();
         else onFirstStart?.();
       },
       onError: logSubscriptionError,
       onClose: () => {
         subscription = null;
+        liveness?.onChange(null);
         if (isStopped()) return;
         retryTimer = setTimeout(open, delay);
         delay = Math.min(delay * 2, deps.reconnectMaxMs);
@@ -233,6 +260,8 @@ function resilientSubscription(
       const current = subscription;
       subscription = null;
       current?.close();
+      // a subscription its caller closes reports no close of its own: it is not live any more either
+      liveness?.onChange(null);
     },
   };
 }
@@ -274,6 +303,8 @@ export function startStatusCollector(handlers: StatusCollectorHandlers, override
   const actedOn = new Map<string, number>();
   /** Creation is newer than any snapshot already in flight when the caller registered it. */
   const trackedPanes = new Map<string, number>();
+  /** when a pane's exit was told: its close right after has nothing left to clean up */
+  const exitedAt = new Map<string, number>();
   /** when a pane last came to the front: no replay from a snapshot asked for before that. A resync still corrects it */
   const focusedAt = new Map<string, number>();
   /** the status subscription was closed for another pane set, or refused: a change since then may have had no event */
@@ -459,6 +490,9 @@ export function startStatusCollector(handlers: StatusCollectorHandlers, override
       for (const [paneId, seq] of lastEventOf) if (seq <= askedAt && !paneIds.includes(paneId)) lastEventOf.delete(paneId);
       for (const paneId of [...heard.keys()]) if (!paneIds.includes(paneId) && (lastEventOf.get(paneId) ?? 0) <= askedAt) heard.delete(paneId);
       for (const [paneId, seq] of actedOn) if (seq <= askedAt && !paneIds.includes(paneId)) actedOn.delete(paneId);
+      // a pane shown again after its exit (its ID reused, a new program) holds state of its own: its close cleans
+      // up. One gone stays marked until its close frame, which may still come
+      for (const [paneId, seq] of exitedAt) if (seq <= askedAt && paneIds.includes(paneId)) exitedAt.delete(paneId);
       for (const [paneId, seq] of focusedAt) if (seq <= askedAt && !paneIds.includes(paneId)) focusedAt.delete(paneId);
       for (const paneId of [...displayAgents.keys()]) if (!paneIds.includes(paneId) && (lastEventOf.get(paneId) ?? 0) <= askedAt) displayAgents.delete(paneId);
       if (sameSet) {
@@ -516,6 +550,7 @@ export function startStatusCollector(handlers: StatusCollectorHandlers, override
         trackedPanes.delete(parsed.paneId);
         // a snapshot already on its way still holds the pane: it is no news of it
         actedOn.set(parsed.paneId, ++statusEvents);
+        exitedAt.set(parsed.paneId, statusEvents);
         heard.delete(parsed.paneId);
         handlers.onPaneEnded(parsed.paneId);
       }
@@ -535,11 +570,19 @@ export function startStatusCollector(handlers: StatusCollectorHandlers, override
           // restore that baseline nor prune the one just carried to the new ID.
           actedOn.set(previousPaneId, ++statusEvents);
           lastEventOf.set(paneId, statusEvents);
+          handlers.onPaneMoved?.(previousPaneId, paneId);
         }
         // closed with no exit frame: a snapshot on its way that still holds the pane is no news of it either
         if (parsed.closed !== undefined) {
+          // a tracked pane is known closed now: a snapshot without it must not report it ended
+          const exited = exitedAt.get(parsed.closed);
+          exitedAt.delete(parsed.closed);
+          // after its exit with nothing heard or registered under its ID since, the exit already cleaned it up
+          const cleaned = exited !== undefined && Math.max(lastEventOf.get(parsed.closed) ?? 0, trackedPanes.get(parsed.closed) ?? 0) < exited;
+          trackedPanes.delete(parsed.closed);
           actedOn.set(parsed.closed, ++statusEvents);
           heard.delete(parsed.closed);
+          if (!cleaned) handlers.onPaneClosed?.(parsed.closed);
         }
       }
       scheduleStructureChange();
@@ -556,6 +599,7 @@ export function startStatusCollector(handlers: StatusCollectorHandlers, override
       structureStarted.resolve();
       if (trackedPanes.size > 0) void reconcile();
     },
+    handlers.herdrLive,
   );
 
   // Its own connection: a focus type an older herdr refuses must not cost pane exits.
@@ -567,12 +611,16 @@ export function startStatusCollector(handlers: StatusCollectorHandlers, override
       (frame) => {
         const paneId = parseFocusFrame(frame);
         if (paneId === null) return;
-        focusedAt.set(paneId, ++statusEvents);
-        // a finish seen at herdr's terminal is no measure for a later snapshot. Work still going on is:
-        // its finish in a gap after this is news
-        const told = heard.get(paneId);
-        if (told !== undefined && told.status !== "working" && told.status !== "blocked") heard.delete(paneId);
-        onFocus(paneId);
+        // nobody looked at a pane herdr's focus only passed over: its finishes stay news
+        const passing = focusFromMove(paneId);
+        if (!passing) {
+          focusedAt.set(paneId, ++statusEvents);
+          // a finish seen at herdr's terminal is no measure for a later snapshot. Work still going on is:
+          // its finish in a gap after this is news
+          const told = heard.get(paneId);
+          if (told !== undefined && told.status !== "working" && told.status !== "blocked") heard.delete(paneId);
+        }
+        onFocus(paneId, passing);
       },
       // a focus change missed meanwhile is gone for good: the next one is heard again
       () => focusStarted.resolve(),

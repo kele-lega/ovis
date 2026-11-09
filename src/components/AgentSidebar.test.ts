@@ -96,3 +96,157 @@ describe("AgentSidebar plugin tokens", () => {
     expect(lines[1]).toBe("checkout-api");
   });
 });
+
+describe("AgentSidebar, what herdr-core reports", () => {
+  const saved = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const savedLanguages = Object.getOwnPropertyDescriptor(navigator, "languages");
+  beforeEach(() => {
+    Object.defineProperty(globalThis, "window", { configurable: true, value: { matchMedia: () => ({ matches: false }) } });
+    Object.defineProperty(navigator, "languages", { configurable: true, value: ["en"] });
+  });
+  afterEach(() => {
+    if (saved) Object.defineProperty(globalThis, "window", saved);
+    else Reflect.deleteProperty(globalThis, "window");
+    if (savedLanguages) Object.defineProperty(navigator, "languages", savedLanguages);
+    else Reflect.deleteProperty(navigator, "languages");
+  });
+
+  test("a helper reads on one line under the agent that started it, a blocked agent says why in a few words, and progress is a percent", () => {
+    const html = render([machine([
+      pane("t1", { agent_status: "working", agent_progress: 40 }),
+      pane("t9", { agent_status: "blocked", agent_kind: "question", agent_message: "Which <branch>?" }),
+      pane("t2", { agent: "codex", agent_status: "blocked", parent_pane_id: "t1", agent_kind: "permission", agent_message: "Allow bash: rm -rf build?" }),
+      // a blocked agent that said nothing more draws no line; a kind outside the protocol is shown as written
+      pane("t3", { agent_status: "blocked" }),
+      pane("t4", { agent_status: "blocked", agent_kind: "payment" }),
+    ])]);
+    expect([...html.matchAll(/data-pane="([^"]+)"(?: data-pin-key="[^"]+")?(?: data-depth="(\d)")?/g)].map((match) => [match[1], match[2] ?? "0"]))
+      .toEqual([["t1", "0"], ["t2", "1"], ["t9", "0"], ["t3", "0"], ["t4", "0"]]);
+    expect([...html.matchAll(/<span class="agent-blocked"[^>]*>(.*?)<\/span>/g)].map((match) => match[1])).toEqual(["Needs permission", "Has a question", "payment"]);
+    // a screen reader hears the whole reason in the row, not the cut one
+    expect(html).toContain('<span class="agent-blocked" aria-hidden="true">Needs permission</span><span class="visually-hidden">Needs permission: Allow bash: rm -rf build?</span>');
+    expect(html).toContain('<span class="agent-blocked">payment</span>');
+    expect(html).not.toContain("<branch>");
+    // the whole reason is in the tooltip
+    expect(tooltips(html)[1]).toContain("Needs permission: Allow bash: rm -rf build?");
+    expect(tooltips(html)[2]).toContain("Has a question: Which <branch>?");
+    // the helper's row is one line: no place and no plugin values under its title
+    expect(texts(html, "agent-context")).toHaveLength(4);
+    // the percent is drawn for the eye; the words are what a screen reader reads, and the tooltip says it too
+    expect([...html.matchAll(/<span class="agent-progress" aria-hidden="true">(.*?)<\/span>/g)].map((match) => match[1])).toEqual(["40%"]);
+    expect(html).toContain('<span class="visually-hidden">Progress 40%</span>');
+    expect(tooltips(html)[0]).toContain("Progress 40%");
+    expect(tooltips(html)[1]).toContain("Started by t1");
+  });
+
+  test("a helper's tree line runs on past its own helper to its next sibling", () => {
+    const html = render([machine([
+      pane("t1", { agent_status: "working" }),
+      pane("t2", { agent_status: "working", parent_pane_id: "t1" }),
+      pane("t5", { agent_status: "working", parent_pane_id: "t2" }),
+      pane("t3", { agent_status: "working", parent_pane_id: "t1" }),
+      pane("t4", { agent_status: "working" }),
+    ])]);
+    const lines = [...html.matchAll(/<li [^>]*data-pane="([^"]+)"[^>]*>/g)].map((match) => [match[1], /data-more=""/.test(match[0]), /data-through=""/.test(match[0])]);
+    expect(lines).toEqual([["t1", false, false], ["t2", true, false], ["t5", false, true], ["t3", false, false], ["t4", false, false]]);
+  });
+});
+
+describe("AgentSidebar folded helpers (#772)", () => {
+  const saved = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const savedLanguages = Object.getOwnPropertyDescriptor(navigator, "languages");
+  let stored: Record<string, string> = {};
+  beforeEach(() => {
+    stored = {};
+    const localStorage = { getItem: (key: string) => stored[key] ?? null, setItem: (key: string, value: string) => { stored[key] = value; }, removeItem: (key: string) => { delete stored[key]; } };
+    Object.defineProperty(globalThis, "window", { configurable: true, value: { matchMedia: () => ({ matches: false }), localStorage } });
+    Object.defineProperty(navigator, "languages", { configurable: true, value: ["en"] });
+  });
+  afterEach(() => {
+    if (saved) Object.defineProperty(globalThis, "window", saved);
+    else Reflect.deleteProperty(globalThis, "window");
+    if (savedLanguages) Object.defineProperty(navigator, "languages", savedLanguages);
+    else Reflect.deleteProperty(navigator, "languages");
+  });
+  const family = [
+    pane("t1", { agent_status: "working" }),
+    pane("t2", { agent_status: "working", parent_pane_id: "t1" }),
+    pane("t5", { agent_status: "working", parent_pane_id: "t2" }),
+    pane("t3", { agent_status: "blocked", parent_pane_id: "t1" }),
+    pane("t6", { agent_status: "idle", parent_pane_id: "t1" }),
+    pane("t4", { agent_status: "working" }),
+  ];
+  const draw = (selectedPaneId: string | null = null): string => renderToStaticMarkup(createElement(SettingsProvider, {
+    children: createElement(AgentSidebar, { machines: [machine(family)], selectedMachineId: "local", selectedPaneId, stateWord: () => "disconnected", onSelect: () => {} }),
+  }));
+  /** each entry of the list in the order drawn: a row as its pane id with " hidden" when folded away, a helpers line as "+<agent pane> <count> <expanded>" */
+  const entries = (html: string): string[] =>
+    [...html.matchAll(/<li class="(agent-item|agent-helpers)[^"]*"([^>]*)>([\s\S]*?<\/button>)?/g)].map((item) => item[1] === "agent-helpers"
+      ? `+${/data-helpers-of="local:([^"]+)"/.exec(item[2]!)![1]} ${/agent-section-count">(\d+)</.exec(item[3]!)![1]} ${/aria-expanded="(true|false)"/.exec(item[3]!)![1]}`
+      : `${/data-pane="([^"]+)"/.exec(item[2]!)![1]}${/ hidden=""/.test(item[2]!) ? " hidden" : ""}`);
+
+  test("off by default: every helper is listed under its agent, with no helpers line", () => {
+    const html = draw();
+    expect(entries(html)).toEqual(["t1", "t2", "t5", "t3", "t6", "t4"]);
+  });
+
+  test("on: an agent's helpers fold under one line that says how many, and a helper that needs you stays in sight", () => {
+    stored["ovis:fold-helpers"] = "true";
+    const html = draw();
+    expect(entries(html)).toEqual(["t1", "+t1 4 false", "t2 hidden", "t5 hidden", "t3", "t6 hidden", "t4"]);
+    // a screen reader hears whose helpers they are, not only "Helpers" and a count
+    expect(html).toMatch(/data-helpers-of="local:t1"[\s\S]*?<span class="agent-helpers-name" aria-hidden="true">Helpers<\/span><span class="visually-hidden">Helpers of t1<\/span>/);
+    // the line says which of the folded ones ask for a look
+    expect(html).toMatch(/data-helpers-of="local:t1"[\s\S]*?data-state="blocked"[\s\S]*?1 need you[\s\S]*?data-state="working"[\s\S]*?2 working/);
+    // the helper still in sight hangs from the line, with no line running on past it
+    expect(html).toMatch(/<li [^>]*data-pane="t3"[^>]*data-depth="1"(?![^>]*data-more)[^>]*>/);
+  });
+
+  test("on: the selected helper stays in sight", () => {
+    stored["ovis:fold-helpers"] = "true";
+    expect(entries(draw("t5"))).toEqual(["t1", "+t1 4 false", "t2 hidden", "t5", "t3", "t6 hidden", "t4"]);
+  });
+
+  test("on: an agent this device opened lists every helper, its line open", () => {
+    stored["ovis:fold-helpers"] = "true";
+    stored["ovis:agents-helpers-open"] = JSON.stringify(["local:t1"]);
+    expect(entries(draw())).toEqual(["t1", "+t1 4 true", "t2", "t5", "t3", "t6", "t4"]);
+  });
+});
+
+describe("AgentSidebar background agents", () => {
+  const saved = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const savedLanguages = Object.getOwnPropertyDescriptor(navigator, "languages");
+  beforeEach(() => {
+    Object.defineProperty(globalThis, "window", { configurable: true, value: { matchMedia: () => ({ matches: false }) } });
+    Object.defineProperty(navigator, "languages", { configurable: true, value: ["en"] });
+  });
+  afterEach(() => {
+    if (saved) Object.defineProperty(globalThis, "window", saved);
+    else Reflect.deleteProperty(globalThis, "window");
+    if (savedLanguages) Object.defineProperty(navigator, "languages", savedLanguages);
+    else Reflect.deleteProperty(navigator, "languages");
+  });
+  /** each list's entries in the order drawn: a row as its pane id (with " hidden" when folded away), the background heading as "BG" */
+  const lists = (html: string): string[][] =>
+    [...html.matchAll(/<ul class="agent-list[^"]*"[^>]*>([\s\S]*?)<\/ul>/g)].map((list) =>
+      [...list[1]!.matchAll(/<li class="(agent-item|agent-background-label)[^"]*"([^>]*)>/g)].map((item) =>
+        item[1] === "agent-background-label" ? "BG" : `${/data-pane="([^"]+)"/.exec(item[2]!)![1]}${/ hidden=""/.test(item[2]!) ? " hidden" : ""}`));
+
+  test("panes tagged role=background sit folded after the others in the same list, under a heading that says how many", () => {
+    const html = render([machine([
+      pane("w1:p1"),
+      pane("w1:p2", { agent_status: "working", tokens: { role: "background" } }),
+      pane("w1:p3", { agent_status: "blocked", tokens: { role: "background" } }),
+      pane("w1:p4", { agent_status: "working", tokens: { role: "background" } }),
+    ])]);
+    expect(lists(html)).toEqual([["w1:p1", "w1:p3", "BG", "w1:p2 hidden", "w1:p4 hidden"]]);
+    expect(html).toMatch(/<button type="button" class="agent-background-toggle" aria-expanded="false">[\s\S]*?<span>Background agents<\/span><span class="agent-section-count">2<\/span><\/button>/);
+  });
+
+  test("a list with no tagged pane has no background part", () => {
+    const html = render([machine([pane("w1:p1"), pane("w1:p2", { tokens: { role: "lead" } })])]);
+    expect(lists(html)).toEqual([["w1:p1", "w1:p2"]]);
+    expect(html).not.toContain("agent-background-toggle");
+  });
+});

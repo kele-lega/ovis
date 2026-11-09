@@ -1,9 +1,9 @@
 /** Shared native-record rules keep paging, rendering and on-demand results consistent. */
-import type { ConversationPart, ConversationTurn, OmoTaskResult } from "../shared/protocol.ts";
+import type { ConversationPart, ConversationTurn, GoalWaitSources, OmoTaskResult } from "../shared/protocol.ts";
 import type { SubagentDetail, TaskNotification } from "./claude-subagents.ts";
 import { skillInvocationPrompt, skillPromptMessage } from "./skill-activity.ts";
 import { trimOutput } from "./tool-output.ts";
-import { inlineImageType } from "./codex-images.ts";
+import { inlineImageType, ompBlobDigest, ompBlobImageType } from "./codex-images.ts";
 
 type Row = Record<string, unknown>;
 export const record = (value: unknown): Row => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Row : {};
@@ -74,32 +74,46 @@ export function piMessage(value: unknown): Row | null {
  * One entry's tool results, with the images each carries. pi reads a picture into a tool
  * result as inline base64 beside the text it returns, so only the position is carried in the
  * page: the bytes stay in the file and are fetched when the row is opened, the same way a
- * user-pasted image is. `index` counts the images of that one result, which is what the
- * page's ref quotes, so a fetch never has to agree with the parse about anything else.
+ * user-pasted image is. `images` holds one entry per place among that result's pictures (piPictures),
+ * the type it shows as or null for a place shown empty, and a ref quotes its place, so a fetch never
+ * has to agree with the parse about anything else.
  */
-export function piResults(message: Row): { id: string; text: string; error: boolean; images: string[] }[] {
+export function piResults(message: Row, blobs?: string | null): { id: string; text: string; error: boolean; images: (string | null)[] }[] {
   const blocks = message.role === "toolResult" ? [message] : Array.isArray(message.content) ? message.content.filter((block) => record(block).type === "toolResult") : [];
   return blocks.flatMap((value) => {
     const block = record(value);
     if (typeof block.toolCallId !== "string") return [];
-    const images = (Array.isArray(block.content) ? block.content : []).map(piImageOf).filter((image): image is { media_type: string; data: string } => image !== null).map((image) => image.media_type);
+    const images = piPictures(block.content, blobs).map((image) => image.media_type);
     return [{ id: block.toolCallId, text: resultText(block.content), error: block.isError === true, images }];
   });
 }
 
 /**
- * A picture pi holds inline, by the type its bytes announce (inlineImageType: the same check the
- * image endpoint makes). pi names the type `mimeType` where Claude names it `media_type`.
+ * The pictures among a record's content blocks, one per place a ref can quote, in order. pi holds a
+ * picture inline, by the type its bytes announce (inlineImageType: the same check the image endpoint
+ * makes); pi names the type `mimeType` where Claude names it `media_type`. omp moves a picture's bytes
+ * to the blob store `blobs` and writes `blob:sha256:<digest>` in their place: such a block takes its
+ * place by what the transcript says (ompBlobDigest), and shows as the type its stored bytes announce
+ * now (ompBlobImageType: the endpoint's check), or as nothing (`media_type` null) when they are no
+ * picture, so a blob that goes missing never moves the next picture into its place. `data` is the
+ * inline text or the blob ref.
  */
-function piImageOf(value: unknown): { media_type: string; data: string } | null {
-  const image = record(value);
-  if (image.type !== "image") return null;
-  const type = inlineImageType(typeof image.mimeType === "string" ? image.mimeType : image.media_type, image.data);
-  return type === null ? null : { media_type: type, data: image.data as string };
+function piPictures(content: unknown, blobs?: string | null): { media_type: string | null; data: string }[] {
+  return (Array.isArray(content) ? content : []).flatMap((value) => {
+    const image = record(value);
+    if (image.type !== "image" || typeof image.data !== "string") return [];
+    const declared = typeof image.mimeType === "string" ? image.mimeType : image.media_type;
+    if (blobs && image.data.startsWith("blob:")) return ompBlobDigest(declared, image.data) === null ? [] : [{ media_type: ompBlobImageType(blobs, declared, image.data), data: image.data }];
+    const type = inlineImageType(declared, image.data);
+    return type === null ? [] : [{ media_type: type, data: image.data }];
+  });
 }
 
 /** A picture in a pi prompt: the entry it was sent in, and its place among that prompt's pictures. */
 export const PI_PROMPT_IMAGE_REF = /^pi-prompt:([A-Za-z0-9_.\-]{1,128}):(\d{1,3})$/;
+
+/** A picture a pi or omp tool returned: the call its result answers (omp's ids hold a `|`), and its place among that result's pictures. */
+export const PI_IMAGE_REF = /^pi:([A-Za-z0-9_:.|\-]{1,128}):(\d{1,3})$/;
 
 /**
  * The pictures a pi prompt carries, each with the ref that names it. `message` must come from
@@ -107,13 +121,12 @@ export const PI_PROMPT_IMAGE_REF = /^pi-prompt:([A-Za-z0-9_.\-]{1,128}):(\d{1,3}
  * so a picture is named exactly when it can be fetched, and a prompt that is only pictures opens a
  * turn exactly when it is drawn as one.
  */
-export function piPromptImages(entry: unknown, message: Row): { media_type: string; ref: string; data: string }[] {
+export function piPromptImages(entry: unknown, message: Row, blobs?: string | null): { media_type: string; ref: string; data: string }[] {
   const id = record(entry).id;
   if (message.role !== "user" || !Array.isArray(message.content) || typeof id !== "string") return [];
-  const shown = message.content.map(piImageOf).filter((image): image is { media_type: string; data: string } => image !== null);
-  return shown.flatMap((image, index) => {
+  return piPictures(message.content, blobs).flatMap(({ media_type, data }, index) => {
     const ref = `pi-prompt:${id}:${index}`;
-    return PI_PROMPT_IMAGE_REF.test(ref) ? [{ ...image, ref }] : [];
+    return media_type !== null && PI_PROMPT_IMAGE_REF.test(ref) ? [{ media_type, data, ref }] : [];
   });
 }
 
@@ -129,8 +142,8 @@ export function piImageBlock(message: Row, toolCallId: string, index: number): {
   const blocks = message.role === "toolResult" ? [message] : (Array.isArray(message.content) ? message.content : []).filter((block) => record(block).type === "toolResult");
   const block = blocks.map(record).find((value) => value.toolCallId === toolCallId);
   if (block === undefined) return null;
-  const images = (Array.isArray(block.content) ? block.content : []).map(piImageOf).filter((image): image is { media_type: string; data: string } => image !== null);
-  return index >= 0 ? images[index] ?? null : null;
+  const image = index >= 0 ? piPictures(block.content)[index] : undefined;
+  return image?.media_type ? { media_type: image.media_type, data: image.data } : null;
 }
 
 /** Enough turns for a conversation. */
@@ -157,9 +170,46 @@ export function piNotice(value: unknown): Extract<ConversationPart, { kind: "not
   return typeof entry.customType === "string" ? { kind: "notice", text, source: entry.customType } : { kind: "notice", text };
 }
 
-const OMO_TASK_RESULT_MAX = 16_000;
+export const OMO_TASK_RESULT_MAX = 16_000;
 const label = (value: unknown): string | null => typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 const amount = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+
+/**
+ * OmO continues an active goal on its own with a `goal-continuation` custom message (`display:
+ * false`), the TUI's "goal continues" line: the turn after it is the goal's, not an answer to anyone.
+ * A notice in the user's seat, its text the objective the message quotes (escaped as OmO writes it).
+ */
+export function omoGoalContinuation(value: unknown): Extract<ConversationPart, { kind: "notice" }> | null {
+  const entry = record(value);
+  if (entry.type !== "custom_message" || entry.customType !== "goal-continuation" || typeof entry.content !== "string") return null;
+  const quoted = /<untrusted_objective>([\s\S]*?)<\/untrusted_objective>/.exec(entry.content)?.[1];
+  const objective = quoted?.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&quot;", '"').replaceAll("&#39;", "'").replaceAll("&amp;", "&").trim();
+  return { kind: "notice", text: objective || entry.content.trim().split("\n")[0]!, source: "goal-continuation" };
+}
+
+/** OmO's names for what a goal's wait waits on (`wakeSources`), by GoalWaitSources' names; its wake queue is its own. */
+const GOAL_WAIT_SOURCES: Record<string, keyof GoalWaitSources> = {
+  "senpi-task": "tasks", "terminal-monitors": "monitors", "terminal-background-sessions": "terminals", "omo-dag": "dags", "senpi-codemode": "cells",
+};
+
+/**
+ * OmO's goal waiting on background work (`goal-cache-warmup`): `scheduled` names when it continues
+ * and what it waits on; any other phase (`resumed`) ends the wait, and so does a record that
+ * cannot say when it would continue.
+ */
+export function omoGoalWait(value: unknown): { wait: Extract<ConversationPart, { kind: "goal_wait" }> | null } | null {
+  const entry = record(value);
+  if (entry.type !== "custom" || entry.customType !== "goal-cache-warmup") return null;
+  const data = record(entry.data);
+  const due = amount(data.dueAtMs);
+  if (data.phase !== "scheduled" || due === null || Number.isNaN(new Date(due).getTime())) return { wait: null };
+  const waiting_on: GoalWaitSources = { tasks: 0, monitors: 0, terminals: 0, dags: 0, cells: 0 };
+  for (const [source, count] of Object.entries(record(data.wakeSources))) {
+    const kind = GOAL_WAIT_SOURCES[source];
+    if (kind !== undefined) waiting_on[kind] = Math.floor(amount(count) ?? 0);
+  }
+  return { wait: { kind: "goal_wait", due_at: new Date(due).toISOString(), waiting_on } };
+}
 
 /**
  * The summaries OmO's `task` calls gave their tasks, by task id: the call's result names the
@@ -263,9 +313,10 @@ export interface TranscriptParser {
   snapshot(tail?: string): ConversationTurn[];
 }
 
-/** `images`: pi keeps the pictures of prompts and tool results inline, so their refs are named.
- * `callIds`: each tool part carries its call's own id (gjc, whose rewrites the chat matches by it) */
-type OmpTranscriptOptions = { images?: boolean; callIds?: boolean; taskTitles?: Map<string, string> };
+/** `images`: the pictures of prompts and tool results are named, inline ones (pi) and, with `blobs`,
+ * those omp keeps in that blob store. `callIds`: each tool part carries its call's own id (gjc, whose
+ * rewrites the chat matches by it) */
+type OmpTranscriptOptions = { images?: boolean; blobs?: string | null; callIds?: boolean; taskTitles?: Map<string, string> };
 
 interface OmpParseState {
   turns: ConversationTurn[];
@@ -274,10 +325,12 @@ interface OmpParseState {
   /** The caller's map when parsing a page in stretches; previews must never write to it. */
   taskTitles: Map<string, string>;
   settled: boolean;
+  /** The index of the turn that shows OmO's goal waiting (omoGoalWait); only ever the last turn. */
+  wait: number | null;
 }
 
 function ompParseState(options: OmpTranscriptOptions): OmpParseState {
-  return { turns: [], pending: new Map(), taskTitles: options.taskTitles ?? new Map(), settled: false };
+  return { turns: [], pending: new Map(), taskTitles: options.taskTitles ?? new Map(), settled: false, wait: null };
 }
 
 /**
@@ -289,12 +342,18 @@ function ompParseState(options: OmpTranscriptOptions): OmpParseState {
  * notification. Merging across it folded the answer before it into the next turn's work block.
  */
 export function createOmpTranscriptParser(options: OmpTranscriptOptions = {}): TranscriptParser {
-  return ompTranscriptParser(ompParseState(options), options.images === true, options.callIds === true);
+  return ompTranscriptParser(ompParseState(options), options.images === true, options.callIds === true, options.blobs ?? null);
 }
 
-function ompTranscriptParser(state: OmpParseState, images: boolean, callIds: boolean): TranscriptParser {
+function ompTranscriptParser(state: OmpParseState, images: boolean, callIds: boolean, blobs: string | null): TranscriptParser {
   const { turns, pending, taskTitles } = state;
-  const assistantTurn = (ts?: string): ConversationTurn => {
+  const endWait = (): void => {
+    if (state.wait !== null) turns.splice(state.wait, 1);
+    state.wait = null;
+  };
+  const assistantTurn = (ts: string | undefined, speaks: boolean): ConversationTurn => {
+    // the agent speaks again: a goal's wait is over, and the turn it would continue is the one before it
+    if (speaks) endWait();
     const last = turns[turns.length - 1];
     if (last !== undefined && last.role === "assistant" && !state.settled) return last;
     const turn: ConversationTurn = { role: "assistant", ts: ts ?? null, parts: [] };
@@ -305,8 +364,15 @@ function ompTranscriptParser(state: OmpParseState, images: boolean, callIds: boo
   const contentParts = (content: unknown): { type?: string; text?: unknown }[] =>
     Array.isArray(content) ? content.filter((part) => typeof part === "object" && part !== null) : [];
 
+  // a goal's wait holds only while nothing follows it: a turn the last record added after it ends it
+  // (an assistant record with nothing to draw opens an empty turn, which is not one)
+  const settleWait = (): void => {
+    if (state.wait !== null && turns.slice(state.wait + 1).some((turn) => turn.parts.length > 0)) endWait();
+  };
+
   const write = (text: string): void => {
     for (const line of text.split("\n")) {
+      settleWait();
       if (line.trim().length === 0) continue;
       let entry: unknown;
       try {
@@ -315,8 +381,24 @@ function ompTranscriptParser(state: OmpParseState, images: boolean, callIds: boo
         continue; // a torn tail line while omp is mid-append
       }
       if (entry === null || typeof entry !== "object") continue;
-      if (isContextClear(entry, "omp-transcript")) { turns.length = 0; pending.clear(); continue; }
+      if (isContextClear(entry, "omp-transcript")) { turns.length = 0; pending.clear(); state.wait = null; continue; }
       const timestamp = (entry as { timestamp?: string }).timestamp;
+      const goalWait = omoGoalWait(entry);
+      if (goalWait !== null) {
+        endWait();
+        if (goalWait.wait !== null) {
+          state.wait = turns.length;
+          turns.push({ role: "user", ts: timestamp ?? null, parts: [goalWait.wait] });
+        }
+        continue;
+      }
+      // OmO starts a turn nobody typed (a wake, a monitor's event, the goal's continuation): the wait is over
+      if (record(entry).type === "custom" && record(entry).customType === "engine-turn-start") { endWait(); continue; }
+      const continuation = omoGoalContinuation(entry);
+      if (continuation !== null) {
+        turns.push({ role: "user", ts: timestamp ?? null, parts: [continuation] });
+        continue;
+      }
       const skillPrompt = skillPromptMessage(entry);
       if (skillPrompt !== null) {
         turns.push({ role: "user", ts: timestamp ?? null, parts: [{ kind: "text", text: skillPrompt.request }, ...skillPrompt.skills.map((skill) => ({ kind: "skill" as const, skill }))] });
@@ -339,14 +421,14 @@ function ompTranscriptParser(state: OmpParseState, images: boolean, callIds: boo
       if ((entry as { type?: unknown }).type === "compaction") {
         const summary = (entry as { summary?: unknown }).summary;
         if (typeof summary === "string" && summary.trim().length > 0) {
-          turns.push({ role: "user", ts: timestamp ?? null, parts: [{ kind: "compact", text: summary }] });
+          turns.push({ role: "user", ts: timestamp ?? null, parts: [{ kind: "compact", text: summary, ...compactionTokens(entry) }] });
         }
         continue;
       }
       const message = piMessage(entry);
       if (message === null) continue;
       const applyResults = () => {
-        for (const result of piResults(message)) {
+        for (const result of piResults(message, blobs)) {
           const tool = pending.get(result.id);
           if (!tool) continue;
           pending.delete(result.id);
@@ -355,7 +437,9 @@ function ompTranscriptParser(state: OmpParseState, images: boolean, callIds: boo
           if (images && result.images.length > 0) {
             // addressed by the call it answers: a nested result shares its entry with other
             // blocks, so the entry id alone could not say which one an image came from
-            tool.images = result.images.map((media_type, index) => ({ media_type, ref: `pi:${result.id}:${index}` }));
+            // named only as the image endpoint takes a ref, so none is named that it cannot answer
+            const named = result.images.flatMap((media_type, index) => media_type === null ? [] : [{ media_type, ref: `pi:${result.id}:${index}` }]).filter(({ ref }) => PI_IMAGE_REF.test(ref));
+            if (named.length > 0) tool.images = named;
           }
         }
       };
@@ -371,7 +455,7 @@ function ompTranscriptParser(state: OmpParseState, images: boolean, callIds: boo
                 .filter((part) => part.length > 0)
                 .join("\n");
         // pictures sent with the prompt, or alone: named here, fetched only when shown
-        const pictures = images ? piPromptImages(entry, message).map(({ media_type, ref }) => ({ kind: "image" as const, media_type, ref })) : [];
+        const pictures = images ? piPromptImages(entry, message, blobs).map(({ media_type, ref }) => ({ kind: "image" as const, media_type, ref })) : [];
         if (prompt.length === 0) {
           if (pictures.length > 0) turns.push({ role: "user", ts: timestamp ?? null, parts: pictures });
           continue;
@@ -385,7 +469,13 @@ function ompTranscriptParser(state: OmpParseState, images: boolean, callIds: boo
       }
 
       if (message.role === "assistant" && Array.isArray(message.content)) {
-        const turn = assistantTurn(timestamp);
+        const speaks = message.content.some((block: unknown) => {
+          const b = record(block);
+          return b.type === "text" ? typeof b.text === "string" && b.text.length > 0
+            : b.type === "thinking" ? (typeof b.thinking === "string" ? b.thinking : typeof b.text === "string" ? b.text : "").length > 0
+            : b.type === "toolCall" && typeof b.name === "string";
+        }) || (message.stopReason === "error" && typeof message.errorMessage === "string" && message.errorMessage.length > 0);
+        const turn = assistantTurn(timestamp, speaks);
         if (timestamp) turn.end_ts = timestamp;
         for (const block of message.content) {
           if (typeof block !== "object" || block === null) continue;
@@ -416,11 +506,12 @@ function ompTranscriptParser(state: OmpParseState, images: boolean, callIds: boo
         // a failed request (a 401, an overloaded provider) leaves an empty message: without its
         // error the chat showed the prompt with no answer at all
         if (message.stopReason === "error" && typeof message.errorMessage === "string" && message.errorMessage.length > 0) {
-          turn.parts.push({ kind: "text", text: `Error: ${message.errorMessage}` });
+          turn.parts.push({ kind: "text", text: `Error: ${message.errorMessage}`, failed: true });
         }
         state.settled = message.stopReason === "stop";
       }
     }
+    settleWait();
   };
 
   return {
@@ -430,7 +521,7 @@ function ompTranscriptParser(state: OmpParseState, images: boolean, callIds: boo
         // Clone the whole graph together: pending must point at the preview's tool parts,
         // and neither speculative title updates nor settled boundaries may escape it.
         const preview = structuredClone(state);
-        ompTranscriptParser(preview, images, callIds).write(tail);
+        ompTranscriptParser(preview, images, callIds, blobs).write(tail);
         return preview.turns.filter((turn) => turn.parts.length > 0);
       }
       return structuredClone(turns.filter((turn) => turn.parts.length > 0));
@@ -438,10 +529,21 @@ function ompTranscriptParser(state: OmpParseState, images: boolean, callIds: boo
   };
 }
 
+/** The token counts a pi-family compaction record states; a missing, zero or malformed count is left out. */
+function compactionTokens(entry: object): { tokens_before?: number; tokens_after?: number; tokens_saved?: number } {
+  const count = (value: unknown): number | undefined => typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+  const { tokensBefore, tokensAfter, details } = entry as { tokensBefore?: unknown; tokensAfter?: unknown; details?: { structuralYield?: { savedTokens?: unknown } } | null };
+  const before = count(tokensBefore);
+  const after = count(tokensAfter);
+  // OmO (senpi.compaction.summary.v1) records what its structural pass saved, not the size after
+  const saved = typeof details === "object" && details !== null ? count(details.structuralYield?.savedTokens) : undefined;
+  return { ...(before !== undefined ? { tokens_before: before } : {}), ...(after !== undefined ? { tokens_after: after } : {}), ...(saved !== undefined ? { tokens_saved: saved } : {}) };
+}
+
 /** One-shot parsing shares the incremental record rules, including valid no-newline tails. */
 export function parseOmpTranscript(text: string, maxTurns = MAX_TURNS, options: OmpTranscriptOptions = {}): ConversationTurn[] {
   const state = ompParseState(options);
-  ompTranscriptParser(state, options.images === true, options.callIds === true).write(text);
+  ompTranscriptParser(state, options.images === true, options.callIds === true, options.blobs ?? null).write(text);
   // No writer survives this call, so its owned turns need no detached snapshot.
   return state.turns.filter((turn) => turn.parts.length > 0).slice(-maxTurns);
 }

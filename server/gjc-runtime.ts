@@ -1,12 +1,13 @@
 /** GJC transcript identity is published by its lifecycle extension; shared terminal/store helpers are also used by omp. */
 
-import { execFileSync } from "node:child_process";
-import { closeSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, statSync } from "node:fs";
+import { closeSync, lstatSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, statSync } from "node:fs";
 import nodePath, { join, type PlatformPath } from "node:path";
 
-import { readGjcNativeBinding, validateGjcNativeTranscript } from "./gjc-native.ts";
+import { readGjcNativeBinding, validatedGjcNativeTranscript } from "./gjc-native.ts";
+import { darwinTerminal } from "./darwin-process.ts";
 import { herdrRpc } from "./herdr/client.ts";
-import { processStartedAt } from "./process-start.ts";
+import { processStartedAt, processStartedAtAsync } from "./process-start.ts";
+import { userHome } from "./user-home.ts";
 import { descendantArgv, windowsProcessTable, type ProcessRow } from "./windows-processes.ts";
 
 export interface GjcTerminal { id: string; startedAt: number }
@@ -143,23 +144,13 @@ export function gjcTerminal(pid: number, environ?: readonly string[] | null): Gj
       return { id: tty.slice(5).replaceAll("/", "-"), startedAt };
     }
     if (process.platform === "darwin") {
-      // lstart is local time without a zone: print it in the zone Date.parse reads it in,
-      // which is not always $TZ (bun test runs in UTC without setting it)
-      const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const output = execFileSync("ps", ["-p", String(pid), "-o", "tty=", "-o", "lstart="], {
-        encoding: "utf8", timeout: 1500, maxBuffer: 4096, env: { ...process.env, LC_ALL: "C", TZ: zone }, stdio: ["ignore", "pipe", "ignore"],
-      });
-      return parseGjcPs(output);
+      // the terminal and the start from one kernel record, as `ps -o tty= -o lstart=` read them, without a
+      // child process that holds the event loop
+      const record = darwinTerminal(pid);
+      return record !== null && /^ttys\d+$/.test(record.tty) ? { id: record.tty, startedAt: record.startedAt } : null;
     }
   } catch { /* process exited or its terminal metadata is unavailable */ }
   return null;
-}
-
-export function parseGjcPs(output: string): GjcTerminal | null {
-  const match = output.trim().match(/^(?:\/dev\/)?(ttys\d+)\s+(.+)$/);
-  if (!match) return null;
-  const startedAt = Date.parse(match[2]!);
-  return Number.isFinite(startedAt) ? { id: match[1]!, startedAt } : null;
 }
 
 /**
@@ -253,31 +244,92 @@ export function terminalBreadcrumb(store: string | StoreRoots, cwd: string, term
  * active session; never infer ownership from cwd or session recency. `path` is null unless
  * exactly one transcript qualifies; `found` says how many did. `environOf` supplies a process's
  * environment already read elsewhere, so none is read here; undefined for a pid reads it.
+ * `openFilesOf` supplies the files a process holds open where there is no /proc (lsof on macOS
+ * herdr-core); there they are the only proof, and with none held no breadcrumb stands in (#3365).
+ * There a process whose listing held a name that could not be read (null), or that holds a `.jsonl` in
+ * the store that does not resolve, may hold the very session: nothing is bound for the pane then. So may a
+ * held `.jsonl` lsof names under neither the store's configured root nor its canonical one (lsof lists
+ * resolved paths, so a store reached through a link is placed by the canonical root).
  */
-export function heldTranscript(roots: StoreRoots, cwd: string, pids: readonly number[], environOf?: (pid: number) => readonly string[] | null | undefined): { path: string | null; found: number } {
+export function heldTranscript(roots: StoreRoots, cwd: string, pids: readonly number[], probe: HeldProbe = {}): { path: string | null; found: number } {
+  const { environOf, openFilesOf } = probe;
   let root: string;
   try { root = realpathSync(roots.sessions); }
   catch { return { path: null, found: 0 }; }
   const open = new Set<string>();
   const breadcrumbs = new Set<string>();
+  let unreadable = false;
   for (const pid of pids) {
     const terminal = gjcTerminal(pid, environOf?.(pid));
     if (terminal) {
       const path = terminalBreadcrumb(roots, cwd, terminal.id, terminal.startedAt);
       if (path) breadcrumbs.add(path);
     }
-    let fds: string[] = [];
-    try { fds = readdirSync(`/proc/${pid}/fd`); } catch { /* macOS uses the native breadcrumb */ }
-    for (const fd of fds) {
+    let held: readonly string[] = [];
+    if (openFilesOf) {
+      const listed = openFilesOf(pid);
+      if (listed === null) { unreadable = true; continue; }
+      held = listed;
+    }
+    else try { held = readdirSync(`/proc/${pid}/fd`).map((fd) => `/proc/${pid}/fd/${fd}`); } catch { /* no /proc: the native breadcrumb */ }
+    for (const entry of held) {
+      if (openFilesOf) {
+        const target = listedSession(roots, root, entry);
+        if (target === null) continue;
+        // a held session whose header cannot be read, or is no session header, may be the pane's: unproved
+        const header = target === "unproved" ? null : transcriptCwd(target);
+        const same = header === null ? null : sameCwd(header, cwd);
+        if (same === null) unreadable = true;
+        else if (same) open.add(target);
+        continue;
+      }
       try {
-        const file = realpathSync(readlinkSync(`/proc/${pid}/fd/${fd}`));
+        const file = realpathSync(readlinkSync(entry));
         const target = statSync(file).isFile() ? gjcSessionFile(root, file, nodePath, roots.depth) : null;
         if (target && transcriptCwd(target) === cwd) open.add(target);
       } catch { /* closed, deleted or unreadable descriptor */ }
     }
   }
-  const candidates = open.size > 0 ? open : breadcrumbs;
+  if (unreadable) return { path: null, found: 0 };
+  const candidates = open.size > 0 || openFilesOf ? open : breadcrumbs;
   return { path: candidates.size === 1 ? [...candidates][0]! : null, found: candidates.size };
+}
+
+/**
+ * The session a name lsof listed (macOS, where it is the only proof) is, placed by the name as listed: a
+ * subagent's file maps to the parent its listed directory names, never the one a link below the root
+ * resolves to. null for a name that is no session of the store; "unproved" for a `.jsonl` that may be one
+ * but is placed under neither the store's configured root nor its canonical one (lsof lists resolved
+ * paths), has a link or anything but a directory below the root, or does not resolve. A spelling that
+ * names the store only once resolved (another case, Unicode form or `/private` alias) is refused too:
+ * that fails closed.
+ */
+function listedSession(roots: StoreRoots, root: string, entry: string): string | null | "unproved" {
+  if (!entry.endsWith(".jsonl")) return null;
+  const base = storeRelative(roots.sessions, entry) !== null ? roots.sessions : storeRelative(root, entry) !== null ? root : null;
+  if (base === null) return "unproved";
+  const parts = storeRelative(base, entry)!;
+  if (parts.length !== roots.depth && parts.length !== roots.depth + 1) return null;
+  try {
+    for (let at = 1; at < parts.length; at += 1) {
+      if (!lstatSync(join(base, ...parts.slice(0, at))).isDirectory()) return "unproved";
+    }
+    if (!lstatSync(entry).isFile()) return "unproved";
+    // a subagent's parent transcript that is a link may name any session of the store
+    if (parts.length === roots.depth + 1 && !lstatSync(join(base, ...parts.slice(0, -2), `${parts.at(-2)!}.jsonl`)).isFile()) return "unproved";
+  } catch { return "unproved"; }
+  return gjcSessionFile(root, join(root, ...parts), nodePath, roots.depth);
+}
+
+/** Whether a header's cwd is the pane's, links followed on both; null when either does not resolve (the same spelling too). */
+function sameCwd(header: string, cwd: string): boolean | null {
+  try { return realpathSync(header) === realpathSync(cwd); } catch { return null; }
+}
+
+/** What heldTranscript reads of a process that its caller already has. */
+export interface HeldProbe {
+  environOf?: (pid: number) => readonly string[] | null | undefined;
+  openFilesOf?: (pid: number) => readonly string[] | null;
 }
 
 type GjcPaneProcessInfo = { process_info?: { shell_pid?: unknown; foreground_processes?: { pid?: unknown; argv?: unknown }[] } };
@@ -286,7 +338,10 @@ type GjcProcessIdentity = { pid: number; birth: number };
 export type GjcTranscriptOptions = {
   platform?: string;
   processInfo?: (paneId: string) => Promise<GjcPaneProcessInfo | null>;
-  processBirth?: (pid: number) => number | null;
+  /** herdr's answer the caller's poll already read for this pane: it stands in for the first read only, the
+   * check after the binding is read always asks again */
+  known?: GjcPaneProcessInfo["process_info"] | null;
+  processBirth?: (pid: number) => number | null | Promise<number | null>;
   readProcessTable?: () => Promise<ProcessRow[]>;
   now?: () => number;
 };
@@ -319,12 +374,13 @@ async function foregroundProcesses(
   const foreground = processInfo.foreground_processes;
   if (!Array.isArray(foreground)) return null;
   const identities = new Map<number, number>();
-  const birthOf = options.processBirth ?? processStartedAt;
+  // awaited: GJC discovery runs this for every snapshot, and macOS reads a start with `ps` (#1545)
+  const birthOf = options.processBirth ?? processStartedAtAsync;
   for (const process of foreground) {
     const argv = Array.isArray(process.argv) ? process.argv.filter((arg): arg is string => typeof arg === "string") : [];
     if (!isGjcProcess(argv)) continue;
     if (typeof process.pid !== "number" || !Number.isSafeInteger(process.pid) || process.pid <= 0) return null;
-    const birth = birthOf(process.pid);
+    const birth = await birthOf(process.pid);
     if (birth === null || !Number.isSafeInteger(birth) || birth <= 0) return null;
     const previous = identities.get(process.pid);
     if (previous !== undefined && !sameBirth(previous, birth, platform)) return null;
@@ -348,9 +404,19 @@ function sameNativeVersion(left: NonNullable<ReturnType<typeof readGjcNativeBind
 export function gjcTranscriptForPane(
   paneId: string,
   cwd: string,
-  home = process.env["HOME"] ?? process.env["USERPROFILE"] ?? "",
+  home = userHome(),
   options: GjcTranscriptOptions = {},
 ): Promise<string | null> {
+  return gjcTranscriptFileForPane(paneId, cwd, home, options).then((found) => found?.path ?? null);
+}
+
+/** gjcTranscriptForPane, with the exact dev:ino of the file its last proof read (`identity`). */
+export function gjcTranscriptFileForPane(
+  paneId: string,
+  cwd: string,
+  home = userHome(),
+  options: GjcTranscriptOptions = {},
+): Promise<{ path: string; identity: string } | null> {
   const token: LookupToken = { cancelled: false };
   const lookups = lookupsInFlight.get(paneId) ?? new Set<LookupToken>();
   lookups.add(token);
@@ -367,14 +433,14 @@ async function lookupNativeTranscript(
   home: string,
   options: GjcTranscriptOptions,
   token: LookupToken,
-): Promise<string | null> {
+): Promise<{ path: string; identity: string } | null> {
   try {
     if (!nodePath.isAbsolute(cwd) || !nodePath.isAbsolute(home) || token.cancelled) return null;
     const platform = options.platform ?? process.platform;
     const readProcessInfo = options.processInfo ?? ((id: string) => herdrRpc<GjcPaneProcessInfo>(
       "pane.process_info", { pane_id: id },
     ).catch(() => null));
-    const initialInfo = await readProcessInfo(paneId);
+    const initialInfo = options.known !== undefined ? (options.known === null ? null : { process_info: options.known }) : await readProcessInfo(paneId);
     if (!initialInfo || token.cancelled) return null;
     const initial = await foregroundProcesses(initialInfo, platform, options, false);
     if (!initial || initial.length !== 1 || token.cancelled) return null;
@@ -383,8 +449,8 @@ async function lookupNativeTranscript(
 
     const binding = readGjcNativeBinding(home, owner.pid, options.now?.());
     if (!binding || !sameBirth(binding.processStartedAt, owner.birth, platform) || !binding.session || token.cancelled) return null;
-    const path = validateGjcNativeTranscript(binding, cwd, home, platform);
-    if (!path || token.cancelled) return null;
+    const proof = validatedGjcNativeTranscript(binding, cwd, home, platform);
+    if (!proof || token.cancelled) return null;
 
     const finalInfo = await readProcessInfo(paneId);
     if (!finalInfo || token.cancelled) return null;
@@ -393,9 +459,10 @@ async function lookupNativeTranscript(
 
     const current = readGjcNativeBinding(home, owner.pid, options.now?.());
     if (!current || !sameBirth(current.processStartedAt, final[0]!.birth, platform) || !sameNativeVersion(binding, current) || token.cancelled) return null;
-    const currentPath = validateGjcNativeTranscript(current, cwd, home, platform);
-    if (currentPath !== path || token.cancelled) return null;
-    return currentPath;
+    // the same file both times, not only the same path
+    const currentProof = validatedGjcNativeTranscript(current, cwd, home, platform);
+    if (currentProof?.path !== proof.path || currentProof.identity !== proof.identity || token.cancelled) return null;
+    return currentProof;
   } catch {
     return null;
   }

@@ -6,12 +6,13 @@ import { join } from "node:path";
 
 import { createServer } from "./index.ts";
 import { forgetTranscriptState } from "./conversation.ts";
-import { herdrRpc, sessionSnapshot, workspaceClose, workspaceCreate } from "./herdr/client.ts";
+import { herdrRpc, paneRead, sessionSnapshot, workspaceClose, workspaceCreate } from "./herdr/client.ts";
 import type { CommandOutcome, ConversationPart, ConversationResponse, SlashCommand } from "../shared/protocol.ts";
 import { CATALOG_SOURCE_BUDGET_MS, mergeCatalogSources } from "./catalog-sources.ts";
 import { paneContext } from "./pane-context.ts";
 import { closeOpenCodeNative, openCodeNativeState } from "./opencode-native.ts";
 import { forgetOpenCodeService, openCodeServiceOptions, OPENCODE_HTTP_TIMEOUT_MS } from "./opencode-service.ts";
+import { skillRowSelected } from "./opencode-skill-attach.ts";
 
 // Real herdr metadata + HTTP + an OpenCode store of the test's own, handed to the server (opencodeDb).
 const root = mkdtempSync(join(tmpdir(), "ovis-opencode-contract-"));
@@ -221,6 +222,72 @@ it("keeps the terminal for a session the store does not hold", async () => {
   expect((await read()).source).toBe("opencode-transcript");
 });
 
+it("counts an OpenCode pane's running subagent, holds the turn that ends meanwhile as BG, and leaves its card when it ends", async () => {
+  const PARENT = "ses_contractSubagents";
+  const CHILD = "ses_contractChild01";
+  // the columns child sessions came with (2.0.26 on): this store began as a 2.0.24 one
+  for (const column of ["parent_id text", "agent text", "model text"]) db.exec(`ALTER TABLE session_v2 ADD COLUMN ${column}`);
+  db.query("INSERT INTO session_v2 (id, project_id, slug, directory, title, version, time_created, time_updated) VALUES (?, 'global', 'contract', ?, 'Contract', '2.0.32', 0, 0)").run(PARENT, root);
+  add("user", { time: { created: Date.now() }, text: "scan it in the background", files: [], agents: [] }, PARENT);
+  db.query("INSERT INTO session_v2 (id, project_id, parent_id, slug, directory, title, version, agent, time_created, time_updated) VALUES (?, 'global', ?, 'child', ?, 'Scan the repo', '2.0.32', 'explore', ?, ?)").run(CHILD, PARENT, root, Date.now(), Date.now());
+  add("user", { time: { created: Date.now() }, text: "You are a subagent spawned by another session.\nscan" }, CHILD);
+  const target = await startOpencode(PARENT);
+  // a server of its own, whose OpenCode state holds no service: never the machine's own service.json
+  const own = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state-subagents"), opencodeDb: database, openCodeStateDir: join(root, "no-service") });
+  // its status subscription is up before the turn is reported, or the turn's events go by unseen
+  await own.statusReady;
+  const base = `http://127.0.0.1:${own.port}`;
+  const ws = new WebSocket(`ws://127.0.0.1:${own.port}/ws`);
+  const frames: Record<string, unknown>[] = [];
+  const waiters = new Set<() => void>();
+  ws.addEventListener("message", (event) => { frames.push(JSON.parse(String(event.data)) as Record<string, unknown>); for (const wake of waiters) wake(); });
+  await new Promise((resolve) => ws.addEventListener("open", resolve, { once: true }));
+  // only a frame received after `from` (the frame count before the step it should follow) answers
+  const frame = (match: (frame: Record<string, unknown>) => boolean, what: string, from = 0) => new Promise<Record<string, unknown>>((resolve, reject) => {
+    const timeout = setTimeout(() => { waiters.delete(check); reject(new Error(`no frame: ${what}`)); }, 15_000);
+    const check = () => { const found = frames.slice(from).find((seen) => seen.type === "pane-status" && seen.pane_id === target && match(seen)); if (found) { clearTimeout(timeout); waiters.delete(check); resolve(found); } };
+    waiters.add(check);
+    check();
+  });
+  const reportState = (state: string) => herdrRpc("pane.report_agent", { pane_id: target, source: "herdr:opencode", agent: "opencode", agent_session_id: PARENT, state });
+  try {
+    const started = frames.length;
+    await reportState("working");
+    await frame((seen) => seen.agent_status === "working", "the turn at work", started);
+    // a snapshot names the pane and its session to the tracker, which counts the child from the store:
+    // this one, or one the server took on its own since the turn started, which said it first
+    await fetch(`${base}/api/session`);
+    await frame((seen) => seen.background_tasks === 1, "the running subagent counted", started);
+    let from = frames.length;
+    await reportState("idle");
+    // the turn ended while its subagent runs: BG, not DONE
+    expect(await frame((seen) => seen.background_wait === true, "the turn held on its subagent", from)).toMatchObject({ background_tasks: 1 });
+    const { snapshot } = await (await fetch(`${base}/api/session`)).json() as { snapshot: { panes: { pane_id: string; background_tasks?: number; background_wait?: true }[] } };
+    expect(snapshot.panes.find((pane) => pane.pane_id === target)).toMatchObject({ background_tasks: 1, background_wait: true });
+    const listed = await (await fetch(`${base}/api/pane/omo-tasks?pane_id=${encodeURIComponent(target)}`)).json() as { tasks: { id: string; title: string; category: string | null; status: string }[] };
+    expect(listed.tasks.map((task) => [task.id, task.title, task.category, task.status])).toEqual([[CHILD, "Scan the repo", "explore", "running"]]);
+
+    // it ends, and OpenCode wakes the parent with its answer
+    from = frames.length;
+    add("assistant", { time: { created: Date.now(), completed: Date.now() }, finish: "stop", content: [{ type: "text", text: "Three TODOs." }] }, CHILD);
+    add("idle", { time: { created: Date.now() }, outcome: "succeeded" }, CHILD);
+    add("synthetic", {
+      time: { created: Date.now() }, description: "Scan the repo", metadata: { source: "subagent", childID: CHILD, agent: "explore", state: "completed" },
+      text: `<subagent sessionID="${CHILD}" state="completed" description="Scan the repo">\nThree TODOs.\n</subagent>`,
+    }, PARENT);
+    await frame((seen) => seen.background_tasks === 0, "the ended subagent no longer counted", from);
+    const ended = await (await fetch(`${base}/api/pane/omo-tasks?pane_id=${encodeURIComponent(target)}`)).json() as { tasks: { id: string; status: string }[] };
+    expect(ended.tasks.map((task) => [task.id, task.status])).toEqual([[CHILD, "completed"]]);
+    const response = await fetch(`${base}/api/pane/conversation?${new URLSearchParams({ pane_id: target })}`);
+    expect(response.status).toBe(200);
+    const conversation = await response.json() as ConversationResponse;
+    expect(conversation.turns.at(-1)?.parts).toEqual([{ kind: "task_result", tasks: [expect.objectContaining({ id: CHILD, title: "Scan the repo", agent: "explore", status: "completed", result: "Three TODOs." })] }]);
+  } finally {
+    ws.close();
+    own.stop();
+  }
+}, 60_000);
+
 
 /**
  * OpenCode v2's own service, faked in the pinned OpenAPI shapes (843a6c51): /api/info, a session,
@@ -239,8 +306,8 @@ describe("OpenCode v2 native service", () => {
   let connected = Promise.withResolvers<void>();
   /** runs once, inside the next session lookup, before the fake answers it */
   let duringLookup: (() => Promise<void>) | undefined;
-  /** every chunk the stand-in reads from its terminal, reported by the stand-in itself */
-  let onTyped: ((chunk: string, start: number) => void) | undefined;
+  /** every chunk the stand-in reads from its terminal, reported by the stand-in itself with when it read it (ms since the epoch) */
+  let onTyped: ((chunk: string, start: number, at: number) => void) | undefined;
   const typedWaiters = new Set<() => void>();
   /** while set, session lookups get no answer (the bridge's own request timeout ends them) */
   let withholdLookups = false;
@@ -252,8 +319,8 @@ describe("OpenCode v2 native service", () => {
   const withheld = new Set<() => void>();
   /** how /api/event answers: normally, never (held), 404 or 503 */
   let eventMode: "ok" | "slow" | "absent" | "error" = "ok";
-  /** when the fake last answered any request of the bridge's (not the stand-in's reports) */
-  let lastRequestAt = 0;
+  /** when the fake received each request of the bridge's (not the stand-in's reports), in ms since the epoch */
+  const requestsAt: number[] = [];
   const typed = (): string => existsSync(typedLog) ? readFileSync(typedLog, "latin1") : "";
   /** each event 10 ms after the last, so the evidence names exactly which event settled a send */
   let clock = 0;
@@ -286,18 +353,22 @@ describe("OpenCode v2 native service", () => {
     const recorded = (name: string) => readFileSync(join(import.meta.dir, "fixtures", `opencode-autocomplete-2.0.32-ansi-narrow-${name}.ansi`), "utf8").replace(/\n/g, "\r\n");
     writeFileSync(join(nativeRoot, "screen.txt"), recorded("first-selected"));
     writeFileSync(join(nativeRoot, "accepted.txt"), recorded("accepted"));
+    writeFileSync(join(nativeRoot, "closed.txt"), recorded("closed"));
     writeFileSync(standIn, `#!${process.execPath}
 const { appendFileSync, readFileSync, statSync } = require("node:fs");
 let typed = "";
 process.stdin.setRawMode(true);
 process.stdin.on("data", (chunk) => {
+  const at = performance.timeOrigin + performance.now();
   appendFileSync(${JSON.stringify(typedLog)}, chunk);
   const start = statSync(${JSON.stringify(typedLog)}).size - chunk.length;
-  fetch(readFileSync(${JSON.stringify(join(nativeRoot, "fake.url"))}, "utf8") + "/test/typed", { method: "POST", headers: { "x-typed-start": String(start) }, body: chunk }).catch(() => {});
+  fetch(readFileSync(${JSON.stringify(join(nativeRoot, "fake.url"))}, "utf8") + "/test/typed", { method: "POST", headers: { "x-typed-start": String(start), "x-typed-at": String(at) }, body: chunk }).catch(() => {});
   const before = typed;
   typed += chunk.toString("latin1");
   if (!before.endsWith("@effect") && typed.endsWith("@effect")) process.stdout.write("\\u001b[2J\\u001b[H" + readFileSync(${JSON.stringify(join(nativeRoot, "screen.txt"))}, "utf8"));
   if (before.endsWith("@effect") && typed.endsWith("@effect\\t")) process.stdout.write("\\u001b[2J\\u001b[H" + readFileSync(${JSON.stringify(join(nativeRoot, "accepted.txt"))}, "utf8"));
+  // Ctrl-L: the prompt with its autocomplete closed (closedPrompt)
+  if (chunk.toString("latin1") === "\\u000c") process.stdout.write("\\u001b[2J\\u001b[H" + readFileSync(${JSON.stringify(join(nativeRoot, "closed.txt"))}, "utf8"));
 });
 `);
     chmodSync(standIn, 0o755);
@@ -307,11 +378,11 @@ process.stdin.on("data", (chunk) => {
         const url = new URL(request.url);
         if (url.pathname === "/api/info") return Response.json(info);
         if (url.pathname === "/test/typed") return request.text().then((chunk) => {
-          onTyped?.(chunk, Number(request.headers.get("x-typed-start")));
+          onTyped?.(chunk, Number(request.headers.get("x-typed-start")), Number(request.headers.get("x-typed-at")));
           for (const wake of typedWaiters) wake();
           return new Response(null, { status: 204 });
         });
-        lastRequestAt = performance.now();
+        requestsAt.push(performance.timeOrigin + performance.now());
         if (url.pathname === "/api/event" && eventMode === "slow") return new Promise<Response>((resolve) => withheld.add(() => resolve(new Response(null, { status: 503 }))));
         if (url.pathname === "/api/event" && eventMode !== "ok") return new Response(null, { status: eventMode === "absent" ? 404 : 503 });
         if (hangAll && url.pathname !== "/api/info") {
@@ -477,6 +548,40 @@ process.stdin.on("data", (chunk) => {
       expect(await completed).toBe("@effect\t\u001b[200~apply it\u001b[201~\r");
     } finally { ws.close(); }
   });
+  // #511: a queued message for an agent alone is one guarded paste, never typed key by key through the autocomplete
+  it("pastes a queued agent-only message whole when the pane is ready, its @effect left as text", async () => {
+    const { ws, frame } = await socket();
+    const before = typed().length;
+    try {
+      ws.send(JSON.stringify({ type: "attach", pane_id: nativePane, cols: 80, rows: 24 }));
+      await frame((message) => message.type === "pty-data" && message.pane_id === nativePane);
+      await reportState("working");
+      await untilStatus("working");
+      await browserCatalog();
+      const completed = typedSince(before);
+      ws.send(JSON.stringify({ type: "submit", id: 5, pane_id: nativePane, text: "@effect apply it", payload: "@effect apply it", delivery: "queue", agent_only: true }));
+      expect(await frame((message) => message.type === "submit-result" && message.id === 5)).toMatchObject({ ok: true, pending: { state: "queued" } });
+      await reportState("idle");
+      await frame((message) => message.type === "pending-messages" && Array.isArray(message.removed) && message.removed.length > 0);
+      expect(await completed).toBe("\u001b[200~@effect apply it\u001b[201~\r");
+    } finally { ws.close(); }
+  });
+  it("pastes an agent-only message queued while the pane is ready at once, its @effect left as text", async () => {
+    const { ws, frame } = await socket();
+    const before = typed().length;
+    try {
+      ws.send(JSON.stringify({ type: "attach", pane_id: nativePane, cols: 80, rows: 24 }));
+      await frame((message) => message.type === "pty-data" && message.pane_id === nativePane);
+      await reportState("idle");
+      // after an earlier turn herdr reads an idle report as done: either is a pane at rest
+      await untilStatus("idle", "done");
+      await browserCatalog();
+      const completed = typedSince(before);
+      ws.send(JSON.stringify({ type: "submit", id: 6, pane_id: nativePane, text: "@effect apply it", payload: "@effect apply it", delivery: "queue", agent_only: true }));
+      expect(await frame((message) => message.type === "submit-result" && message.id === 6)).toMatchObject({ ok: true });
+      expect(await completed).toBe("\u001b[200~@effect apply it\u001b[201~\r");
+    } finally { ws.close(); }
+  });
 /** A socket recording every frame; `frame` resolves on the first one (already seen or next) matching. */
   async function socket() {
     const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws`);
@@ -493,9 +598,9 @@ process.stdin.on("data", (chunk) => {
     return { ws, frames, frame };
   }
   const reportState = (state: string) => herdrRpc("pane.report_agent", { pane_id: nativePane, source: "herdr:opencode", agent: "opencode", agent_session_id: NATIVE_SESSION, state });
-  const untilStatus = async (status: string) => {
-    for (const deadline = Date.now() + 5_000; (await sessionSnapshot()).panes.find((pane) => pane.pane_id === nativePane)?.agent_status !== status;) {
-      if (Date.now() > deadline) throw new Error(`the pane did not report ${status}`);
+  const untilStatus = async (status: string, ...or: string[]) => {
+    for (const deadline = Date.now() + 5_000; ![status, ...or].includes((await sessionSnapshot()).panes.find((pane) => pane.pane_id === nativePane)?.agent_status ?? "");) {
+      if (Date.now() > deadline) throw new Error(`the pane did not report ${[status, ...or].join(" or ")}`);
       await Bun.sleep(50);
     }
   };
@@ -609,6 +714,111 @@ process.stdin.on("data", (chunk) => {
     check();
   });
 
+  /**
+   * The stand-in redraws only as it is typed to, so a test that left @effect's row selected (as Tab leaving the skill
+   * unconfirmed does) leaves it on screen for the next. A send reads its autocomplete and the agent named beside it
+   * from the first screen showing that row, which could then be the old one, not the one its own @effect draws.
+   * This draws the prompt with the autocomplete closed: once the stand-in has read its Ctrl-L (typed.log ends with it,
+   * written before the redraw) and herdr shows no selected row, every screen after it is the next send's own.
+   */
+  const closedPrompt = async (): Promise<void> => {
+    await herdrRpc("pane.send_text", { pane_id: nativePane, text: "\u000c" });
+    for (const deadline = Date.now() + 5_000;;) {
+      if (typed().endsWith("\u000c") && !skillRowSelected((await paneRead({ paneId: nativePane, source: "visible", format: "ansi" })).text, "effect")) break;
+      if (Date.now() > deadline) throw new Error("the stand-in's closed prompt was not drawn");
+      await Bun.sleep(25);
+    }
+  };
+
+  it("delivers a queued message completely when Tab leaves the skill unconfirmed", async () => {
+    const acceptedPath = join(nativeRoot, "accepted.txt");
+    const accepted = readFileSync(acceptedPath, "utf8");
+    const unconfirmed = readFileSync(join(nativeRoot, "screen.txt"), "utf8");
+    const { ws, frame } = await socket();
+    const before = typed().length;
+    try {
+      writeFileSync(acceptedPath, unconfirmed);
+      const ready = frame((message) => message.type === "input-ready" && message.pane_id === nativePane);
+      ws.send(JSON.stringify({ type: "attach", pane_id: nativePane, cols: 80, rows: 24 }));
+      await ready;
+      await reportState("working");
+      await browserCatalog();
+      const queued = frame((message) => message.type === "submit-result" && message.id === 1494);
+      ws.send(JSON.stringify({ type: "submit", id: 1494, pane_id: nativePane, text: "@effect fallback", payload: "@effect fallback", delivery: "queue" }));
+      expect(await queued).toMatchObject({ ok: true, pending: { state: "queued" } });
+      const settled = frame((message) => message.type === "pending-messages" && (
+        Array.isArray(message.removed) && message.removed.length > 0
+        || Array.isArray(message.messages) && message.messages.some((entry) => entry.state === "uncertain" || entry.state === "held")));
+      await reportState("idle");
+      const receipt = await settled;
+      expect(receipt).toMatchObject({ removed: [{ outcome: "sent" }] });
+      expect(await typedSince(before)).toBe("@effect\t\u001b[200~ fallback\u001b[201~\r");
+      const outcome = (await outcomesAt(server.port, nativePane)).find((entry) => entry.text === "@effect fallback");
+      expect(outcome).toMatchObject({ state: "terminal-required", unattached_skills: ["effect"] });
+    } finally {
+      writeFileSync(acceptedPath, accepted);
+      ws.close();
+      await reportState("idle");
+    }
+  });
+
+  it.each(["immediate", "queue"] as const)("refuses a confirmed Tab agent switch during %s delivery without Enter", async (delivery) => {
+    const selectedPath = join(nativeRoot, "screen.txt");
+    const acceptedPath = join(nativeRoot, "accepted.txt");
+    const selected = readFileSync(selectedPath, "utf8");
+    const accepted = readFileSync(acceptedPath, "utf8");
+    const { ws, frame } = await socket();
+    await closedPrompt();
+    const before = typed().length;
+    let uncertainId: string | undefined;
+    try {
+      await browserCatalog();
+      writeFileSync(selectedPath, selected.replace("MiniMax", "Build · MiniMax"));
+      writeFileSync(acceptedPath, accepted.replace("MiniMax", "Plan · MiniMax"));
+      if (delivery === "queue") {
+        const ready = frame((message) => message.type === "input-ready" && message.pane_id === nativePane);
+        ws.send(JSON.stringify({ type: "attach", pane_id: nativePane, cols: 80, rows: 24 }));
+        await ready;
+        const working = frame((message) => message.type === "pane-status" && message.pane_id === nativePane && message.agent_status === "working");
+        await reportState("working");
+        await working;
+      }
+      const submitted = frame((message) => message.type === "submit-result" && message.id === 1493);
+      ws.send(JSON.stringify({ type: "submit", id: 1493, pane_id: nativePane, text: "@effect switched agent", payload: "@effect switched agent", ...(delivery === "queue" ? { delivery } : {}) }));
+      if (delivery === "queue") {
+        expect(await submitted).toMatchObject({ ok: true, pending: { state: "queued" } });
+        const refused = frame((message) => message.type === "pending-messages" && Array.isArray(message.messages)
+          && message.messages.some((entry) => entry.state === "uncertain" && entry.error?.code === "submit_changed"));
+        await reportState("idle");
+        const result = await refused;
+        const item = (result.messages as Array<{ id: string; state: string; error?: { code: string; message: string } }>).find((entry) => entry.state === "uncertain");
+        uncertainId = item?.id;
+        expect(item?.error).toMatchObject({ code: "submit_changed" });
+        expect(item?.error?.message).toContain(JSON.stringify("Build"));
+        expect(item?.error?.message).toContain(JSON.stringify("Plan"));
+      } else {
+        const result = await submitted;
+        expect(result).toMatchObject({ ok: false, code: "submit_changed" });
+        expect(result.message).toEqual(expect.stringContaining(JSON.stringify("Build")));
+        expect(result.message).toEqual(expect.stringContaining(JSON.stringify("Plan")));
+      }
+      expect(typed().slice(before)).toBe("@effect\t");
+      const outcome = (await outcomesAt(server.port, nativePane)).find((entry) => entry.text === "@effect switched agent");
+      expect(outcome).toBeUndefined();
+    } finally {
+      writeFileSync(selectedPath, selected);
+      writeFileSync(acceptedPath, accepted);
+      // an uncertain message holds every later queued send to this shared pane until it is discarded
+      if (uncertainId) {
+        const discarded = frame((message) => message.type === "pending-result" && message.id === 1495);
+        ws.send(JSON.stringify({ type: "pending-action", id: 1495, pane_id: nativePane, pending_id: uncertainId, action: "discard" }));
+        expect(await discarded).toMatchObject({ ok: true });
+      }
+      ws.close();
+      await reportState("idle");
+    }
+  });
+
   it("attaches @effect and records the send after the pane's OpenCode session changed, with no catalog request since", async () => {
     const { ws, frame } = await socket();
     const before = typed().length;
@@ -662,7 +872,7 @@ process.stdin.on("data", (chunk) => {
     }
   });
 
-  it("types within the attach budget and records terminal-required with the note when the service hangs", async () => {
+  it("types within the attach budget without inventing a skill record when a cold service hangs", async () => {
     const { ws, frame } = await socket();
     const before = typed().length;
     const first = Promise.withResolvers<boolean>();
@@ -708,8 +918,7 @@ process.stdin.on("data", (chunk) => {
       expect(sent.startsWith("@effect\t")).toBe(false);
       expect(sent).toContain("@effect while hung");
       const outcome = (await outcomesAt(server.port, nativePane)).find((entry) => entry.text === "@effect while hung");
-      expect(outcome?.state).toBe("terminal-required");
-      expect(outcome?.note).toContain("@effect");
+      expect(outcome).toBeUndefined();
     } finally {
       clearTimeout(deadlineTimer);
       timers.mockRestore();
@@ -809,7 +1018,7 @@ process.stdin.on("data", (chunk) => {
       const response = await fetch(`http://127.0.0.1:${server.port}/api/pane/commands?pane_id=${encodeURIComponent(nativePane)}`);
       expect(response.status).toBe(200);
       const routeMs = performance.now() - started;
-      // a cold send to a hung service falls back to the scan, which reads opencode.json
+      // a cold send to a hung service must not scan opencode.json or invent a skill record
       closeOpenCodeNative();
       forgetOpenCodeService();
       extraSessions.add("ses_contractFifo01");
@@ -826,7 +1035,7 @@ process.stdin.on("data", (chunk) => {
       expect(gap).toBeLessThan(2_000);
       expect(await typedSince(before)).toContain("@effect past the fifo");
       const outcome = (await outcomesAt(server.port, nativePane)).find((entry) => entry.text === "@effect past the fifo");
-      expect(outcome?.state).toBe("terminal-required");
+      expect(outcome).toBeUndefined();
     } finally {
       writer.kill();
       rmSync(fifo, { force: true });
@@ -862,13 +1071,23 @@ process.stdin.on("data", (chunk) => {
             await untilStatus("working");
           }
           const before = typed().length;
+          // Measured from the last thing this send itself waited on before its first byte: its submit, the
+          // queued send's idle report, or a request of the bridge's. A send that types before asking the
+          // service anything (a /command) was measured from the previous send's requests (#2143).
           // Reports can arrive out of order; identify this send's first byte, regardless of chunking.
-          onTyped = (_chunk, start) => { if (start === before) typedFirst.resolve(performance.now() - lastRequestAt); };
+          let since = performance.timeOrigin + performance.now();
+          requestsAt.length = 0;
+          onTyped = (_chunk, start, at) => {
+            if (start === before) typedFirst.resolve(at - Math.max(since, ...requestsAt.filter((requestAt) => requestAt <= at)));
+          };
           const completed = typedSince(before);
           ws.send(JSON.stringify({ type: "submit", id: request, pane_id: nativePane, text, payload: text, ...(path === "queued" ? { delivery: "queue" } : {}) }));
           const answer = await frame((message) => message.type === "submit-result" && message.id === request);
           expect(answer).toMatchObject({ ok: true });
-          if (path === "queued") await reportState("idle");
+          if (path === "queued") {
+            since = performance.timeOrigin + performance.now();
+            await reportState("idle");
+          }
           gaps[`${path}/${mode}`] = Math.round(await typedFirst.promise);
           // Keep this delivery's observer and service alive until its whole send has reached the TUI.
           await completed;
@@ -897,6 +1116,14 @@ process.stdin.on("data", (chunk) => {
     const sleeper = join(lifecycleRoot, "bin", "opencode");
     writeFileSync(sleeper, "#!/bin/sh\nsleep 600\n");
     chmodSync(sleeper, 0o755);
+    // An OpenCode that leaves when the test says so. A ctrl+c typed into its pane is not sure to end it:
+    // in a loaded CI run herdr never saw the stand-in go, and the pane stayed OpenCode until it closed.
+    mkdirSync(join(lifecycleRoot, "leaving"), { recursive: true });
+    const leaver = join(lifecycleRoot, "leaving", "opencode");
+    const leave = join(lifecycleRoot, "leave.fifo");
+    expect(await Bun.spawn(["mkfifo", leave]).exited).toBe(0);
+    writeFileSync(leaver, `#!/bin/sh\nread _ < '${leave}'\n`);
+    chmodSync(leaver, 0o755);
     let opened = Promise.withResolvers<void>();
     let closed = Promise.withResolvers<void>();
     const sessions = new Set(["ses_lifecycleEnd", "ses_lifecycleAgent", "ses_lifecycleHandover"]);
@@ -922,10 +1149,12 @@ process.stdin.on("data", (chunk) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       return Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} did not happen (native ${JSON.stringify(openCodeNativeState())})`)), 15_000); })]).finally(() => clearTimeout(timer));
     };
-    const startPane = async (session: string): Promise<{ paneId: string; workspaceId: string }> => {
+    const startPane = async (session: string, program = sleeper): Promise<{ paneId: string; workspaceId: string }> => {
       const created = await workspaceCreate({ cwd: lifecycleRoot, label: `ovis-test-opencode-${session}` });
+      // closed at the end even when its start fails: a stand-in waiting on the FIFO never ends by itself
+      started.push(created.workspace.workspace_id);
       const paneId = created.root_pane.pane_id;
-      await herdrRpc("pane.send_text", { pane_id: paneId, text: `${sleeper}\n` });
+      await herdrRpc("pane.send_text", { pane_id: paneId, text: `${program}\n` });
       for (const deadline = Date.now() + 10_000; (await sessionSnapshot()).panes.find((pane) => pane.pane_id === paneId)?.agent !== "opencode";) {
         if (Date.now() > deadline) throw new Error("stand-in opencode not detected");
         await Bun.sleep(50);
@@ -941,46 +1170,49 @@ process.stdin.on("data", (chunk) => {
     closeOpenCodeNative();
     forgetOpenCodeService();
     openCodeServiceOptions.stateDir = lifecycleRoot;
-    let ending: { paneId: string; workspaceId: string } | undefined;
-    let changing: { paneId: string; workspaceId: string } | undefined;
+    const started: string[] = [];
+    let leaving: ReturnType<typeof Bun.spawn> | undefined;
     try {
       // pane end: herdr's pane.ended reaches the collector's onPaneEnded
-      ending = await startPane("ses_lifecycleEnd");
+      const ending = await startPane("ses_lifecycleEnd");
       await verify(ending.paneId);
       await within(opened.promise, "the stream opening for the first pane");
       expect(openCodeNativeState()).toEqual({ stream: true, panes: [ending.paneId] });
       await workspaceClose(ending.workspaceId);
-      ending = undefined;
       await within(closed.promise, "the stream closing after the last verified pane ended");
       expect(openCodeNativeState()).toEqual({ stream: false, panes: [] });
 
       // agent change: OpenCode leaves the pane, so its status names no opencode agent any more
       opened = Promise.withResolvers<void>();
       closed = Promise.withResolvers<void>();
-      changing = await startPane("ses_lifecycleAgent");
+      const changing = await startPane("ses_lifecycleAgent", leaver);
       await verify(changing.paneId);
       await within(opened.promise, "the stream opening for the second pane");
-      await herdrRpc("pane.send_keys", { pane_id: changing.paneId, keys: ["ctrl+c"] });
+      leaving = Bun.spawn(["sh", "-c", `printf '\\n' > '${leave}'`]);
+      await within(leaving.exited, "the stand-in OpenCode being told to leave");
       await within(closed.promise, "the stream closing after the last verified pane stopped being OpenCode");
       expect(openCodeNativeState()).toEqual({ stream: false, panes: [] });
 
-      // a replacement server: its collector learns the pane verified before it started, and ends it
+      // a replacement server, started before the old one stops (the last server's stop releases every pane):
+      // its collector learns the pane verified before it started, and ends it
       opened = Promise.withResolvers<void>();
       closed = Promise.withResolvers<void>();
-      ending = await startPane("ses_lifecycleHandover");
-      await verify(ending.paneId);
+      const handed = await startPane("ses_lifecycleHandover");
+      await verify(handed.paneId);
       await within(opened.promise, "the stream opening for the handed-over pane");
-      server.stop();
+      const replaced = server;
       server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"), opencodeDb: database });
       await server.statusReady;
-      expect(openCodeNativeState()).toEqual({ stream: true, panes: [ending.paneId] });
-      await workspaceClose(ending.workspaceId);
-      ending = undefined;
+      replaced.stop();
+      expect(openCodeNativeState()).toEqual({ stream: true, panes: [handed.paneId] });
+      await workspaceClose(handed.workspaceId);
       await within(closed.promise, "the stream closing after the replacement collector saw the pane close");
       expect(openCodeNativeState()).toEqual({ stream: false, panes: [] });
     } finally {
-      if (ending) await workspaceClose(ending.workspaceId).catch(() => {});
-      if (changing) await workspaceClose(changing.workspaceId).catch(() => {});
+      // the ones the test closed already answer with an error
+      for (const workspaceId of started) await workspaceClose(workspaceId).catch(() => {});
+      leaving?.kill();
+      rmSync(leave, { force: true });
       closeOpenCodeNative();
       second.stop(true);
       openCodeServiceOptions.stateDir = nativeRoot;

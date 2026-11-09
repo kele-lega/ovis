@@ -16,7 +16,7 @@ describe("pending target identity", () => {
     expect(samePendingIdentity({ ...identity, claudeSession: "before-clear" }, { ...identity, claudeSession: "after-clear" })).toBe(false);
     expect(samePendingIdentity({ ...identity, claudeSession: "same" }, { ...identity, claudeSession: "same" })).toBe(true); // control
     expect(samePendingIdentity({ ...identity, claudeSession: null }, { ...identity, claudeSession: "learned" })).toBe(true); // control: learned later
-    expect(samePendingIdentity({ ...identity, claudeSession: "known" }, { ...identity, claudeSession: null })).toBe(true); // control: record unreadable now
+    expect(samePendingIdentity({ ...identity, claudeSession: "known" }, { ...identity, claudeSession: null })).toBe(true); // control: record unreadable now (a send refuses it in pendingContext, #2125)
   });
 
   it("permits identity parts that were unknown on either read (control #540)", () => {
@@ -27,6 +27,12 @@ describe("pending target identity", () => {
     expect(samePendingIdentity(identity, { ...identity })).toBe(true);
     expect(samePendingIdentity(identity, { ...identity, terminalId: "t2" })).toBe(false);
     expect(samePendingIdentity(identity, { ...identity, agent: null })).toBe(false);
+  });
+
+  it("refuses a known start of the same PID that can no longer be read, and keeps every other unknown part permitted", () => {
+    expect(samePendingIdentity(identity, { ...identity, processBirth: null })).toBe(false);
+    expect(samePendingIdentity(identity, { ...identity, processPid: null, processBirth: null })).toBe(true);
+    expect(samePendingIdentity({ ...identity, processBirth: null }, identity)).toBe(true);
   });
 
   it("tolerates only the existing macOS birth precision (control #540)", () => {
@@ -46,6 +52,131 @@ function fixture() {
 }
 
 describe("bridge pending input", () => {
+  it("stamps a try with this PC's clock as it goes out, and drops the stamp once the message waits again", () => {
+    const f = fixture(), item = f.enqueue(1);
+    f.advance(500);
+    expect(f.queue.claim(item, false)).toBe(true);
+    expect(item.message).toMatchObject({ state: "sending", sending_at: new Date(1_500).toISOString() });
+    f.queue.settle(item, { code: "agent_blocked", message: "blocked" }, false, true);
+    expect(item.message.state).toBe("queued");
+    expect(item.message.sending_at).toBeUndefined();
+  });
+
+  it.each(["submit_changed", "submit_partial", "submit_failed", "disconnected", "timeout", "unknown_failure"])(
+    "retains ambiguous held-copy disposition across generations and dismissal: %s", async (code) => {
+      const f = fixture(), item = f.enqueue(1);
+      f.queue.hold("a");
+      let deliveries = 0;
+      await f.queue.resend("p1", item.message.id, "fingerprint", async () => { deliveries++; return { ok: false, code, message: "Check the terminal" }; });
+      expect(item.message).toMatchObject({ state: "uncertain", error: { code } });
+      expect(f.queue.claim(item, false)).toBe(false);
+      f.advance(60_001);
+      const send = async () => { deliveries++; return { ok: true }; };
+      expect(await f.queue.resend("p1", item.message.id, "fingerprint", send, 1)).toMatchObject({ ok: false, code: "pending_uncertain" });
+      expect(f.queue.discard(item, true)).toBe(false);
+      expect(f.queue.list("a", "p1")).toMatchObject([{ id: item.message.id, state: "uncertain" }]);
+      expect(f.queue.discard(item)).toBe(true);
+      expect(f.queue.outcome("a", "p1", item.message.id)).toBe("dismissed");
+      expect(f.receipts.at(-1)?.removed).toEqual([{ id: item.message.id, outcome: "dismissed" }]);
+      expect(await f.queue.resend("p1", item.message.id, "fingerprint", send, 2)).toMatchObject({ ok: false, code: "pending_uncertain" });
+      expect(deliveries).toBe(1);
+    });
+  it("keeps an ambiguous disposition when its disconnected owner's row expires", async () => {
+    const f = fixture(), item = f.enqueue(1);
+    await f.queue.resend("p1", item.message.id, "fingerprint", async () => ({ ok: false, code: "submit_changed" }));
+    f.queue.close("a"); f.advance(60_001);
+    expect(f.queue.list("a", "p1")).toEqual([]);
+    expect(f.queue.outcome("a", "p1", item.message.id)).toBe("dismissed");
+    expect(await f.queue.resend("p1", item.message.id, "fingerprint", async () => ({ ok: true }), 1))
+      .toMatchObject({ ok: false, code: "pending_uncertain" });
+  });
+  it("keeps an ambiguous saved-only resend uncertain across generations without an original row", async () => {
+    const f = fixture();
+    await f.queue.resend("p1", "saved", "fingerprint", async () => ({ ok: false, code: "submit_changed" }));
+    let deliveries = 0;
+    expect(await f.queue.resend("p1", "saved", "fingerprint", async () => { deliveries++; return { ok: true }; }, 1))
+      .toMatchObject({ ok: false, code: "pending_uncertain" });
+    expect(deliveries).toBe(0);
+  });
+  it("leaves a definitively refused held copy withdrawable", async () => {
+    const f = fixture(), item = f.enqueue(1);
+    f.queue.hold("a");
+    await f.queue.resend("p1", item.message.id, "fingerprint", async () => ({ ok: false, code: "agent_blocked" }));
+    expect(item.message.state).toBe("held");
+    expect(f.queue.discard(item)).toBe(true);
+    expect(f.queue.outcome("a", "p1", item.message.id)).toBe("discarded");
+  });
+  it("refuses withdrawal after another connection delivered the same held ID", async () => {
+    const f = fixture(), item = f.enqueue(1);
+    f.queue.hold("a");
+    let deliveries = 0;
+    await f.queue.resend("p1", item.message.id, "fingerprint", async () => { deliveries++; return { ok: true }; });
+    expect(f.queue.discard(item)).toBe(false);
+    expect(f.queue.outcome("a", "p1", item.message.id)).toBe("sent");
+    expect(f.receipts.at(-1)?.removed).toEqual([{ id: item.message.id, outcome: "sent" }]);
+    expect(f.queue.claim(item, false)).toBe(false);
+    expect(deliveries).toBe(1);
+  });
+  it("refuses a delayed held-copy resend after authoritative withdrawal", async () => {
+    const f = fixture(), item = f.enqueue(1);
+    f.queue.hold("a");
+    expect(f.queue.discard(item)).toBe(true);
+    let deliveries = 0;
+    const reply = await f.queue.resend("p1", item.message.id, "fingerprint", async () => { deliveries++; return { ok: true }; });
+    expect(reply).toMatchObject({ ok: false, code: "pending_discarded" });
+    expect(deliveries).toBe(0);
+    expect(f.queue.outcome("a", "p1", item.message.id)).toBe("discarded");
+    expect(f.queue.claim(item, false)).toBe(false);
+  });
+  it("keeps withdrawal across retry generations and owner expiry", async () => {
+    const f = fixture(), item = f.enqueue(1);
+    await f.queue.resend("p1", item.message.id, "fingerprint", async () => ({ ok: false, code: "agent_blocked" }));
+    expect(f.queue.discard(item)).toBe(true);
+    f.queue.close("a"); f.advance(60_001);
+    let deliveries = 0;
+    for (const generation of [0, 1]) {
+      expect((await f.queue.resend("p1", item.message.id, "fingerprint", async () => { deliveries++; return { ok: true }; }, generation)).ok).toBe(false);
+    }
+    expect(deliveries).toBe(0);
+  });
+  it("lets a final delivery supersede an earlier retry refusal", async () => {
+    const f = fixture(), item = f.enqueue(1);
+    await f.queue.resend("p1", item.message.id, "fingerprint", async () => ({ ok: false, code: "agent_blocked" }));
+    expect(f.queue.claim(item, false)).toBe(true);
+    f.queue.settle(item);
+    let deliveries = 0;
+    for (const generation of [0, 1]) {
+      expect(await f.queue.resend("p1", item.message.id, "fingerprint", async () => { deliveries++; return { ok: true }; }, generation)).toEqual({ ok: true });
+    }
+    expect(deliveries).toBe(0);
+  });
+  it("bounds dispositions without evicting withdrawals inside the resend retention window", async () => {
+    const f = fixture(), first = f.enqueue(1), reserved = f.enqueue(2);
+    expect(f.queue.discard(first)).toBe(true);
+    for (let request = 3; request <= 1024; request++) expect(f.queue.discard(f.enqueue(request))).toBe(true);
+    expect(() => f.enqueue(1025)).toThrow(PendingInputError);
+    // Already accepted input still has room for its final outcome.
+    expect(f.queue.discard(reserved)).toBe(true);
+    const submit = async () => ({ ok: true });
+    expect((await f.queue.resend("p1", first.message.id, "fingerprint", submit)).ok).toBe(false);
+    f.advance(60_001);
+    expect(f.enqueue(1025)).toBeDefined();
+    // The bounded-window policy deliberately preserves stale-copy recovery after
+    // disposition eviction, just as after a bridge restart.
+    expect((await f.queue.resend("p1", first.message.id, "fingerprint", submit)).ok).toBe(true);
+  });
+  it("does not withdraw while a held-copy delivery is in flight", async () => {
+    const f = fixture(), item = f.enqueue(1);
+    const started = Promise.withResolvers<void>(), completion = Promise.withResolvers<{ ok: boolean }>();
+    const sending = f.queue.resend("p1", item.message.id, "fingerprint", () => { started.resolve(); return completion.promise; });
+    try {
+      await started.promise;
+      expect(f.queue.discard(item)).toBe(false);
+    } finally { completion.resolve({ ok: true }); }
+    expect(await sending).toEqual({ ok: true });
+    expect(f.queue.discard(item)).toBe(false);
+    expect(f.queue.outcome("a", "p1", item.message.id)).toBe("sent");
+  });
   it("regression: shares one resend outcome across stale cross-tab reads", async () => {
     const f = fixture();
     let finish!: (value: { ok: boolean }) => void;
@@ -87,12 +218,14 @@ describe("bridge pending input", () => {
     f.advance(60_001);
     expect(await f.queue.resend("p", "id", "text", async () => ({ ok: false }))).toEqual({ ok: false });
   });
-  it("control: keeps the resend receipt while its original live pending row still exists", async () => {
+  it("control: settles the original pending row and retains its sent disposition after resend receipt expiry", async () => {
     const f = fixture(), item = f.enqueue(1);
     const first = f.queue.resend("p1", item.message.id, "fingerprint", async () => ({ ok: true }));
     await first;
     f.advance(60_001);
-    expect(f.queue.resend("p1", item.message.id, "fingerprint", async () => ({ ok: false }))).toBe(first);
+    expect(f.queue.list("a", "p1")).toEqual([]);
+    expect(f.queue.outcome("a", "p1", item.message.id)).toBe("sent");
+    expect(await f.queue.resend("p1", item.message.id, "fingerprint", async () => ({ ok: false }))).toEqual({ ok: true });
   });
   it("deduplicates the same connection's request and rejects id reuse for another message", () => {
     const f = fixture();
@@ -349,4 +482,88 @@ describe("an owner counted per pane", () => {
     expect(store.list("bridge", "p")).toEqual([expect.objectContaining({ state: "held", error: { code: "first_message_unattended", message: "gone" } })]);
     expect(store.next("p")).toBeNull();
   });
+});
+
+// #511: a saved copy's resend of a message accepted for an agent alone keeps that rule, whatever the copy says
+describe("agent-only pending messages", () => {
+  it("says which held message was accepted for an agent alone, on its own pane only", () => {
+    let id = 0;
+    const store = new PendingInputs<string, string>(() => {}, () => 0, 100, () => `pending-${++id}`);
+    const identity = { agent: "claude", terminalId: "t1", session: null };
+    const only = store.enqueue("a", "p", 1, "> quote\ncomment", "lease", identity, true, true);
+    const plain = store.enqueue("a", "p", 2, "plain", "lease", identity, true);
+    expect(only.message.agent_only).toBe(true);
+    expect(store.agentOnly("p", only.message.id)).toBe(true);
+    expect(store.agentOnly("other", only.message.id)).toBe(false);
+    expect(store.agentOnly("p", plain.message.id)).toBe(false);
+    expect(plain.message.agent_only).toBeUndefined();
+  });
+});
+
+describe("a pane moved to a new ID (#1503)", () => {
+  it("carries its messages to the new ID held for an explicit send, and tells each owner both IDs", async () => {
+    const f = fixture();
+    const queued = f.enqueue(1), other = f.enqueue(2, "b"), elsewhere = f.enqueue(3, "a", "p9");
+    f.queue.status("p1", "idle");
+    f.receipts.length = 0;
+    f.queue.move("p1", "p2", { code: "pane_moved", message: "moved" });
+    expect(f.queue.list("a", "p1")).toEqual([]);
+    expect(f.queue.list("a", "p2")).toMatchObject([{ id: queued.message.id, state: "held", error: { code: "pane_moved" } }]);
+    expect(f.queue.list("b", "p2")).toMatchObject([{ id: other.message.id, state: "held" }]);
+    expect(f.queue.list("a", "p9")).toMatchObject([{ id: elsewhere.message.id, state: "queued" }]);
+    // nothing goes out by itself under the new ID
+    f.queue.status("p2", "idle");
+    expect(f.queue.next("p2")).toBeNull();
+    expect(f.receipts.filter((r) => r.owner === "a" && r.pane === "p1").at(-1)?.messages).toEqual([]);
+    expect(f.receipts.filter((r) => r.owner === "a" && r.pane === "p2").at(-1)?.messages).toHaveLength(1);
+    // an explicit send and its outcome go under the new ID
+    expect(f.queue.claim(queued, false)).toBe(true);
+    f.queue.settle(queued);
+    expect(f.queue.outcome("a", "p2", queued.message.id)).toBe("sent");
+  });
+
+  it("keeps a send in flight across the move uncertain under the new ID", async () => {
+    const f = fixture(), item = f.enqueue(1);
+    expect(f.queue.claim(item, false)).toBe(true);
+    f.queue.move("p1", "p2", { code: "pane_moved", message: "moved" });
+    expect(f.queue.list("a", "p2")).toMatchObject([{ id: item.message.id, state: "uncertain" }]);
+    expect(f.queue.waiting("p1")).toBe(false);
+    expect(await f.queue.resend("p2", item.message.id, "fingerprint", async () => ({ ok: true }))).toMatchObject({ ok: false, code: "pending_uncertain" });
+  });
+
+  it("keeps a withdrawal under the new ID", async () => {
+    const f = fixture(), item = f.enqueue(1);
+    f.queue.hold("a");
+    expect(f.queue.discard(item)).toBe(true);
+    f.queue.move("p1", "p2", { code: "pane_moved", message: "moved" });
+    expect(f.queue.outcome("a", "p2", item.message.id)).toBe("discarded");
+    expect(await f.queue.resend("p2", item.message.id, "fingerprint", async () => ({ ok: true }))).toMatchObject({ ok: false, code: "pending_discarded" });
+  });
+
+  it("never tries a send the move overtook again by itself, even after a retryable refusal", () => {
+    const f = fixture(), item = f.enqueue(1);
+    f.queue.status("p1", "idle");
+    expect(f.queue.claim(item, true)).toBe(true);
+    f.queue.move("p1", "p2", { code: "pane_moved", message: "moved" });
+    f.queue.settle(item, { code: "input_not_ready", message: "not ready" }, false, true);
+    f.queue.status("p2", "idle");
+    expect(f.queue.next("p2")).toBeNull();
+    expect(f.queue.list("a", "p2")).toMatchObject([{ id: item.message.id, state: "held" }]);
+  });
+
+  it.each([["delivered", { ok: true }, "sent"], ["ambiguous", { ok: false, code: "submit_changed", message: "Check the terminal" }, "uncertain"]] as const)(
+    "settles a held copy's send that ends after the move under the new ID: %s", async (_name, reply, expected) => {
+      const f = fixture(), item = f.enqueue(1);
+      f.queue.hold("a");
+      const answer = Promise.withResolvers<{ ok: boolean; code?: string; message?: string }>();
+      const sent = f.queue.resend("p1", item.message.id, "fingerprint", () => answer.promise);
+      f.queue.move("p1", "p2", { code: "pane_moved", message: "moved" });
+      answer.resolve(reply);
+      await sent;
+      if (expected === "sent") expect(f.queue.outcome("a", "p2", item.message.id)).toBe("sent");
+      else {
+        expect(f.queue.list("a", "p2")).toMatchObject([{ id: item.message.id, state: "uncertain" }]);
+        expect(f.queue.discard(item, true)).toBe(false);
+      }
+    });
 });

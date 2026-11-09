@@ -6,6 +6,7 @@ import { chromium, type BrowserContext, type Page } from "playwright-core";
 import panes from "../site/demo/fixtures/panes.json";
 import { buildDemoApp } from "./demo-build.ts";
 import { chromePath } from "./chrome-path.ts";
+import { shownRows } from "./shown-rows.ts";
 
 // A phone shows a split tab one pane at a time and keeps the others mounted behind it (#819). The
 // pty is shared with every device, so a hidden pane must not size it: a PC drawing the split would
@@ -54,10 +55,11 @@ async function pinchAcross(context: BrowserContext, page: Page, pane: string, du
   await cdp.detach();
 }
 
-/** Opens the tab's other pane from its menu, by script: the fingers of a pinch may still be down. */
+/** Opens the tab's other pane from the menu that lists its panes, by script: the fingers of a pinch may still be down. A phone's header lists the tabs, so its More carries them; a wider screen's tab has its own menu. */
 async function showOther(page: Page, pane: string): Promise<void> {
-  await page.locator(".tab-strip-menu").evaluate((node) => (node as HTMLElement).click());
-  await page.locator('.row-sheet-item:not([aria-current="true"])').first().evaluate((node) => (node as HTMLElement).click());
+  const menu = await page.locator(".tab-strip-menu").count() > 0 ? ".tab-strip-menu" : ".header-more-button";
+  await page.locator(menu).evaluate((node) => (node as HTMLElement).click());
+  await page.locator(`.row-sheet-item[data-item="pane:${pane}"]`).evaluate((node) => (node as HTMLElement).click());
   await page.locator(`.pane-frame:not(.is-hidden)[data-layout-pane="${pane}"]`).waitFor();
 }
 
@@ -110,7 +112,7 @@ try {
       // the split tab shows one pane on the phone, the other mounted behind it; the phone turns
       const shell = await page.locator(".pane-frame.is-hidden").getAttribute("data-layout-pane") as string;
       const sibling = await page.locator(".pane-frame:not(.is-hidden)").getAttribute("data-layout-pane") as string;
-      await page.locator(`.pane-frame:not(.is-hidden)[data-layout-pane="${sibling}"] .xterm-rows`).waitFor();
+      await page.locator(shownRows(`.pane-frame:not(.is-hidden)[data-layout-pane="${sibling}"]`)).waitFor();
       await page.waitForTimeout(1_000);
       await page.evaluate(() => { (window as unknown as Recorded).sent = []; });
       await page.setViewportSize({ width: 700, height: 390 });
@@ -134,10 +136,10 @@ try {
 
       // shown again, the shell fits the phone and takes the pty, at the shown pane's grid
       await sent(page);
-      await page.locator(".tab-strip-menu:visible").tap();
+      await page.locator(".header-more-button").tap();
       const sheet = page.getByRole("dialog");
       await sheet.waitFor();
-      await sheet.locator('.row-sheet-item:not([aria-current="true"])').first().tap();
+      await sheet.locator(`.row-sheet-item[data-item="pane:${shell}"]`).tap();
       await page.locator(`.pane-frame:not(.is-hidden)[data-layout-pane="${shell}"]`).waitFor();
       await page.waitForFunction((id) => (window as unknown as Recorded).sent.some((frame) => frame.pane_id === id && frame.type === "resize"), shell, { timeout: 10_000 });
       const taken = (await lastOf(page, shell, "resize"))!;

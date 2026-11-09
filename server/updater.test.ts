@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, jest, setSystemTime } from "bun:test";
-import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { isReleaseFolder, NOTES_FILE_LIMIT, readNotesFile, RELEASE_FOLDER_REASON, Updater, runCommand, type Release } from "./updater.ts";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { releaseSupervisor as launcherSupervisor } from "./managed.ts";
+import { isReleaseFolder, latestTag, NOTES_FILE_LIMIT, readNotesFile, RELEASE_FOLDER_REASON, UPDATE_CHANNEL_FILE, updateChannel, Updater, runCommand, type Release } from "./updater.ts";
 import { updateStateDir } from "./update-state.ts";
 import { spawnSync } from "node:child_process";
 import { symlinkSync } from "node:fs";
@@ -53,8 +54,12 @@ afterEach(() => {
   rmSync(directory, { recursive: true, force: true });
 });
 
-/** A real launcher + supervisor + bridge on a free port, serving the fixture checkout. */
-async function managedFixture(supervisor?: string, slowHealth = false) {
+/**
+ * A real launcher + supervisor + bridge on a free port, serving the fixture checkout. Given `home`,
+ * they run with it as $HOME and keep their state in the default dir under it, as an install not
+ * told OVIS_STATE_DIR does.
+ */
+async function managedFixture(supervisor?: string, slowHealth = false, home?: string) {
   updater.stop();
   mkdirSync(join(upstream, "server"), { recursive: true });
   const entry = `
@@ -83,6 +88,14 @@ async function managedFixture(supervisor?: string, slowHealth = false) {
   const headers = { authorization: "Bearer test-managed-token", "x-herdr-update": "1" };
   // what the launcher, the supervisor and the bridge print: a failed test prints it
   const log = join(directory, "managed.log");
+  // its own config home: the launcher links the default state dirs it finds there
+  const env: Record<string, string | undefined> = { ...process.env, PORT: String(port), HOST: "127.0.0.1", OVIS_STATE_DIR: stateDir,
+    XDG_CONFIG_HOME: join(directory, "config"), OVIS_TOKEN: "test-managed-token", OVIS_AUTO_UPDATE: "0", SUPERVISOR_MARKER: join(directory, "marker") };
+  if (home !== undefined) {
+    for (const name of ["OVIS_STATE_DIR", "XDG_CONFIG_HOME"]) delete env[name];
+    // herdr's socket stays the test session's (scripts/test-herdr.ts sets it): it is looked for under $HOME otherwise
+    Object.assign(env, { HOME: home, HERDR_SOCKET: process.env["HERDR_SOCKET"] });
+  }
   const launch = () => {
     // one file for every launch of a test: a separator says which launch printed what
     appendFileSync(log, `--- launch at ${new Date().toISOString()} ---\n`);
@@ -90,10 +103,7 @@ async function managedFixture(supervisor?: string, slowHealth = false) {
     try {
       return Bun.spawn([process.execPath, "--eval",
         `import {runManaged} from ${JSON.stringify(join(import.meta.dir, "managed.ts"))}; await runManaged(${JSON.stringify(root)});`], {
-        // its own config home: the launcher links the default state dirs it finds there
-        env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", OVIS_STATE_DIR: stateDir, XDG_CONFIG_HOME: join(directory, "config"),
-          OVIS_TOKEN: "test-managed-token", OVIS_AUTO_UPDATE: "0", SUPERVISOR_MARKER: join(directory, "marker") },
-        stdout: output, stderr: output,
+        env, stdout: output, stderr: output,
       });
     } finally {
       closeSync(output);
@@ -133,6 +143,25 @@ const releaseSupervisor = (broken = false) => broken ? "process.exit(3);\n" : `
   const { runSupervisor } = await import(${JSON.stringify(join(import.meta.dir, "supervisor.ts"))});
   await runSupervisor(process.env.OVIS_SOURCE_ROOT);
 `;
+/**
+ * The real supervisor and the files it imports, copied into the fixture's tree: an installed release
+ * then runs it from its own folder and finds its state from there, as a real one does.
+ */
+function copySupervisor(into: string) {
+  const transpiler = new Bun.Transpiler({ loader: "ts" });
+  const repo = resolve(import.meta.dir, "..");
+  const files = [join(import.meta.dir, "supervisor.ts")];
+  for (const file of files) {
+    const source = readFileSync(file, "utf8");
+    const copy = join(into, relative(repo, file));
+    mkdirSync(dirname(copy), { recursive: true });
+    writeFileSync(copy, source);
+    for (const { path } of transpiler.scanImports(source)) {
+      const imported = resolve(dirname(file), path);
+      if (path.startsWith(".") && !files.includes(imported)) files.push(imported);
+    }
+  }
+}
 const liveHerdr = existsSync(process.env["HERDR_SOCKET"] || HERDR_SOCKET_PATH);
 
 /** What `herdr plugin install` leaves behind: a depth-1 checkout of upstream's main. */
@@ -213,6 +242,28 @@ describe("managed source updates with real Git repositories and builds", () => {
     }
   });
 
+  it("typechecks on Bun, not on an older node first on herdr's PATH", async () => {
+    // tsc is a `#!/usr/bin/env node` script; with install.sh's Node off the PATH (#596), herdr's PATH may start with Node 10
+    mkdirSync(join(upstream, "tools"), { recursive: true });
+    writeFileSync(join(upstream, "tools", "check-fixture"), "#!/usr/bin/env node\nif (typeof Bun === 'undefined') process.exit(42);\n", { mode: 0o755 });
+    const scripts = { typecheck: "./tools/check-fixture", build: "bun build-fixture.ts" };
+    writeFileSync(join(upstream, "package.json"), JSON.stringify({ name: "updater-fixture", scripts }));
+    await release("second", "v0.2.0");
+    const oldNode = join(directory, "old-node");
+    mkdirSync(oldNode);
+    writeFileSync(join(oldNode, "node"), "#!/bin/sh\necho 'SyntaxError: Unexpected token ?' >&2\nexit 1\n", { mode: 0o755 });
+    const path = process.env["PATH"];
+    process.env["PATH"] = `${oldNode}:${path ?? ""}`;
+    try {
+      await updater.request("install");
+    } finally {
+      if (path === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = path;
+    }
+    expect(updater.status.error).toBeNull();
+    expect(steps).toContain("build");
+  });
+
   it("checks without installing, then builds an exact revision without changing the source", async () => {
     const original = await git(root, "rev-parse", "HEAD");
     writeFileSync(join(upstream, "CHANGELOG.md"), "# Changelog\n\n## [0.2.0] - 2026-10-07\n\n### Added\n- Second.\n");
@@ -234,6 +285,134 @@ describe("managed source updates with real Git repositories and builds", () => {
     const resumed = new Updater(updater.options);
     expect((await resumed.initialize())?.revision).toBe(target);
     resumed.stop();
+  });
+
+  it("resumes a release recorded under either name of a state dir reached through a symlink (#2029)", async () => {
+    await release("second", "v0.2.0");
+    await updater.request("install");
+    expect(updater.status.error).toBeNull();
+    // the state dir through a link, as a symlinked $HOME gives it to the launcher, and under its real
+    // path, as Bun gives it to an installed release's supervisor: each resumes what the other recorded
+    const linked = join(directory, "linked-state");
+    symlinkSync(stateDir, linked);
+    const saved = JSON.parse(readFileSync(join(stateDir, "current.json"), "utf8")) as Release;
+    for (const [recordedUnder, resumedFrom] of [[stateDir, linked], [linked, stateDir]] as const) {
+      writeFileSync(join(stateDir, "current.json"), JSON.stringify({ ...saved, directory: join(recordedUnder, basename(saved.directory)) }));
+      const resumed = new Updater({ ...updater.options, stateDir: resumedFrom });
+      // named as its own state dir names it
+      expect((await resumed.initialize())?.directory).toBe(join(resumedFrom, basename(saved.directory)));
+      resumed.stop();
+    }
+  });
+
+  it("keeps the release it replaces when that one was recorded under the other name of its state dir (#2029)", async () => {
+    await release("second", "v0.2.0");
+    await updater.request("install");
+    // recorded under the real path; resumed through a link to it
+    const replaced = updater.release!.directory;
+    const linked = join(directory, "linked-state");
+    symlinkSync(stateDir, linked);
+    const resumed = new Updater({ ...updater.options, stateDir: linked });
+    expect((await resumed.initialize())?.revision).toBe(updater.release!.revision);
+    const target = await release("third", "v0.3.0");
+    await resumed.request("install");
+    expect(resumed.status.error).toBeNull();
+    expect(resumed.status.current_revision).toBe(target);
+    // the launcher falls back to the replaced release's supervisor when the new one cannot start
+    expect(existsSync(join(replaced, "package.json"))).toBe(true);
+    resumed.stop();
+  });
+
+  it("resumes no release whose recorded name leaves the state dir, nor one recorded relative (#2029)", async () => {
+    await release("second", "v0.2.0");
+    await updater.request("install");
+    const saved = JSON.parse(readFileSync(join(stateDir, "current.json"), "utf8")) as Release;
+    const name = basename(saved.directory);
+    mkdirSync(join(saved.directory, "server"));
+    writeFileSync(join(saved.directory, "server", "supervisor.ts"), "");
+    // state/alias -> outside/child, and a copy of the release at outside/<name>: a process started at
+    // state/alias/../<name> runs in the copy, while that name, read as text, is inside the state dir
+    const outside = join(directory, "outside");
+    mkdirSync(join(outside, "child"), { recursive: true });
+    cpSync(saved.directory, join(outside, name), { recursive: true });
+    symlinkSync(join(outside, "child"), join(stateDir, "alias"));
+    const aliased = [stateDir, "alias", "..", name].join(sep);
+    expect(await runCommand(aliased, ["pwd", "-P"])).toBe(realpathSync(join(outside, name)));
+    for (const recorded of [aliased, relative(process.cwd(), saved.directory)]) {
+      writeFileSync(join(stateDir, "current.json"), JSON.stringify({ ...saved, directory: recorded }));
+      const resumed = new Updater(updater.options);
+      expect((await resumed.initialize())?.directory).toBe(root);
+      resumed.stop();
+      expect(launcherSupervisor(root, stateDir)).toBeNull();
+    }
+    writeFileSync(join(stateDir, "current.json"), JSON.stringify(saved));
+    const resumed = new Updater(updater.options);
+    expect((await resumed.initialize())?.directory).toBe(saved.directory);
+    resumed.stop();
+    expect(launcherSupervisor(root, stateDir)).toBe(join(saved.directory, "server", "supervisor.ts"));
+  });
+
+  it("keeps an offer up while a later check runs, and ends it only with a check's answer (#3325)", async () => {
+    const target = await release("second", "v0.2.0");
+    // the page polls the published status: a check that withdrew the offer while it ran made the
+    // app-wide line blink out, and the terminal under it resize
+    const published: Array<{ phase: string; available: boolean }> = [];
+    const watched = new Updater({ ...updater.options, publish(status) { published.push({ phase: status.phase, available: status.available }); } });
+    await watched.initialize();
+    await watched.request("check");
+    expect(watched.status).toMatchObject({ available: true, latest_revision: target });
+    published.length = 0;
+    await watched.request("check");
+    expect(published.at(0)).toEqual({ phase: "checking", available: true });
+    expect(published.filter((status) => !status.available)).toEqual([]);
+
+    // a check that cannot reach the releases ends the offer: the server refuses an install then
+    await git(root, "remote", "set-url", "origin", join(directory, "missing"));
+    await watched.request("check");
+    expect(watched.status).toMatchObject({ phase: "error", available: false });
+    await git(root, "remote", "set-url", "origin", upstream);
+    await watched.request("check");
+    expect(watched.status).toMatchObject({ phase: "idle", available: true });
+
+    // so does a check that finds the checkout blocked
+    writeFileSync(join(root, "local-change.txt"), "x");
+    await watched.request("check");
+    expect(watched.status.blocked_reason).not.toBeNull();
+    expect(watched.status.available).toBe(false);
+    watched.stop();
+  });
+
+  it("ends the offer when the checkout becomes blocked while the release builds (#3325)", async () => {
+    await release("second", "v0.2.0");
+    // the checkout changes while the release builds: the check after the build finds it blocked
+    const building = new Updater({ ...updater.options, publish(status) {
+      if (status.step === "build" && !existsSync(join(root, "local-change.txt"))) writeFileSync(join(root, "local-change.txt"), "x");
+    } });
+    await building.initialize();
+    await building.request("install");
+    expect(building.status.phase).toBe("error");
+    expect(building.status.blocked_reason).toContain("local changes");
+    expect(building.status.available).toBe(false);
+    building.stop();
+  });
+
+  it("never shows an offer under a channel it was not made on while the check runs (#3325)", async () => {
+    const appState = join(directory, "app-state");
+    mkdirSync(appState);
+    writeFileSync(join(appState, UPDATE_CHANNEL_FILE), "beta\n");
+    const published: Array<{ phase: string; channel: string | undefined; available: boolean }> = [];
+    const switched = new Updater({ root, stateDir, autoUpdate: false, activate: async (_next, persist) => persist(),
+      publish(status) { published.push({ phase: status.phase, channel: status.channel, available: status.available }); },
+      channel: () => updateChannel({}, appState) });
+    await switched.initialize();
+    await release("beta", "beta/v0.2.0-beta.1");
+    await switched.request("check");
+    expect(switched.status).toMatchObject({ channel: "beta", available: true });
+    writeFileSync(join(appState, UPDATE_CHANNEL_FILE), "stable\n");
+    published.length = 0;
+    await switched.request("check");
+    expect(published.filter((status) => status.channel === "stable" && status.available)).toEqual([]);
+    switched.stop();
   });
 
   it("tells what an update brings from the release's own changelog, every release since the running one", async () => {
@@ -422,6 +601,24 @@ describe("managed source updates with real Git repositories and builds", () => {
     expect(await git(plugin, "rev-parse", "HEAD")).toBe(original);
     expect(await git(plugin, "status", "--porcelain")).toBe("");
     managed.stop();
+
+    // the same checkout started from a shell, without HERDR_PLUGIN_ROOT: no updates, but the
+    // release it already installed still runs instead of the older source checkout
+    const restarted = make(false);
+    expect((await restarted.initialize())?.revision).toBe(target);
+    expect(restarted.status.blocked_reason).toContain("main");
+    restarted.stop();
+    // local changes there are someone's own work: the source checkout runs, as before
+    writeFileSync(join(plugin, "user-draft.txt"), "preserve");
+    const edited = make(false);
+    expect((await edited.initialize())?.directory).toBe(plugin);
+    edited.stop();
+    rmSync(join(plugin, "user-draft.txt"));
+    // a clean named branch is not a herdr plugin checkout either: the source checkout runs
+    await git(plugin, "checkout", "-q", "-b", "feature");
+    const branched = make(false);
+    expect((await branched.initialize())?.directory).toBe(plugin);
+    branched.stop();
   });
 
   it("follows only plain vX.Y.Z tags: untagged commits, bundle tags and pre-releases stay put", async () => {
@@ -444,6 +641,49 @@ describe("managed source updates with real Git repositories and builds", () => {
     await updater.request("install");
     expect(updater.status.error).toBeNull();
     expect(updater.status.current_revision).toBe(target);
+  });
+
+  it("never offers a beta build on the stable channel", async () => {
+    await release("beta", "beta/v0.2.0-beta.3");
+    await git(upstream, "tag", "v0.3.0-beta.1");
+    await updater.request("check");
+    expect(updater.status.channel).toBe("stable");
+    expect(updater.status.available).toBe(false);
+    expect(updater.status.latest_version).toBeNull();
+    // a stable updater fetches refs/tags/v* alone, as every released one did (v0.4.18 to v0.4.22):
+    // the beta/* tags never reach its checkout
+    expect(await git(root, "for-each-ref", "refs/tags/beta/")).toBe("");
+    expect(await git(root, "tag", "--list", "v0.3.0-beta.1")).toBe("v0.3.0-beta.1");
+  });
+
+  it("on the beta channel, installs the newest beta build, and takes the release after it", async () => {
+    const appState = join(directory, "app-state");
+    mkdirSync(appState);
+    const beta = new Updater({ root, stateDir, autoUpdate: false, activate: async (_next, persist) => persist(), publish() {},
+      channel: () => updateChannel({}, appState) });
+    await beta.initialize();
+    await release("released", "v0.2.0");
+    await release("beta nine", "beta/v0.2.1-beta.9");
+    // a pre-release under v* is no beta build: never taken, on either channel
+    await release("rc", "v0.2.1-rc.1");
+    const newest = await release("beta ten", "beta/v0.2.1-beta.10");
+    await beta.request("check");
+    // no setting file yet: the PC has not opted in
+    expect(beta.status.channel).toBe("stable");
+    expect(beta.status.latest_version).toBe("0.2.0");
+
+    // the file takes effect at the next check, without a restart
+    writeFileSync(join(appState, UPDATE_CHANNEL_FILE), "beta\n");
+    await beta.request("install");
+    expect(beta.status.error).toBeNull();
+    expect(beta.status.channel).toBe("beta");
+    expect(beta.status.current_revision).toBe(newest);
+
+    const stable = await release("release", "v0.2.1");
+    await beta.request("check");
+    expect(beta.status.latest_version).toBe("0.2.1");
+    expect(beta.status.latest_revision).toBe(stable);
+    expect(beta.status.available).toBe(true);
   });
 
   it("treats a shallow plugin checkout ahead of the latest release as up to date", async () => {
@@ -583,6 +823,77 @@ describe("managed source updates with real Git repositories and builds", () => {
       clearTimeout(timer);
     }
   }, 20_000);
+
+  it("takes a bridge by its own answer, or by the whole one when it predates the bridge-scope boot id, and tells it", async () => {
+    // runSupervisor in a stand-in child, as above: the bridge is a fake whose health answers say what
+    // a bridge of this revision says (its boot id and runtime in ?scope=bridge) or an older one (none)
+    const asked = async (older: boolean, herdrSocket?: string) => {
+      const root = mkdtempSync(join(directory, "launch-root-"));
+      const stateDir = mkdtempSync(join(directory, "launch-state-"));
+      const record = join(stateDir, "launch-record.json");
+      const script = join(stateDir, "launch-stand-in.ts");
+      writeFileSync(script, `
+        import { mock } from "bun:test";
+        import { writeFileSync } from "node:fs";
+        const { Updater } = await import(${JSON.stringify(join(import.meta.dir, "updater.ts"))});
+        class Idle extends Updater {
+          override async initialize() { return { directory: ${JSON.stringify(root)}, revision: "0".repeat(40), source_revision: "0".repeat(40) }; }
+          override start() {}
+        }
+        mock.module(${JSON.stringify(join(import.meta.dir, "updater.ts"))}, () => ({ Updater: Idle }));
+        const urls: string[] = [];
+        const sent: unknown[] = [];
+        let bootId = "";
+        Bun.spawn = ((_argv: string[], options: { env: Record<string, string> }) => {
+          bootId = options.env["OVIS_BOOT_ID"]!;
+          return { exitCode: null, kill() {}, exited: new Promise(() => {}), send(message: unknown) { sent.push(message); } };
+        }) as unknown as typeof Bun.spawn;
+        globalThis.fetch = (async (url: string) => {
+          urls.push(new URL(url).search);
+          const bridge = new URL(url).search === "?scope=bridge";
+          return { ok: true, json: async () => bridge ? (${older} ? { ok: true } : { ok: true, web_ui: { boot_id: bootId }, runtime: "herdr" }) : { web_ui: { boot_id: bootId } } };
+        }) as unknown as typeof fetch;
+        await (await import(${JSON.stringify(join(import.meta.dir, "supervisor.ts"))})).runSupervisor(${JSON.stringify(root)});
+        writeFileSync(${JSON.stringify(record)}, JSON.stringify({ urls, sent }));
+        process.exit(0);
+      `);
+      // no herdr socket by default: a bridge of this revision serving herdr needs no whole answer
+      const child = Bun.spawn([process.execPath, script], { env: { ...process.env, PORT: "59998", HOST: "127.0.0.1", OVIS_STATE_DIR: stateDir,
+        XDG_CONFIG_HOME: join(stateDir, "config"), HERDR_SOCKET: herdrSocket ?? join(stateDir, "no-herdr.sock"), OVIS_AUTO_UPDATE: "0" }, stdout: "pipe", stderr: "pipe" });
+      const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+      const timer = setTimeout(() => child.kill("SIGKILL"), 15_000); // a wedged stand-in must not hang the run
+      try {
+        expect(await child.exited).toBe(0);
+        if (!existsSync(record)) throw new Error(`no record was written; the stand-in printed:\n${(await output).join("\n")}`);
+        return JSON.parse(readFileSync(record, "utf8")) as { urls: string[]; sent: Array<{ type?: string }> };
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    const current = await asked(false);
+    expect(current.urls).toEqual(["?scope=bridge"]);
+    expect(current.sent.filter((message) => message.type === "bridge-accepted")).toHaveLength(1);
+    const older = await asked(true);
+    expect(older.urls).toEqual(["?scope=bridge", ""]);
+    expect(older.sent.filter((message) => message.type === "bridge-accepted")).toHaveLength(1);
+    if (process.platform === "win32") return; // herdr's socket is a named pipe there: no unix socket file is left behind
+    // a socket file a killed herdr left behind refuses the connect: herdr is stopped, as with no socket (#2670)
+    const stale = join(mkdtempSync(join(directory, "stale-")), "herdr.sock");
+    const holder = Bun.spawn([process.execPath, "-e", `Bun.listen({ unix: ${JSON.stringify(stale)}, socket: { data() {} } }); console.log("listening");`], { stdout: "pipe" });
+    await holder.stdout.getReader().read();
+    holder.kill("SIGKILL");
+    await holder.exited;
+    expect(existsSync(stale)).toBe(true);
+    expect((await asked(false, stale)).urls).toEqual(["?scope=bridge"]);
+    // a herdr that answers the connect must answer the whole health check too
+    const live = join(mkdtempSync(join(directory, "live-")), "herdr.sock");
+    const listener = Bun.listen({ unix: live, socket: { data() {} } });
+    try {
+      expect((await asked(false, live)).urls).toEqual(["?scope=bridge", ""]);
+    } finally {
+      listener.stop(true);
+    }
+  }, 60_000);
 
   it("holds the timer off after a user's own failed unshallow fetch too", async () => {
     // a user's Check skips the backoff, but its failure still starts one: the timer that comes
@@ -972,6 +1283,44 @@ describe("managed source updates with real Git repositories and builds", () => {
     }
   }, 30_000);
 
+  // $HOME as /home/<user> -> /data00/home/<user>: the launcher names the state dir through the link,
+  // and Bun runs the installed release's supervisor from the real path (#2029)
+  // only with a socket named for the test: falling back to the default one would reach the user's own herdr
+  it.skipIf(!liveHerdr || !process.env["HERDR_SOCKET"])("keeps an update installed when $HOME is a symlink", async () => {
+    const volume = join(directory, "volume", "home");
+    mkdirSync(volume, { recursive: true });
+    const home = join(directory, "home");
+    symlinkSync(volume, home);
+    copySupervisor(upstream);
+    const { launch, readStatus, until, request, health, explain } = await managedFixture(undefined, false, home);
+    let handle = launch();
+    try {
+      await until(async () => (await readStatus())?.managed === true);
+      const target = await release("symlinked home", "v0.2.0");
+      await request("check");
+      await until(async () => (await readStatus())?.available === true);
+      await request("install");
+      // "idle" with the new revision only comes from the supervisor that keeps running it: the release's own
+      await until(async () => { const s = await readStatus(); return s?.current_revision === target && s.phase === "idle"; });
+      expect((await health()).web_ui.revision).toBe(target);
+      // and the same update is not offered again
+      const checked = (await readStatus())?.checked_at ?? null;
+      await request("check");
+      await until(async () => { const s = await readStatus(); return (s?.checked_at ?? null) !== checked && s?.phase === "idle"; });
+      expect((await readStatus())?.available).toBe(false);
+
+      handle.kill("SIGTERM"); await handle.exited;
+      handle = launch();
+      await until(async () => { const s = await readStatus(); return s?.current_revision === target && s.phase === "idle"; });
+      expect((await health()).web_ui.revision).toBe(target);
+    } catch (error) {
+      await explain(error);
+    } finally {
+      handle.kill("SIGTERM");
+      await handle.exited;
+    }
+  }, 45_000);
+
   it.skipIf(!liveHerdr)("installs an update asked for before the bridge's first health check has passed", async () => {
     const { launch, readStatus, until, request, health, explain } = await managedFixture(undefined, true);
     const handle = launch();
@@ -1167,4 +1516,77 @@ describe("a release's notes file", () => {
       expect(() => readNotesFile(join(dir, "missing.md"))).toThrow();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+});
+
+describe("update channels", () => {
+  it("orders releases after their betas and betas by number, and keeps betas off stable", () => {
+    const tags = ["v0.4.22", "beta/v0.4.23-beta.9", "beta/v0.4.23-beta.10", "v0.4.24-beta.1", "remote-v9", "v1.0.0-rc1", ""];
+    expect(latestTag(tags, "stable")).toBe("v0.4.22");
+    expect(latestTag(tags, "beta")).toBe("beta/v0.4.23-beta.10");
+    expect(latestTag([...tags, "v0.4.23"], "beta")).toBe("v0.4.23");
+    expect(latestTag(["beta/v0.4.23-beta.2"], "stable")).toBeUndefined();
+  });
+
+  it("reads the channel from OVIS_UPDATE_CHANNEL first, then the state dir's file, else stable", () => {
+    const appState = mkdtempSync(join(tmpdir(), "ovis-channel-"));
+    try {
+      expect(updateChannel({}, appState)).toBe("stable");
+      writeFileSync(join(appState, UPDATE_CHANNEL_FILE), " Beta\n");
+      expect(updateChannel({}, appState)).toBe("beta");
+      expect(updateChannel({ OVIS_UPDATE_CHANNEL: "stable" }, appState)).toBe("stable");
+      writeFileSync(join(appState, UPDATE_CHANNEL_FILE), "nightly");
+      expect(updateChannel({}, appState)).toBe("stable");
+      expect(updateChannel({ OVIS_UPDATE_CHANNEL: "beta" }, appState)).toBe("beta");
+    } finally { rmSync(appState, { recursive: true, force: true }); }
+  });
+});
+
+it("cancels an install while it builds: nothing is installed, its offer stays, and it is not taken for a failed release", async () => {
+  const running = updater.status.current_revision;
+  // a release whose build never ends on its own
+  writeFileSync(join(upstream, "build-fixture.ts"), "await new Promise(() => {});");
+  await git(upstream, "add", ".");
+  await git(upstream, "commit", "-qm", "slow build");
+  await git(upstream, "tag", "v9.0.0");
+  const building = Promise.withResolvers<void>();
+  const watched = new Updater({ ...updater.options, publish(status) { if (status.step === "build") building.resolve(); } });
+  await watched.initialize();
+  try {
+    // nothing to cancel before an install runs
+    expect(watched.cancel("11111111-2222-4333-8444-555555555555")).toBe(false);
+    const install = watched.request("install", true, undefined, "11111111-2222-4333-8444-555555555555");
+    await building.promise;
+    // another's id (another device's install, or this PC's own Settings') never stops it
+    expect(watched.cancel("99999999-2222-4333-8444-555555555555")).toBe(false);
+    expect(watched.cancel("11111111-2222-4333-8444-555555555555")).toBe(true);
+    await install;
+    expect(watched.status).toMatchObject({ phase: "error", error_code: "update_cancelled", current_revision: running, available: true, install_cancellable: true });
+    expect(existsSync(join(stateDir, "failed.json"))).toBe(false);
+    // the 5-minute timer's check (auto-update on) leaves the cancelled release alone: it would build it again otherwise
+    (watched.options as { autoUpdate: boolean }).autoUpdate = true;
+    await watched.request("check");
+    expect(watched.status.phase).toBe("idle");
+    expect(watched.status.current_revision).toBe(running);
+  } finally { watched.stop(); }
+});
+
+it("stops an install cancelled while it still checks what is on offer, before anything is built", async () => {
+  writeFileSync(join(upstream, "build-fixture.ts"), "await new Promise(() => {});");
+  await git(upstream, "add", ".");
+  await git(upstream, "commit", "-qm", "slow build");
+  await git(upstream, "tag", "v9.0.1");
+  const seen: Array<string | null> = [];
+  const watched: Updater = new Updater({ ...updater.options, publish(status) {
+    seen.push(status.step ?? null);
+    // asked as soon as the run starts checking
+    if (status.phase === "checking" && !asked) asked = watched.cancel("11111111-2222-4333-8444-555555555555");
+  } });
+  let asked = false;
+  await watched.initialize();
+  try {
+    await watched.request("install", true, undefined, "11111111-2222-4333-8444-555555555555");
+    expect(asked).toBe(true);
+    expect(watched.status).toMatchObject({ phase: "error", error_code: "update_cancelled", available: true });
+    expect(seen).not.toContain("build");
+  } finally { watched.stop(); }
 });

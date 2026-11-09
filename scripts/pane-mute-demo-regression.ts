@@ -205,7 +205,7 @@ let url = "";
 async function newContext(browser: Browser, phone: boolean, settings: Record<string, unknown>): Promise<BrowserContext> {
   const context = await browser.newContext(phone ? { ...devices["iPhone 14"], locale: settings["language"] === "ko" ? "ko-KR" : "en-US" } : { viewport: { width: 1440, height: 900 }, locale: "en-US" });
   await context.addInitScript((stored) => {
-    localStorage.setItem("ovis:settings", JSON.stringify({ language: "en", defaultView: "chat", alertsOn: true, alertInput: true, alertDone: "always", alertInApp: true, alertSound: true, ...stored }));
+    localStorage.setItem("ovis:settings", JSON.stringify({ language: "en", defaultView: "chat", alertsOn: true, alertInput: true, alertDone: "always", alertSound: true, ...stored }));
   }, settings);
   return context;
 }
@@ -358,7 +358,10 @@ try {
         assert.equal(await muteItem(page).getAttribute("aria-checked"), "false", "the row menu offers Mute alerts, unchecked");
         await muteItem(page).click();
         const saved = await storeHolds("the first mute", (document) => document.muted_panes?.includes(key) === true);
-        assert.deepEqual(saved, { revision: 4, settings: {}, pins: [], muted_panes: [key] }, "the first mute is saved over the pre-feature document");
+        // the first save names the state folder (shared/preferences.ts state_id)
+        const { state_id: savedId, ...savedRest } = saved;
+        assert.match(savedId ?? "", /^[0-9a-f]{32}$/, "the first save names the state folder");
+        assert.deepEqual(savedRest, { revision: 4, settings: {}, pins: [], muted_panes: [key] }, "the first mute is saved over the pre-feature document");
         await page.waitForFunction((revision) => window.muteFixture.documents.some((document) => document.revision === revision), saved.revision);
         await row(page, "local", P).locator('[data-testid="alerts-muted"]').waitFor();
         assert.deepEqual(errorsOf(page), []);
@@ -372,7 +375,9 @@ try {
         assert.deepEqual(await getPreferences(page), { revision: 0, settings: {}, muted_panes: [] }, "GET of a fresh store carries the empty list");
         await toggleMute(page, false, "local", P);
         const saved = await storeHolds("the first mute of a fresh store", (document) => document.muted_panes?.includes(key) === true);
-        assert.deepEqual(saved, { revision: 1, settings: {}, pins: [], muted_panes: [key] }, "the first mute is saved over the fresh store");
+        const { state_id: savedId, ...savedRest } = saved;
+        assert.match(savedId ?? "", /^[0-9a-f]{32}$/, "the first save names the state folder");
+        assert.deepEqual(savedRest, { revision: 1, settings: {}, pins: [], muted_panes: [key] }, "the first mute is saved over the fresh store");
         await context.close();
         checks.push("fresh store: GET says muted_panes: [], and the first mute is saved as revision 1");
       }

@@ -1,28 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { firstMessageFault, launchArgsFault, launchCommandFault, MAX_LAUNCH_COMMAND_CHARS, MODEL_NAME } from "./launch-rules.ts";
-
-describe("a custom launch command", () => {
-  it("takes an entire command, preserving whitespace, shell syntax and Unicode", () => {
-    for (const command of ["claude", "  MY_CONFIG='a b' wrapper --model two words  ", "cd '/a b' && my-agent | tee /tmp/output", "echo '안녕 世界'", "x".repeat(MAX_LAUNCH_COMMAND_CHARS)]) {
-      expect(launchCommandFault(command), command).toBeNull();
-    }
-  });
-
-  it("requires nonblank text of at most 2000 characters", () => {
-    for (const command of [undefined, null, false, 42, [], {}]) expect(launchCommandFault(command)).toContain("must be a string");
-    for (const command of ["", " ", " ", "x".repeat(MAX_LAUNCH_COMMAND_CHARS + 1)]) expect(launchCommandFault(command)).toContain("must contain text");
-  });
-
-  it("refuses every C0/C1 control, DEL, and Unicode line/paragraph separators", () => {
-    const codes = [...Array.from({ length: 32 }, (_, index) => index), ...Array.from({ length: 33 }, (_, index) => index + 0x7f), 0x2028, 0x2029];
-    for (const code of codes) {
-      expect(launchCommandFault(`echo a${String.fromCodePoint(code)}echo b`), `U+${code.toString(16)}`).toContain("single line");
-    }
-    expect(launchCommandFault("claude\n")).toContain("single line");
-    expect(launchCommandFault("claude\r\n")).toContain("single line");
-  });
-});
+import { CLAUDE_EFFORTS, CLAUDE_ULTRACODE_SETTINGS, firstMessageFault, launchArgsFault, MODEL_NAME } from "./launch-rules.ts";
 
 describe("an agent's launch arguments", () => {
   it("refuses a control character in any argument, a tab and a line break included", () => {
@@ -46,6 +24,21 @@ describe("an agent's launch arguments", () => {
     // other agents' arguments are theirs: only control characters are refused there
     expect(launchArgsFault("omp", ["--model", "two words"])).toBeNull();
   });
+  it("still takes Claude Code's --effort ultracode, which the dialog no longer lists as a level", () => {
+    expect(CLAUDE_EFFORTS).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    // Claude Code 2.1.311 still reads it as xhigh with Ultracode on; the refusal names it with the levels
+    expect(launchArgsFault("claude", ["--effort", "ultracode"])).toBeNull();
+    expect(launchArgsFault("claude", ["--effort", "ultra"])).toBe("agent.args --effort must be one of low, medium, high, xhigh, max, ultracode");
+  });
+  it("passes Ultracode's --settings as the agent's own flag, after an effort or on its own", () => {
+    // the one settings object the dialog's switch passes: Ultracode on, nothing else
+    expect(JSON.parse(CLAUDE_ULTRACODE_SETTINGS)).toEqual({ ultracode: true });
+    expect(launchArgsFault("claude", ["--effort", "medium", "--settings", CLAUDE_ULTRACODE_SETTINGS])).toBeNull();
+    expect(launchArgsFault("claude", ["--permission-mode", "plan", "--model", "opus", "--effort", "high", "--settings", "{\"ultracode\":true}"])).toBeNull();
+    expect(launchArgsFault("claude", ["--settings", "{\"ultracode\":true}"])).toBeNull();
+    // the effort beside it is still checked
+    expect(launchArgsFault("claude", ["--effort", "INVALID", "--settings", "{\"ultracode\":true}"])).toContain("--effort");
+  });
 });
 
 describe("every spelling the CLIs accept for a model or an effort", () => {
@@ -64,6 +57,9 @@ describe("every spelling the CLIs accept for a model or an effort", () => {
     ["claude", ["--model=two words"], "--model"],
     ["codex", ["-m", "gpt-6.1", "--model=gpt-6.1", "--config", "model_reasoning_effort=high", "-c", "model_reasoning_effort=\"xhigh\"", "-c", "model=\"gpt-6.1\""], null],
     ["claude", ["--effort=max", "--model=opus[1m]"], null],
+    ["claude", ["--effort=ultracode"], null],
+    ["claude", ["--effort=medium", "--settings={\"ultracode\":true}"], null],
+    ["codex", ["--config=model_reasoning_effort=ultracode"], "model_reasoning_effort"],
     // a flag's value is the flag's: "--" there is not the end of the options
     ["codex", ["-m", "--"], "--model"],
   ] as const)("%s %j", (kind, args, flag) => {

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
-import { paneStorageId } from "../../shared/machines.ts";
+import { paneStorageId, type Machine } from "../../shared/machines.ts";
 import { deviceBusy, deviceInUse, followsHerdrFocus, movingHerdrFocus, movingHerdrFocusOn, OWN_MOVE_HOLD_MS, unsentDraft, type PaneDrafts } from "./followFocus.ts";
+import { paneLifetimes } from "./paneLifetime.ts";
 import { writeTerminalDraft } from "./terminalDraft.ts";
 
 const base = {
@@ -8,7 +9,7 @@ const base = {
   machineId: "local",
   paneId: "w1:p2",
   selection: { machineId: "local", paneId: "w1:p1" },
-  splitOther: null,
+  splitOthers: [],
   linkPending: false,
   busy: false,
   ownMove: false,
@@ -30,8 +31,10 @@ describe("following herdr's focus", () => {
 
   it("leaves a pane already in front where it is", () => {
     expect(followsHerdrFocus({ ...base, paneId: "w1:p1" })).toBe(false);
-    expect(followsHerdrFocus({ ...base, splitOther: { machineId: "local", paneId: "w1:p2" } })).toBe(false);
-    expect(followsHerdrFocus({ ...base, splitOther: { machineId: "remote", paneId: "w1:p2" } })).toBe(true);
+    expect(followsHerdrFocus({ ...base, splitOthers: [{ machineId: "local", paneId: "w1:p2" }] })).toBe(false);
+    expect(followsHerdrFocus({ ...base, splitOthers: [{ machineId: "remote", paneId: "w1:p2" }] })).toBe(true);
+    // a third slot of the rows and columns is in front too
+    expect(followsHerdrFocus({ ...base, splitOthers: [{ machineId: "remote", paneId: "w1:p2" }, { machineId: "local", paneId: "w1:p2" }] })).toBe(false);
   });
 
   it("lets a link that is still landing go first", () => {
@@ -142,6 +145,9 @@ describe("an unsent message on the pane this device has open", () => {
     const storage = { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => { data.set(key, value); }, removeItem: (key: string) => { data.delete(key); } };
     Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
     Object.defineProperty(globalThis, "window", { configurable: true, value: { localStorage: storage } });
+    // the drafts stored are the ones of the herdr this page has the PC under (lib/paneLifetime.ts)
+    data.set("ovis:pane-lifetime:local", "test-herdr");
+    paneLifetimes.observe([{ id: "local", snapshot: { panes: [], herdr_lifetime: "test-herdr" } } as unknown as Machine], (item) => item.pane_id);
   });
   afterEach(() => {
     for (const [key, descriptor] of descriptors) {

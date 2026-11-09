@@ -2,11 +2,46 @@
 
 Ovis includes material from the projects below, under their own licenses.
 
+## Paseo endpoint encryption
+
+`shared/vendor/paseo-e2ee/` vendors the Noise NK endpoint encryption from
+[getpaseo/paseo](https://github.com/getpaseo/paseo) at revision
+`1aef1ec6625f2c32cbd62cfbeb02cffb43a275d2`, under Apache-2.0,
+Copyright (c) 2025-present Mohamed Boudra. The full upstream license is included
+at `shared/vendor/paseo-e2ee/LICENSE`; the Apache-2.0 text below also applies.
+The Noise fixture retains its rweather/noise-c source URLs. Its vector assertions
+are ported to `shared/relay-e2ee.spike.test.ts`. The vendored sources and LICENSE are unchanged;
+only `tsconfig.json` is adapted to the flattened layout, as that directory's README says.
+
+The relay code also bundles the MIT-licensed packages those files and `shared/relay-mux.ts` import.
+The MIT license text below applies, with these copyright notices:
+
+- `@noble/ciphers` 2.4.0: `Copyright (c) 2022 Paul Miller (https://paulmillr.com)` and
+  `Copyright (c) 2016 Thomas Pornin <pornin@bolet.org>`
+- `@noble/curves` 2.4.0 and `@noble/hashes` 2.4.0: `Copyright (c) 2022 Paul Miller (https://paulmillr.com)`
+- `base64-js` 1.5.1: `Copyright (c) 2014 Jameson Little`
+- `jsonc-parser` 3.3.1: `Copyright (c) Microsoft`
+
+It also bundles `tweetnacl` 1.0.3, which its authors released into the public domain (the
+Unlicense).
+
 ## QR Code generator
 
 `app/windows/src/QrCode.cs` ports the byte-mode encoder from
 [Project Nayuki's QR Code generator](https://github.com/nayuki/QR-Code-generator),
 under MIT, Copyright (c) Project Nayuki. The MIT license text below applies.
+
+## Herdr app tab bar and status line
+
+The desktop header's one row (`src/App.tsx` `stripInHeader`, `src/styles.css` `.header-tabs`) and
+the pane column's status bar (`src/components/StatusBar.tsx`) follow the Herdr app,
+<https://github.com/herdrdev/herdr-app> (`defaults/mods/tabs/main.js` and
+`defaults/mods/workspace-status/main.js`, commit `cfcf836`): the workspace's tabs in the top row
+with `+` after them and the side panel's Files button at the far end, the sidebar's head with the
+logo, search and collapse in that order, and a 28 px status line under the workspace naming the
+computer and its branch. Its sizes and layout were adapted; no code was copied. Licensed under the
+Apache License, Version 2.0 (<http://www.apache.org/licenses/LICENSE-2.0>), copyright the Herdr
+app's authors.
 
 ## Agent of Empires request correlation
 
@@ -35,6 +70,39 @@ the reading of a tool result's JSON envelope and `tool denied:` / `tool failed:`
 [`AltanS/collie`](https://github.com/AltanS/collie), `bridge/journal/muse.ts`, under MIT,
 Copyright (c) 2026 Altan Sarisin. The MIT license text below applies. The session binding in
 `server/muse-store.ts` is Ovis's own.
+
+## Ovis for the desktop
+
+The desktop app (`app/electron`) ships these programs unmodified, downloaded at build time from
+their official releases and checked against the SHA-256 pinned in `app/electron/scripts/runtimes.ts`.
+None of them is in this repository.
+
+- [herdr-core](https://github.com/herdrdev/herdr-core) 0.1.17 (`hc`), under Apache-2.0, from
+  `releases.herdr.dev`. Its `LICENSE` and `THIRD-PARTY-NOTICES` ship beside it, in the app's
+  `resources/ovis/licenses/herdr-core/`.
+- [Bun](https://github.com/oven-sh/bun) 1.4.2, under MIT. Its `LICENSE.md` ships beside it, in
+  `resources/ovis/licenses/bun/`. Bun statically links JavaScriptCore and WebKit (LGPL-2) and the
+  other libraries that file lists; the sources of the WebKit it links are at
+  [oven-sh/WebKit](https://github.com/oven-sh/WebKit).
+- [Electron](https://github.com/electron/electron) 45, under MIT, Copyright (c) Electron
+  contributors and GitHub Inc. Its `LICENSE` and Chromium's `LICENSES.chromium.html` ship in the
+  app as electron-builder puts them there.
+
+The app's main process bundles [electron-updater](https://github.com/electron-userland/electron-builder)
+6.8.11 (MIT) and the packages it uses: builder-util-runtime, debug, fs-extra, has-flag, js-yaml,
+jsonfile, lazy-val, lodash.escaperegexp, lodash.isequal, ms, supports-color and universalify (MIT),
+graceful-fs and semver (ISC), and sax (Blue Oak Model License 1.0.0). Their license texts, with
+their copyright notices, ship in the app as `out/THIRD_PARTY_LICENSES.txt`, which
+`app/electron/scripts/build.ts` writes from the packages the bundle took in.
+
+## oh-my-pi figure tokens
+
+`src/lib/svgFigure.ts` adapts the figure token vocabulary and the token and root-tag resolution of
+`prepareSvg` from [`can1357/oh-my-pi`](https://github.com/can1357/oh-my-pi),
+`packages/tui/src/chat/svg-source.ts`, under MIT, Copyright (c) 2025 Mario Zechner,
+Copyright (c) 2025-2026 Can Bölük, Copyright (c) 2026 Stencil Labs, Inc. The MIT license text
+below applies. Mapping the tokens onto Ovis's theme roles and drawing the figure as an image are
+Ovis's own.
 
 ## Theme palettes
 
@@ -116,7 +184,8 @@ The sidebar's label filter (`src/lib/sidebarFilter.ts`) adapts the idea of
 `web/src/components/sidebar/filterGroups.ts` at revision
 `b3141c8a310338dedf87ebbd13a0d67ecd69030d`, that a sidebar row survives a typed filter when it, a
 header over it or a row under it matches; its substring matcher, facets and sunk/trash semantics are
-not taken over. Under the MIT License printed above, with this copyright notice:
+not taken over. `src/lib/pushHealth.ts` adapts its push health classifier (`web/src/lib/pushHealth.ts`)
+at the same revision. Under the MIT License printed above, with this copyright notice:
 
 ```
 Copyright (c) 2026 Nathan Brake
@@ -724,7 +793,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ## LobeHub Icons
 
-The agent marks in `src/components/agentSvgMarks.ts` other than droid and maki, which the
+The agent marks in `src/components/agentSvgMarks.ts` other than droid, maki and letta, which the
 built client in `dist/` and the ovis.sh home page (`ovis-site/index.html`) carry, come from
 [LobeHub Icons](https://github.com/lobehub/lobe-icons) (`@lobehub/icons-static-svg`). The marks themselves belong to their owners.
 
@@ -1461,12 +1530,112 @@ FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 OTHER DEALINGS IN THE FONT SOFTWARE.
 ```
 
+## libghostty-vt
+
+`src/lib/ghostty/ghostty-vt.wasm` is libghostty-vt from [Ghostty](https://github.com/ghostty-org/ghostty) at
+commit e95bed6, built for wasm32 by `scripts/ghostty-vt/build.sh` with the small change in
+`scripts/ghostty-vt/kitty-on-wasm.patch` (Kitty graphics on, file media off). It draws every terminal, under the
+MIT License below. The module links two
+packages Ghostty's build brings in: [Wuffs](https://github.com/google/wuffs) 0.4.0-alpha.10, which decodes
+Kitty PNG pictures, under the MIT License (it is offered under MIT or Apache-2.0), and
+[uucode](https://github.com/jacobsandlund/uucode) 0.2.0, Unicode tables, under the MIT License.
+
+```
+MIT License
+
+Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+Wuffs:
+
+```
+Copyright 2023 The Wuffs Authors
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+uucode:
+
+```
+# uucode license
+
+MIT License
+
+Copyright (c) 2026 Jacob Sandlund
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## Other licenses
+
+See [./licenses](./licenses) for licenses of code being used in the repo:
+
+* [LICENSE_Bjoern_Hoehrmann](./licenses/LICENSE_Bjoern_Hoehrmann)
+* [LICENSE_unicode](./licenses/LICENSE_unicode)
+```
+
 ## JetBrains Mono
 
-`src/fonts/JetBrainsMono-Regular.woff2` is `fonts/webfonts/JetBrainsMono-Regular.woff2` from the
-[JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) v2.304 release, unchanged. It draws code in
-the chat and the interface (the stylesheet loads it under the family name "JetBrains Mono Web"; the
-terminal does not use it), under the SIL Open Font License 1.1 below (the release's `OFL.txt`).
+`src/fonts/JetBrainsMono-Regular.woff2` and `src/fonts/JetBrainsMono-Bold.woff2` are
+`fonts/webfonts/JetBrainsMono-Regular.woff2` and `fonts/webfonts/JetBrainsMono-Bold.woff2` from the
+[JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) v2.304 release, unchanged. They draw the
+terminal's Latin and the code in the chat and the interface (the stylesheet loads them under the family
+name "JetBrains Mono Web"), under the SIL Open Font License 1.1 below (the release's `OFL.txt`).
 
 ```
 Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
@@ -1564,15 +1733,126 @@ FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 OTHER DEALINGS IN THE FONT SOFTWARE.
 ```
 
+## D2Coding
+
+`src/fonts/OvisHangulMono-Regular.woff2` and `src/fonts/OvisHangulMono-Bold.woff2` are derived from
+`D2Coding-Ver1.3.2-20180524.ttf` and `D2CodingBold-Ver1.3.2-20180524.ttf` of the
+[D2Coding](https://github.com/naver/d2codingfont) 1.3.2 release: only the Hangul syllables and
+compatibility jamo (U+3131-318E, U+AC00-D7A3) are kept, hinting is removed, and they are renamed
+"Ovis Hangul Mono", since the license reserves the names D2Coding and D2Coding-Bold for the original.
+The terminal draws Korean in them (`src/components/PaneTerminal.css`), under the SIL Open Font
+License 1.1 below (the repository's `LICENSE.md`).
+
+```
+Copyright (c) 2015, NAVER Corporation (http://www.navercorp.com), with Reserved Font Name D2Coding.
+
+Copyright (c) 2015, NAVER Corporation (http://www.navercorp.com), with Reserved Font Name D2Coding-Bold.
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+This license is copied below, and is also available with a FAQ at:
+https://scripts.sil.org/OFL
+
+
+-----------------------------------------------------------
+SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
+-----------------------------------------------------------
+
+PREAMBLE
+The goals of the Open Font License (OFL) are to stimulate worldwide
+development of collaborative font projects, to support the font creation
+efforts of academic and linguistic communities, and to provide a free and
+open framework in which fonts may be shared and improved in partnership
+with others.
+
+The OFL allows the licensed fonts to be used, studied, modified and
+redistributed freely as long as they are not sold by themselves. The
+fonts, including any derivative works, can be bundled, embedded, 
+redistributed and/or sold with any software provided that any reserved
+names are not used by derivative works. The fonts and derivatives,
+however, cannot be released under any other type of license. The
+requirement for fonts to remain under this license does not apply
+to any document created using the fonts or their derivatives.
+
+DEFINITIONS
+"Font Software" refers to the set of files released by the Copyright
+Holder(s) under this license and clearly marked as such. This may
+include source files, build scripts and documentation.
+
+"Reserved Font Name" refers to any names specified as such after the
+copyright statement(s).
+
+"Original Version" refers to the collection of Font Software components as
+distributed by the Copyright Holder(s).
+
+"Modified Version" refers to any derivative made by adding to, deleting,
+or substituting -- in part or in whole -- any of the components of the
+Original Version, by changing formats or by porting the Font Software to a
+new environment.
+
+"Author" refers to any designer, engineer, programmer, technical
+writer or other person who contributed to the Font Software.
+
+PERMISSION & CONDITIONS
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of the Font Software, to use, study, copy, merge, embed, modify,
+redistribute, and sell modified and unmodified copies of the Font
+Software, subject to the following conditions:
+
+1) Neither the Font Software nor any of its individual components,
+in Original or Modified Versions, may be sold by itself.
+
+2) Original or Modified Versions of the Font Software may be bundled,
+redistributed and/or sold with any software, provided that each copy
+contains the above copyright notice and this license. These can be
+included either as stand-alone text files, human-readable headers or
+in the appropriate machine-readable metadata fields within text or
+binary files as long as those fields can be easily viewed by the user.
+
+3) No Modified Version of the Font Software may use the Reserved Font
+Name(s) unless explicit written permission is granted by the corresponding
+Copyright Holder. This restriction only applies to the primary font name as
+presented to the users.
+
+4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
+Software shall not be used to promote, endorse or advertise any
+Modified Version, except to acknowledge the contribution(s) of the
+Copyright Holder(s) and the Author(s) or with their explicit written
+permission.
+
+5) The Font Software, modified or unmodified, in part or in whole,
+must be distributed entirely under this license, and must not be
+distributed under any other license. The requirement for fonts to
+remain under this license does not apply to any document created
+using the Font Software.
+
+TERMINATION
+This license becomes null and void if any of the above conditions are
+not met.
+
+DISCLAIMER
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
+OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
+DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
+OTHER DEALINGS IN THE FONT SOFTWARE.
+```
+
 ## xterm.js
 
-The browser terminal includes xterm.js 5.5.0 with a local composition-ordering and reset patch.
+The browser terminal includes xterm.js 6.0.0 with a local composition-ordering and reset patch.
+xterm.js 6 includes parts of Visual Studio Code's base library (`src/vs/base`), under the same
+MIT license.
 The queue/watermark approach follows joonhoekim's MIT-licensed proposal in
 https://github.com/xtermjs/xterm.js/pull/6090.
 
 Copyright (c) 2017-2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
 Copyright (c) 2014-2016, SourceLair Private Company (https://www.sourcelair.com)
 Copyright (c) 2012-2013, Christopher Jeffrey (https://github.com/chjj/)
+Copyright (c) Microsoft Corporation (`src/vs/base`)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -1662,7 +1942,7 @@ that share it.
 | d3-path, for d3-sankey | https://github.com/d3/d3-path | 1.0.9 | BSD 3-Clause |
 | marked | https://github.com/markedjs/marked | 16.4.2 | MIT, with the BSD-style license of John Gruber's Markdown |
 | chevrotain, @chevrotain/gast, @chevrotain/regexp-to-ast, @chevrotain/utils | https://github.com/Chevrotain/chevrotain | 13.2.0 | Apache 2.0 |
-| DOMPurify | https://github.com/cure53/DOMPurify | 3.4.16 | Apache 2.0 or MPL 2.0 |
+| DOMPurify | https://github.com/cure53/DOMPurify | 3.4.17 | Apache 2.0 or MPL 2.0 |
 | `web-worker`, inside elkjs | - | - | Apache 2.0 |
 | singular value decomposition from JamaJS, inside layout-base 2.0.1 | https://github.com/dragonfly-ai/JamaJS | - | Apache 2.0 |
 

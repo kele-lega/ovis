@@ -55,15 +55,25 @@ const remoteAccess = {
 const portalFetchPage = async (context: BrowserContext): Promise<void> => {
   await context.route("**/api/access", (route) => route.fulfill({ json: remoteAccess }));
 };
+/** Portal is on Add a connection's Phones and devices tab: Settings → Devices and PCs → Add a connection → Phones and devices. */
 const openPhoneSettings = async (page: Page): Promise<void> => {
   await page.keyboard.press("ControlOrMeta+Shift+Comma");
   await page.locator(".settings-dialog").waitFor({ timeout: 10_000 });
-  await openSettingsPage(page, "Phone & devices");
+  await openSettingsPage(page, "Devices and PCs");
+  await page.locator('.settings-dialog [data-section="devices"]').getByRole("button", { name: "Add a connection", exact: true }).click();
+  const connect = settingsOf(page);
+  await connect.waitFor({ timeout: 10_000 });
+  // an owner's PC window opens on SSH; a window with one way only (a watching device without the relay) has no tabs
+  const devicesTab = connect.locator('.connect-tabs [data-tab="devices"]');
+  if (await devicesTab.count() > 0) await devicesTab.click();
+  await connect.locator('[data-tab-panel="devices"]').waitFor({ timeout: 10_000 });
 };
-const settingsOf = (page: Page) => page.locator(".settings-dialog");
+const settingsOf = (page: Page) => page.getByRole("dialog", { name: "Add a connection", exact: true });
 const reopenPhoneSettings = async (page: Page): Promise<void> => {
-  await settingsOf(page).getByRole("button", { name: "Close settings", exact: true }).click();
+  await settingsOf(page).getByRole("button", { name: "Close", exact: true }).click();
   await settingsOf(page).waitFor({ state: "detached", timeout: 10_000 });
+  await page.locator(".settings-dialog").getByRole("button", { name: "Close settings", exact: true }).click();
+  await page.locator(".settings-dialog").waitFor({ state: "detached", timeout: 10_000 });
   await openPhoneSettings(page);
 };
 
@@ -78,6 +88,8 @@ try {
     'case "$1" in',
     "  version) printf '%s\\n' 'v2.6.1' ;;",
     "  expose)",
+    // the status asks which sign-ins this Portal offers: that is a question, not a service
+    "    [ \"$2\" = --help ] && exit 0",
     "    trap 'exit 0' TERM",
     // the stand-in's way to end on its own, as a crashed Portal would
     "    trap 'exit 3' USR1",
@@ -118,6 +130,7 @@ try {
     portal,
     usage: new UsageService(undefined, []),
     registerBridge: false,
+    tailnetPcs: { readStatus: async () => null }, sshCandidates: { sshDir: join(stateDir, "no-ssh"), readStatus: async () => null },
   });
   servers.push(server);
   const origin = `http://127.0.0.1:${server.port}`;
@@ -262,6 +275,7 @@ try {
   const recoveringFixture = {
     supported: true, version: "v2.6.1", min_version: "v2.6.1", usable: true, phase: "recovering",
     relay: "https://relay.example", url: null, blocked: null, error: null, output: `INF service ready at ${portalAddress}:443`,
+    auth: { method: "none", allow: [], issuer: null, client_id: null }, auth_methods: [], oidc_secret: false,
   } satisfies PortalStatus;
   let answer: "recovering" | "offline" | "older" = "recovering";
   const portalPosts: string[] = [];
@@ -298,14 +312,54 @@ try {
     await reopenPhoneSettings(page);
     await asked;
     const settings = settingsOf(page);
-    await settings.getByRole("heading", { name: "Devices", exact: true }).waitFor({ timeout: 10_000 });
-    assert.equal(await settings.getByRole("heading", { name: "Portal", exact: true }).count(), 0, "an older server's page has no Portal section");
+    // drawn: its first section, or for a window that can use none of them, its one line
+    await settings.locator('[data-tab-panel="devices"]').locator(":scope > .connect-section, :scope > .settings-description").first().waitFor({ timeout: 10_000 });
+    assert.equal(await settings.locator('section[aria-label="Portal"]').count(), 0, "an older server offers no Portal on Phones and devices");
     assert.equal(await settings.locator("#portal-relay").count(), 0, "an older server's page offers no relay");
   }
   assert.deepEqual(portalPosts, [], "the browser sent no Portal start or stop of its own");
   for (const context of [ownerContext, watchContext]) await context.unroute("**/api/portal**");
   assert.deepEqual(pageErrors, [], "the fixture Portal pages have no browser errors");
   console.log("PASS Portal recovering fixtures: owner Stop, watch-only disabled, offline mid-recovery without a stale address, older server hidden");
+
+  // The invite's read-only bearer link still needs keyboard focus, using the global theme ring.
+  const inviteFixture = {
+    ...recoveringFixture, version: "v2.7.3", phase: "running", url: portalAddress,
+    auth: { method: "credential", allow: [], issuer: null, client_id: null },
+    auth_methods: ["credential"],
+  } satisfies PortalStatus;
+  await ownerContext.route("**/api/portal**", (route) => route.fulfill({
+    json: route.request().method() === "POST"
+      ? { redeem_url: `${portalAddress}/_portal/auth/login#credential=fixture-link` }
+      : inviteFixture,
+  }));
+  await reopenPhoneSettings(ownerPage);
+  await settingsOf(ownerPage).getByLabel("Link name", { exact: true }).fill("alice");
+  await settingsOf(ownerPage).getByRole("button", { name: "Create link", exact: true }).click();
+  const privateLink = settingsOf(ownerPage).getByRole("textbox", { name: "Private link for alice", exact: true });
+  await privateLink.waitFor();
+  for (const width of [390, 1440]) for (const theme of ["light", "dark"]) {
+    await ownerPage.setViewportSize({ width, height: 900 });
+    await ownerPage.evaluate((value) => { document.documentElement.dataset["theme"] = value; }, theme);
+    await privateLink.focus();
+    await ownerPage.keyboard.press("Shift+Tab");
+    await ownerPage.keyboard.press("Tab");
+    await privateLink.scrollIntoViewIfNeeded();
+    const focus = await privateLink.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { active: document.activeElement === element, visible: element.matches(":focus-visible"), style: style.outlineStyle, width: Number.parseFloat(style.outlineWidth) };
+    });
+    assert.equal(focus.active && focus.visible, true, `${width}/${theme}: the private link is keyboard-focused`);
+    assert.equal(focus.style, "solid", `${width}/${theme}: the private link retains its focus ring`);
+    assert.ok(focus.width >= 2, `${width}/${theme}: the focus ring is visible`);
+    const screenshots = process.env["PORTAL_SCREENSHOT_DIR"];
+    if (screenshots) {
+      mkdirSync(screenshots, { recursive: true });
+      await ownerPage.screenshot({ path: join(screenshots, `portal-invite-${width}-${theme}.png`), animations: "disabled" });
+    }
+  }
+  await ownerContext.unroute("**/api/portal**");
+  console.log("PASS Portal private-link keyboard focus: visible theme ring at phone and desktop widths in light and dark");
 
   const blockedState = join(root, "no-token-server");
   mkdirSync(blockedState, { recursive: true });
@@ -321,6 +375,7 @@ try {
     portal: blockedPortal,
     usage: new UsageService(undefined, []),
     registerBridge: false,
+    tailnetPcs: { readStatus: async () => null }, sshCandidates: { sshDir: join(blockedState, "no-ssh"), readStatus: async () => null },
   });
   servers.push(blockedServer);
   const blockedContext = await browser.newContext({ viewport: { width: 1100, height: 800 }, locale: "en-US" });
@@ -334,10 +389,12 @@ try {
   await blockedPage.locator(".conn-live").waitFor({ state: "attached", timeout: 15_000 });
   await openPhoneSettings(blockedPage);
   const blockedSettings = settingsOf(blockedPage);
-  await blockedSettings.getByText("Set OVIS_TOKEN on this PC and restart the app to start Portal.", { exact: true }).waitFor({ timeout: 10_000 });
+  // a Portal that cannot start here is left out of the sheet, not explained
+  await blockedSettings.locator('[data-tab-panel="devices"]').locator(":scope > .connect-section, :scope > .settings-description").first().waitFor({ timeout: 10_000 });
+  assert.equal(await blockedSettings.locator('section[aria-label="Portal"]').count(), 0, "a Portal that needs a configured token is not offered");
   assert.equal(await blockedSettings.getByRole("button", { name: "Start", exact: true }).count(), 0, "Portal Start is unavailable without a configured token");
   assert.deepEqual(pageErrors, [], "the token-required page has no browser errors");
-  console.log("PASS Portal token-required UI: the relay cannot be started without a configured token");
+  console.log("PASS Portal token-required UI: a Portal that cannot start without a configured token is left out");
 } finally {
   releaseRelay?.();
   await Promise.all(contexts.map((context) => context.close().catch(() => undefined)));

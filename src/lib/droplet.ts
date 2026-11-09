@@ -1,6 +1,11 @@
 import type { AgentStatus } from "../../shared/protocol.ts";
-import { shouldNotifyStatus, type AlertPrefs } from "../../shared/notify-policy.ts";
-import { paneStorageId } from "../../shared/machines.ts";
+import { alertsAllow, shouldNotifyStatus, type AlertPrefs } from "../../shared/notify-policy.ts";
+import { LOCAL_MACHINE, paneStorageId } from "../../shared/machines.ts";
+
+/** The PC a paneStorageId key belongs to (its ids are URI-encoded, so the first ':' after "remote:" ends it). */
+function machineOfKey(key: string): string {
+  return key.startsWith("remote:") ? decodeURIComponent(key.slice(7, key.indexOf(":", 7))) : LOCAL_MACHINE;
+}
 
 /**
  * In-app alerts: a notice that drops from the top edge while the app is on screen.
@@ -37,10 +42,11 @@ export const DROPLET_REPEAT_MS = 400;
 /**
  * Whether this device wants to hear about a status at all, the finished-turn length included:
  * `worked` is how long the pane worked before it finished, null when this page did not see
- * it start (then it is told, as the server does).
+ * it start (then it is told, as the server does). A blocked pane is told by what it waits for
+ * (`agentKind`, shared/notify-policy.ts blockedAlertKind).
  */
-export function dropletAllows(prefs: AlertPrefs, status: AgentStatus, worked: number | null): boolean {
-  if (status === "blocked") return prefs.input;
+export function dropletAllows(prefs: AlertPrefs, status: AgentStatus, worked: number | null, agentKind?: string | null): boolean {
+  if (status === "blocked") return alertsAllow(prefs, status, agentKind);
   if (status !== "done" || prefs.done === "off") return false;
   if (prefs.done === "always") return true;
   return worked === null || worked >= LONG_TURN_MS;
@@ -62,6 +68,8 @@ export function seedStatuses(
   now = Date.now(),
 ): void {
   const listed = new Set<string>();
+  // turns of a pane gone from a PC's roster go with it: a pane closed sends no pane-exited to clear them
+  const read = new Set(machines.filter((machine) => machine.snapshot).map((machine) => machine.id));
   for (const machine of machines) for (const pane of machine.snapshot?.panes ?? []) {
     const key = paneStorageId(machine.id, pane.pane_id);
     listed.add(key);
@@ -72,6 +80,9 @@ export function seedStatuses(
     if (worked !== null) turns.lasted.set(key, worked);
   }
   for (const key of [...known.keys()]) if (!listed.has(key)) known.delete(key);
+  for (const map of [turns.started, turns.lasted]) {
+    for (const key of [...map.keys()]) if (!listed.has(key) && read.has(machineOfKey(key))) map.delete(key);
+  }
 }
 
 /**

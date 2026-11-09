@@ -8,6 +8,7 @@ import { createServer } from "../server/index.ts";
 import { workspaceCreate, workspaceClose } from "../server/herdr/client.ts";
 import { UsageService } from "../server/usage.ts";
 import { chromePath } from "./chrome-path.ts";
+import { shownRows } from "./shown-rows.ts";
 import { openSettingsPage } from "./settings-page.ts";
 
 async function until(check: () => boolean | Promise<boolean>, label: string): Promise<void> {
@@ -73,7 +74,7 @@ export async function checkTerminalPinch(browser: Browser, origin: string, paneI
       focused: document.hasFocus(),
     }));
     await page.goto(`${origin}/?pane=${encodeURIComponent(paneId)}`);
-    await page.locator(".pane-terminal .xterm-rows").waitFor();
+    await page.locator(shownRows()).first().waitFor();
     await until(() => ready, "owned terminal must accept input");
     // The 120 ms resize settle plus margin bounds the negative resize assertions.
     await Bun.sleep(400);
@@ -231,7 +232,7 @@ export async function checkTerminalPinch(browser: Browser, origin: string, paneI
     // Settings can restore the size that led to the previous announcement: the next pinch must
     // clear and restore the same words, rather than silently assigning unchanged text.
     await page.keyboard.press("ControlOrMeta+Shift+Comma");
-    await openSettingsPage(page, "Terminal");
+    await openSettingsPage(page, "Appearance");
     await page.getByRole("button", { name: "Decrease terminal font size", exact: true }).click();
     await page.getByRole("button", { name: "Close settings", exact: true }).click();
     await page.evaluate(() => {
@@ -274,7 +275,7 @@ export async function checkTerminalPinch(browser: Browser, origin: string, paneI
 
     ready = false;
     await page.reload();
-    await page.locator(".pane-terminal .xterm-rows").waitFor();
+    await page.locator(shownRows()).first().waitFor();
     await until(() => ready, "reloaded terminal must accept input");
     await until(async () => (await probe()).fontPx === 20, "saved font survives reload");
     assert.deepEqual(errors, [], "pinch regression has no page errors");

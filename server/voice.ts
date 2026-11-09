@@ -20,6 +20,8 @@ type VoiceFile = Partial<Record<Field, string>>;
 
 /** without a language from the client: the app's first users dictate Korean with English code terms */
 const DEFAULT_LANGUAGE = "ko";
+/** OpenAI-compatible servers may cap a multipart body's fields (codex-lb refuses more than 32) */
+const PROVIDER_FORM_FIELDS_MAX = 32;
 const PROMPTS: Record<VoiceMode, string> = {
   chat: "Dictation of a message to a coding agent",
   terminal: "Dictation of a shell command line typed into a terminal",
@@ -32,8 +34,9 @@ const POLISH_PROMPT = [
 /**
  * GPT-5.1 and later reason before answering unless told not to: tidying needs no reasoning and
  * the wait is the user's. Older models take no reasoning setting and keep a fixed temperature.
+ * A router such as OpenRouter names the model after its vendor (`openai/gpt-6-luna`).
  */
-const REASONING_MODEL = /^gpt-(?:5\.\d|[6-9])/;
+const REASONING_MODEL = /^(?:[\w.-]+\/)*gpt-(?:5\.\d|[6-9])/;
 const POLISH_MODE: Record<VoiceMode, string> = {
   chat: "The text is a message to a coding agent.",
   terminal: "The text is a shell command line: no trailing period, no added capitals.",
@@ -301,7 +304,10 @@ export class VoiceService {
     form.append("model", transcribeModel);
     form.append("stream", "true");
     for (const language of clip.languages) form.append("languages[]", language);
-    for (const keyword of clip.keywords) form.append("keywords[]", keyword);
+    // hints only fill the room the required fields leave, first ones first: a pane with many
+    // slash commands would otherwise make the provider refuse the whole recording
+    const room = Math.max(0, PROVIDER_FORM_FIELDS_MAX - ([...form.keys()].length + 1));
+    for (const keyword of clip.keywords.slice(0, room)) form.append("keywords[]", keyword);
     form.append("prompt", PROMPTS[clip.mode]);
 
     let response: Response;

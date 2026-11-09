@@ -7,6 +7,7 @@
  * when it can hold the focus itself (a dialog whose controls are all disabled while it works).
  */
 import { useEffect, useLayoutEffect, useRef, type MutableRefObject, type RefObject } from "react";
+import { typeAheadFocused } from "./typeAhead.ts";
 
 /** Tab stops in DOM order; what a user reaches with Tab inside the surface. */
 const FOCUSABLE = [
@@ -29,6 +30,8 @@ export interface FocusTrapOptions {
   initialFocus?: RefObject<HTMLElement | null>;
   /** the focus returns to the opener unless this says otherwise when the surface goes */
   shouldRestore?: () => boolean;
+  /** suspend keyboard ownership while another surface covers this one */
+  paused?: boolean;
 }
 
 /** The tab stops a user can actually land on, in order: rendered, and not disabled or skipped. */
@@ -62,6 +65,16 @@ export function nativeModalOver(surface: HTMLElement | null): boolean {
   return false;
 }
 
+/**
+ * The keyboard is in another `aria-modal` surface than this one. Window and document listeners run in the order
+ * they were added, not the order the dialogs are drawn in, so a dialog beneath leaves this Escape to the one in
+ * front, the one with the focus (#3037).
+ */
+export function focusInOtherModal(surface: HTMLElement | null): boolean {
+  const focused = document.activeElement?.closest("[aria-modal='true']");
+  return focused != null && focused !== surface;
+}
+
 export function useFocusTrap<T extends HTMLElement>(open: boolean, options: FocusTrapOptions = {}): MutableRefObject<T | null> {
   const surface = useRef<T | null>(null);
   // read in the listeners, so a dialog that changes its mind mid-life is not held to its first render
@@ -72,6 +85,14 @@ export function useFocusTrap<T extends HTMLElement>(open: boolean, options: Focu
   useLayoutEffect(() => {
     if (!open) return;
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    return () => {
+      // a covering dialog owns focus; otherwise return it only when this surface closes
+      if (!latest.current.paused && latest.current.shouldRestore?.() !== false && opener?.isConnected && !nativeModalOver(surface.current)) opener.focus({ preventScroll: true });
+    };
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open || options.paused) return;
     const node = surface.current;
     if (node && !nativeModalOver(node) && !node.contains(document.activeElement)) {
       // AutoFocus or a child's layout effect may already have placed focus inside the surface.
@@ -82,18 +103,15 @@ export function useFocusTrap<T extends HTMLElement>(open: boolean, options: Focu
       if (!node.contains(document.activeElement)) tabStops(node)[0]?.focus({ preventScroll: true });
       if (!node.contains(document.activeElement)) node.focus({ preventScroll: true });
     }
-    return () => {
-      // a dialog the owner unmounts on its own deed (ConfirmDialog's "done") has nowhere to go back to
-      if (latest.current.shouldRestore?.() !== false && opener?.isConnected && !nativeModalOver(surface.current)) opener.focus({ preventScroll: true });
-    };
-  }, [open]);
+  }, [open, options.paused]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || options.paused) return;
     const trap = {};
     openTraps.push(trap);
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== "Tab" || openTraps.at(-1) !== trap) return;
+      // keys typed ahead for a tab the dialog is making are that tab's, Tab included (lib/typeAhead.ts)
+      if (event.key !== "Tab" || openTraps.at(-1) !== trap || typeAheadFocused()) return;
       const node = surface.current;
       if (!node || nativeModalOver(node)) return;
       const stops = tabStops(node);
@@ -114,7 +132,7 @@ export function useFocusTrap<T extends HTMLElement>(open: boolean, options: Focu
       window.removeEventListener("keydown", onKeyDown, true);
       openTraps.splice(openTraps.indexOf(trap), 1);
     };
-  }, [open]);
+  }, [open, options.paused]);
 
   return surface;
 }

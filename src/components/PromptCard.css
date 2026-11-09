@@ -72,6 +72,20 @@
   font-size: var(--fs-xs);
 }
 
+/* "Next" sits at the header's end, before the fold: on to the next question, unanswered */
+.prompt-card-next {
+  flex: none;
+  height: var(--space-6);
+  margin-inline-start: auto;
+  padding: 0 var(--space-2);
+  gap: var(--space-1);
+  font-size: var(--fs-xs);
+}
+
+.prompt-card-next + .prompt-card-fold {
+  margin-inline-start: 0;
+}
+
 /* "View plan" sits at the header's end, beside the title */
 .prompt-card-plan-file {
   margin-inline-start: auto;
@@ -237,6 +251,51 @@
   overflow-wrap: anywhere;
 }
 
+/* What the agent said before asking, read off the terminal (#2088): its prose, as the chat shows
+   an answer, under a caption that says where it came from. Like the body it gives way, eight lines
+   at rest and two when the card is short, with its own scroll. The two are the card's own flex
+   items (the wrapper draws no box): a box around them could only shrink as a whole, and its floor
+   would have to guess the caption's height, which wraps in some languages; as the card's items
+   the text keeps its two-line floor and the caption its full height, whatever it wraps to. */
+.prompt-card-words {
+  display: contents;
+}
+
+.prompt-card-words-text {
+  flex: 0 1 auto;
+  min-height: 2lh;
+  max-height: 8lh;
+  margin: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-base);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* the caption keeps its lines and sits closer to its text than the card's gap */
+.prompt-card-words .prompt-card-hint {
+  flex: none;
+  margin-top: calc(-1 * var(--space-1));
+}
+
+/* omp's own Markdown (text_format) keeps the card's question size, and an option's inline code reads as the chat's */
+.markdown.prompt-card-question {
+  font-size: var(--fs-md);
+  line-height: var(--lh-base);
+}
+
+.prompt-card-option code {
+  padding: var(--hairline) var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: 0.87em;
+}
+
 /* a question in Codex's queue: the agent is not waiting on it, so the card says who answers what */
 .prompt-card-hint {
   color: var(--text-dim);
@@ -323,6 +382,32 @@
 .prompt-card-options {
   display: flex;
   flex-direction: column;
+}
+
+/* the preview Claude draws for the option under its cursor (#1212), under that option and in line with
+   its label: kept as drawn, its own scroll both ways, so a mockup's columns never re-wrap */
+.prompt-card-option-preview {
+  margin: 0 0 var(--space-1) calc(var(--space-3) + var(--space-5) + var(--space-2));
+}
+
+.prompt-card-option-preview pre {
+  max-height: calc(8lh + 2 * var(--space-2));
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-base);
+  white-space: pre;
+}
+
+.prompt-card-option-preview .prompt-card-hint {
+  margin: var(--space-1) 0 0;
 }
 
 .prompt-card-option {

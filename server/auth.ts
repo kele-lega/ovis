@@ -43,7 +43,7 @@ function clearCookie(name: string): string {
 /** Set with a fresh credential, so the browser stops sending the old name beside the new one. */
 export const CLEAR_LEGACY_TOKEN_COOKIE = clearCookie(LEGACY_TOKEN_COOKIE);
 export const CLEAR_LEGACY_DEVICE_COOKIE = clearCookie(LEGACY_DEVICE_COOKIE);
-const COOKIE_MAX_AGE_SECONDS = 31536000;
+export const COOKIE_MAX_AGE_SECONDS = 31536000;
 
 /**
  * Guessing budgets, per client address. A token is meant to be a long random string, but an
@@ -64,6 +64,7 @@ const AUTH_BACKOFF_MAX_MS = 60_000;
 export const AUTH_CLIENTS_MAX = 1024;
 const authAttempts = new Map<string, { failures: number; until: number }>();
 const BEARER_PREFIX = "bearer ";
+const DEVICE_PREFIX = "device ";
 const encoder = new TextEncoder();
 
 /** Malformed pairs are skipped: a junk cookie from another app must not deny the user. */
@@ -96,6 +97,17 @@ export function isAuthenticated(request: Request, token: string): boolean {
   const cookie = tokenCookie(parseCookies(request.headers.get("cookie")));
   if (cookie !== undefined && matches(cookie, token)) return true;
   return bearerMatches(request, token);
+}
+
+/**
+ * A paired device's own token sent as `Authorization: Device <token>`, in place of its cookie: a
+ * script that paired for its token in JSON (#2744). Matched exactly as the cookie is, so the same
+ * role, last-seen and revocation hold; it is never the shared token.
+ */
+export function deviceAuthorizationValue(request: Request): string | undefined {
+  const authorization = request.headers.get("authorization") ?? "";
+  if (authorization.slice(0, DEVICE_PREFIX.length).toLowerCase() !== DEVICE_PREFIX) return undefined;
+  return authorization.slice(DEVICE_PREFIX.length) || undefined;
 }
 
 /** The token came in an `Authorization` header: a proxy or a script sends it with every request, so signing out cannot take it away. */
@@ -134,6 +146,9 @@ function sessionCookie(token: string, secure: boolean): string {
 export function deviceCookie(token: string, secure: boolean): string {
   return `${DEVICE_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${COOKIE_MAX_AGE_SECONDS}${secure ? "; Secure" : ""}`;
 }
+
+/** The Set-Cookie that drops a browser's device cookie: signing out, or revoking every device (its own included). */
+export const DEVICE_COOKIE_CLEARED = clearCookie(DEVICE_COOKIE);
 
 export function noContent(...setCookies: string[]): Response {
   const headers = new Headers();

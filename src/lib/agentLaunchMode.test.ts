@@ -1,30 +1,8 @@
 import { expect, it } from "bun:test";
 
-import { CLAUDE_EFFORTS, CODEX_EFFORTS, firstPromptDelivery, launchAgent, launchArgs, launchCapabilities, launchCommandUnsupported, launchChoiceFault, modelSuggestions } from "./agentLaunchMode.ts";
+import { CLAUDE_EFFORTS, CODEX_EFFORTS, firstPromptDelivery, launchAgent, launchArgs, launchCapabilities, launchChoiceFault, launchDefaults, modelDraftAfterSync, modelSuggestions } from "./agentLaunchMode.ts";
 
 const plain = { claudeLaunchMode: "default", codexLaunchMode: "default" } as const;
-
-it("uses an exact command exclusively in every new-agent path, including worktree launches", () => {
-  const command = "  wrapper --model 'my model' --effort custom  ";
-  const settings = { claudeLaunchMode: "plan", codexLaunchMode: "fullAccess", agentCommands: { claude: command, codex: command, omp: "my-omp" } } as const;
-  for (const kind of ["claude", "codex", "omp"]) {
-    expect(launchAgent(kind, settings, { model: "invalid model", effort: "stale", prompt: "Never append me" }))
-      .toEqual({ kind, command: kind === "omp" ? "my-omp" : command });
-  }
-  // WorktreeDialog supplies only its kind and settings; clearing restores its saved launch mode.
-  expect(launchAgent("codex", settings)).toEqual({ kind: "codex", command });
-  expect(launchAgent("claude", { ...settings, agentCommands: {} })).toEqual({ kind: "claude", args: ["--permission-mode", "plan"] });
-  expect(launchAgent("", settings)).toBeNull();
-  expect(launchAgent("copilot", settings)).toEqual({ kind: "copilot" });
-  expect(launchAgent("codex", { ...plain, agentCommands: Object.create({ codex: "inherited" }) })).toEqual({ kind: "codex" });
-});
-
-it("blocks custom commands unless this PC explicitly advertises support, and leaves normal starts alone", () => {
-  expect(launchCommandUnsupported({ command: "run" }, false)).toBeTrue();
-  expect(launchCommandUnsupported({ command: "run" }, true)).toBeFalse();
-  expect(launchCommandUnsupported({}, false)).toBeFalse();
-  expect(launchCommandUnsupported(null, false)).toBeFalse();
-});
 
 it("adds nothing while both modes follow the agent's own configuration", () => {
   expect(launchArgs("claude", plain)).toBeUndefined();
@@ -54,11 +32,11 @@ it("leaves other agents and a plain shell alone", () => {
 
 it("names a model and an effort for the agents whose CLI documents them, and a positional prompt only where the separator makes it safe", () => {
   // Claude Code's parser runs a subcommand named by the first operand even after `--` (claude -- update ran the updater)
-  expect(launchCapabilities("claude")).toEqual({ model: true, efforts: CLAUDE_EFFORTS, positionalPrompt: false });
+  expect(launchCapabilities("claude")).toEqual({ model: true, efforts: CLAUDE_EFFORTS, ultracode: true, positionalPrompt: false });
   // clap takes everything after `--` as the PROMPT positional (codex -- logout started the TUI)
-  expect(launchCapabilities("codex")).toEqual({ model: true, efforts: CODEX_EFFORTS, positionalPrompt: true });
+  expect(launchCapabilities("codex")).toEqual({ model: true, efforts: CODEX_EFFORTS, ultracode: false, positionalPrompt: true });
   // Letta Code takes a prompt only with `-p`, its headless mode (letta-code 0.34.23, src/cli/args.ts)
-  for (const kind of ["omp", "pi", "gemini", "opencode", "letta", ""]) expect(launchCapabilities(kind)).toEqual({ model: false, efforts: [], positionalPrompt: false });
+  for (const kind of ["omp", "pi", "gemini", "opencode", "letta", ""]) expect(launchCapabilities(kind)).toEqual({ model: false, efforts: [], ultracode: false, positionalPrompt: false });
   expect(modelSuggestions("claude")).toEqual(["sonnet", "opus", "haiku"]);
   expect(modelSuggestions("codex")).toEqual([]);
 });
@@ -75,6 +53,34 @@ it("puts the model, the effort and then the prompt after the mode, each in the a
   for (const prompt of ["logout", "update", "--help", "-p x"]) expect(launchArgs("codex", plain, { prompt })).toEqual(["--", prompt]);
   // nothing chosen adds nothing
   expect(launchArgs("codex", plain, { model: "  ", effort: "", prompt: "" })).toBeUndefined();
+});
+
+it("offers Claude Code's five effort levels, with Ultracode a switch of its own rather than a level", () => {
+  expect(CLAUDE_EFFORTS).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  expect(launchCapabilities("claude").efforts).not.toContain("ultracode");
+  expect(launchChoiceFault("claude", { effort: "ultracode" })).toBe("effort");
+});
+
+it("turns Ultracode on with one inline --settings object after the effort it keeps, and adds nothing while it is off", () => {
+  const on = ["--settings", "{\"ultracode\":true}"];
+  expect(launchArgs("claude", plain, { effort: "medium", ultracode: true })).toEqual(["--effort", "medium", ...on]);
+  expect(launchArgs("claude", plain, { ultracode: true })).toEqual(on);
+  expect(launchArgs("claude", { ...plain, claudeLaunchMode: "plan" }, { model: "opus", effort: "medium", ultracode: true, prompt: "Fix it" }))
+    .toEqual(["--permission-mode", "plan", "--model", "opus", "--effort", "medium", ...on]);
+  expect(launchAgent("claude", plain, { ultracode: true })).toEqual({ kind: "claude", args: on });
+  // off is Claude Code's own setting, as an empty effort is its own level
+  expect(launchArgs("claude", plain, { effort: "high", ultracode: false })).toEqual(["--effort", "high"]);
+  expect(launchArgs("claude", plain, { ultracode: false })).toBeUndefined();
+  expect(launchChoiceFault("claude", { model: "opus", effort: "max", ultracode: true })).toBeNull();
+});
+
+it("refuses Ultracode for every agent but Claude Code, and never passes it there", () => {
+  expect(launchChoiceFault("codex", { ultracode: true })).toBe("ultracode");
+  expect(launchChoiceFault("omp", { ultracode: true })).toBe("ultracode");
+  expect(launchChoiceFault("", { ultracode: true })).toBe("ultracode");
+  expect(launchChoiceFault("codex", { ultracode: false })).toBeNull();
+  expect(launchArgs("codex", plain, { effort: "high", ultracode: true })).toEqual(["-c", "model_reasoning_effort=high"]);
+  expect(launchArgs("omp", plain, { ultracode: true })).toBeUndefined();
 });
 
 it("refuses a choice the launch does not take, and a model that would read as a flag", () => {
@@ -100,4 +106,27 @@ it("sends the first prompt as Codex's own argument, and as the bridge's pending 
   expect(launchArgs("claude", plain, { prompt: "Fix it" })).toBeUndefined();
   expect(firstPromptDelivery("codex", "   ")).toBeNull();
   expect(firstPromptDelivery("", "Fix it")).toBeNull();
+});
+
+it("starts a new agent on the model and effort Settings > Agents sets for it, and on its own while none is set", () => {
+  const none = { claudeLaunchModel: "", claudeLaunchEffort: "", codexLaunchModel: "", codexLaunchEffort: "" };
+  const set = { claudeLaunchModel: "opus[1m]", claudeLaunchEffort: "high", codexLaunchModel: "gpt-5-codex", codexLaunchEffort: "xhigh" };
+  expect(launchDefaults("claude", none)).toEqual({ model: "", effort: "" });
+  expect(launchAgent("claude", plain, launchDefaults("claude", none))).toEqual({ kind: "claude" });
+  expect(launchDefaults("claude", set)).toEqual({ model: "opus[1m]", effort: "high" });
+  expect(launchAgent("codex", plain, launchDefaults("codex", set))).toEqual({ kind: "codex", args: ["--model", "gpt-5-codex", "-c", "model_reasoning_effort=xhigh"] });
+  // each agent's own: Claude Code's never start Codex, and an agent whose command line takes neither gets none
+  expect(launchDefaults("codex", { ...none, claudeLaunchModel: "opus", claudeLaunchEffort: "max" })).toEqual({ model: "", effort: "" });
+  for (const kind of ["omp", "copilot", "gemini", ""]) expect(launchDefaults(kind, set)).toEqual({ model: "", effort: "" });
+  // what the launch would refuse is no default: a level the agent does not name, a model that is no one name
+  expect(launchDefaults("claude", { ...none, claudeLaunchModel: "opus --dangerously-skip-permissions", claudeLaunchEffort: "ultra" })).toEqual({ model: "", effort: "" });
+});
+
+it("keeps a model being typed that --model would refuse when another device changes the setting, and shows a kept one's change", () => {
+  // the field held the kept name: another device's change shows
+  expect(modelDraftAfterSync("claude", "opus", "sonnet")).toBe("sonnet");
+  // the kept name with spaces around it, as typed, stays as typed
+  expect(modelDraftAfterSync("claude", " sonnet ", "sonnet")).toBe(" sonnet ");
+  // text the reader is still fixing is theirs: it is not replaced under them
+  expect(modelDraftAfterSync("claude", "opus --verbose", "sonnet")).toBe("opus --verbose");
 });
