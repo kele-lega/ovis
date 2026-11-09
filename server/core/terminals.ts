@@ -358,7 +358,12 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
       const claim = client.data.attached.get(message.pane_id) ?? { keepSize: false };
       claim.keepSize = message.keep_size === true;
       // An opaque, bounded presentation correlator only: never used by input guards.
-      if (typeof message.receipt_resume_id === "string" && RECEIPT_RESUME_ID.test(message.receipt_resume_id)) claim.receiptResumeId = message.receipt_resume_id;
+      if (client.data.directClaims) {
+        // A signed the exact scoped correlator. Never accept a raw browser namespace at B.
+        const id = client.data.directClaims.receipt_resume_id;
+        if (!client.data.readOnly && connectionOf(client).mode !== "observe" && id && RECEIPT_RESUME_ID.test(id)) claim.receiptResumeId = id;
+        else delete claim.receiptResumeId;
+      } else if (typeof message.receipt_resume_id === "string" && RECEIPT_RESUME_ID.test(message.receipt_resume_id)) claim.receiptResumeId = message.receipt_resume_id;
       if (!client.data.attached.has(message.pane_id)) client.data.attached.set(message.pane_id, claim);
       let attachment: PaneAttachment;
       try {

@@ -58,9 +58,25 @@ describe("memory-only per-PC direct transport", () => {
     expect(headers.authorization).toBe("old-manager-auth");
     for (const call of calls.filter((call) => call.url.endsWith("direct-access"))) {
       expect(call.init?.method).toBe("POST");
-      expect(call.init?.body).toBe("{}");
+      expect(JSON.parse(String(call.init?.body))).toMatchObject({ receipt_resume_id: expect.stringMatching(/^[a-f0-9-]{36}$/) });
       expect(call.init?.credentials).toBe("same-origin");
       expect(new Headers(call.init?.headers).get("x-herdr-machine")).toBe("1");
+    }
+  });
+
+  it("does not replay a safe read through A after caller cancellation during direct failure or authorization", async () => {
+    for (const phase of ["authorization", "direct"]) {
+      const caller = new AbortController();
+      const { transport, calls } = harness(({ url }) => {
+        if (url.endsWith("direct-access")) {
+          if (phase === "authorization") caller.abort();
+          return Response.json(credential("a"));
+        }
+        if (url.startsWith("https://a.example/")) { caller.abort(); throw new Error("carrier failed after cancellation"); }
+        throw new Error("must not fall back after abort");
+      });
+      await expect(transport.directFetch("/api/machines/a/session", { signal: caller.signal })).rejects.toMatchObject({ name: "AbortError" });
+      expect(calls.some((call) => call.url === "/api/machines/a/session")).toBe(false);
     }
   });
 

@@ -42,7 +42,7 @@ export async function handleFileRequest(request: Request, url: URL, pathname: st
   if (pathname === "/api/fs/stat" || pathname === "/api/fs/file" || pathname === "/api/fs/favicon") {
     setRequestRoute(pathname);
     if (request.method !== "GET" && request.method !== "HEAD") return badRequest("method_not_allowed", "use GET");
-    if (crossSiteFileRead(request)) return jsonResponse({ error: { code: "cross_site", message: "A file is read from this app or opened in a tab, not loaded by another page" } }, 403);
+    if (!(access.level === "full" && access.via === "direct") && crossSiteFileRead(request)) return jsonResponse({ error: { code: "cross_site", message: "A file is read from this app or opened in a tab, not loaded by another page" } }, 403);
     // a device revoked, or a client signed out, while this request finds and draws a page gets none
     // of its media addresses (file-view.ts)
     const watch = watchPageMedia();

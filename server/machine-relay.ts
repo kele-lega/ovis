@@ -7,6 +7,16 @@ import type { MachineManager } from "./machines.ts";
 import type { ServerMessage, SessionSnapshot } from "../shared/protocol.ts";
 import { LARGE_REPLY_BYTES } from "./herdr/client.ts";
 
+import type { Access } from "./access.ts";
+
+/** The same validated principal on SSH relays and signed browser direct grants. */
+export function receiptPrincipal(access: Access): string | undefined {
+  if (access.level !== "full") return undefined;
+  return access.device ? JSON.stringify(["device", access.device.id])
+    : access.portal ? JSON.stringify(["portal", access.portal.method, access.portal.user])
+    : access.login !== undefined ? JSON.stringify(["tailscale", access.login.toLowerCase()]) : undefined;
+}
+
 /** Unlinkable receipt identities for one connection server lifetime; no browser-controlled namespace crosses PCs or devices. */
 export class RelayReceiptIds {
   private readonly key = randomBytes(32);

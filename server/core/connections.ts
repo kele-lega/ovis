@@ -1,3 +1,5 @@
+import type { DirectClaims } from "../../shared/direct.ts";
+import type { DirectAuthority } from "../direct-auth.ts";
 import { subscribeMachineEvents, type MachineEventDocument } from "../machine-events.ts";
 /**
  * A browser's WebSocket connection: what the upgrade records on it, what it may do, how a frame is
@@ -17,6 +19,8 @@ import type { TelemetryIngress, TelemetrySurface } from "../../shared/telemetry.
 export interface SocketData {
   /** Only the connection server grants this document; remote terminal relays do not. */
   machineEvents?: MachineEventDocument;
+  directClaims?: DirectClaims;
+  directAuthority?: DirectAuthority;
   deviceId?: string;
   readOnly?: boolean;
   relay?: MachineRelay;
@@ -51,6 +55,7 @@ interface ConnectionState {
   /** how often `mode` changed: a switch away and back during an await is still a change */
   roles: number;
   watches: Map<string, PaneWatch>;
+  unwatchDirect?: () => void;
   unwatchDevice?: () => void;
   recheck?: ReturnType<typeof setTimeout>;
   /**
@@ -75,7 +80,7 @@ function stateOf(client: Client): ConnectionState {
 }
 
 /** The data for a connection's upgrade: it starts to interact unless its access is read-only. */
-export function connectionData(fields: { machineEvents?: MachineEventDocument; relay?: MachineRelay; deviceId: string | undefined; readOnly: boolean; bridge?: boolean; surface?: TelemetrySurface; ingress?: TelemetryIngress; recheckMs?: number }): SocketData {
+export function connectionData(fields: { directClaims?: DirectClaims; directAuthority?: DirectAuthority; machineEvents?: MachineEventDocument; relay?: MachineRelay; deviceId: string | undefined; readOnly: boolean; bridge?: boolean; surface?: TelemetrySurface; ingress?: TelemetryIngress; recheckMs?: number }): SocketData {
   const data: SocketData = { connectionId: crypto.randomUUID(), attached: new Map<string, { keepSize: boolean }>(), conversationInterests: new Set<string>(), conversationWatches: new Set<string>(), promptWatches: new Set<string>(), output: new Map(), ...fields };
   states.set(data, { closing: false, revoked: false, mode: fields.readOnly ? "observe" : "interact", roles: 0, watches: new Map<string, PaneWatch>() });
   return data;
@@ -265,6 +270,11 @@ export function createConnections({ clients, present, pending, devices, detachCl
   /** Ends the connection when its device is revoked, at once for one revoked already: then it is not admitted. */
   function admit(client: Client): boolean {
     const state = stateOf(client);
+    if (client.data.directClaims) {
+      if (!client.data.directAuthority) return false;
+      state.unwatchDirect = client.data.directAuthority.onRevoke(client.data.directClaims, () => end(client, "revoked"));
+      if (state.revoked) return false;
+    }
     if (client.data.deviceId) {
       state.unwatchDevice = devices.onRevoke(client.data.deviceId, () => end(client, "revoked"));
       // a role change while the upgrade was pending (a remote PC's relay dials first) told its listeners before this one
@@ -351,6 +361,7 @@ export function createConnections({ clients, present, pending, devices, detachCl
       case "closed": {
         for (const frame of state.excused?.frames ?? []) clearTimeout(frame.timer);
         state.excused = undefined;
+        state.unwatchDirect?.();
         state.unwatchDevice?.();
         clearTimeout(state.recheck);
         state.closing = true;

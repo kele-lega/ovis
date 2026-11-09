@@ -65,6 +65,8 @@ import { holdOpenCodeNative } from "./opencode-native.ts";
 import { holdCommandHistory } from "./claude-command-history.ts";
 import { holdFilePool } from "./file-pool.ts";
 import { handleRequest, type RequestServices, type ServerContext } from "./dispatch.ts";
+import { DirectAuthority } from "./direct-auth.ts";
+import { DirectBroker, directConfig, type DirectConfig } from "./direct-broker.ts";
 import { lanHttpsCertificate, lanHttpsConfig, privateLanAddresses, privateLanPeer, type LanHttpsConfig } from "./lan-https.ts";
 
 
@@ -123,6 +125,7 @@ export function herdrCoreInstaller(): HcInstaller {
 export interface ServerInstance {
   /** A socket context with this server's services, also usable with transport operations replaced. */
   readonly context: ServerContext;
+  directPort?: number;
   port: number;
   hostname: string;
   /** the opt-in LAN HTTPS listener when it is up (server/lan-https.ts), else null */
@@ -142,6 +145,8 @@ export interface ServerInstance {
 
 export function createServer(
   options: {
+    directListener?: { hostname: string; port: number };
+    direct?: DirectConfig;
     port?: number;
     hostname?: string;
     /** Also listen on ::1 when the primary listener is bound to 127.0.0.1. */
@@ -277,6 +282,12 @@ export function createServer(
    */
   const bootId = process.env["OVIS_BOOT_ID"] || randomUUID();
   const orderSequence = new OrderSequence(bootId);
+  const configuredDirect = options.direct ?? directConfig();
+  const directListener = options.directListener ?? (process.env["OVIS_DIRECT_PORT"] ? {
+    hostname: process.env["OVIS_DIRECT_HOST"] ?? "127.0.0.1", port: Number(process.env["OVIS_DIRECT_PORT"]),
+  } : undefined);
+  if (directListener && (!Number.isInteger(directListener.port) || directListener.port < 0 || directListener.port > 65535)) throw new Error("Invalid OVIS_DIRECT_PORT");
+  const directAuthority = new DirectAuthority();
   const hostname = options.hostname ?? process.env["HOST"] ?? "127.0.0.1";
   const ipv6Loopback = (options.ipv6Loopback ?? process.env["OVIS_IPV6_LOOPBACK"] === "1") && hostname === "127.0.0.1";
   /** Empty token = gate disabled; every route then behaves exactly as it did before auth existed. */
@@ -382,9 +393,10 @@ export function createServer(
   // a snapshot as a browser is told it, wherever it goes: without the token values herdr's sidebar rows hide (#2160).
   // A bridge this app starts on a PC (`bridgeOnly`, server/remote-entry.ts) serves only its connection server, with
   // the credential it registered as its token: that server applies its own rows, so it gets every snapshot whole.
-  const browserSnapshot = <S extends SessionSnapshot>(snapshot: S): S => options.bridgeOnly ? snapshot : snapshotWithoutHiddenTokens(herdrSidebar.get(), snapshot);
+  const browserSnapshot = <S extends SessionSnapshot>(snapshot: S): S => snapshotWithoutHiddenTokens(herdrSidebar.get(), snapshot);
   const core = createCore({ options: { ...options, stateDir, openCodeState, orderSequence, serverId: () => ovisRelay.serverId(), seenMoved: (from, to, renumber) => seen.moved(LOCAL_MACHINE, from, to, renumber) }, devices, preferences, usage, usageLogin, browserSnapshot, TYPED_SETTLE_MS, KEY_SETTLE_MS, SUBMIT_DEADLINE_MS, SUBMIT_DELAY_MS, DRAFT_CLEAR_WAIT_MS, DRAFT_CLEAR_POLL_MS });
   const { machines, collector, queueFirstMessage, push } = core;
+  const directBroker = machines ? new DirectBroker(machines, configuredDirect, herdrSidebar) : null;
   // read finishes are kept until this server knows their herdr run ended
   const seen = new SeenStore(stateDir, (pc, epoch) => machines?.finishEnded(pc, epoch) ?? false);
   // a pane another PC's herdr moved under a new ID: what was read under the old ID is read under the new one (#1503;
@@ -483,9 +495,33 @@ export function createServer(
       switchRuntime: () => { const answer = options.runtimeService!.request("herdr-core"); return answer.ok ? null : answer.message; },
       ...(options.herdrCoreInstaller ? { installer: options.herdrCoreInstaller } : {}),
     }) : null,
-    options, relay: ovisRelay, relayReceiptIds: new RelayReceiptIds(), hostname, token, bridgeToken, bootId, devices, accountMailbox, accountIntroductions: new AccountIntroductions(Date.now, join(stateDir, "account-introductions.json")), accountHolds, preferences, herdrSidebar, identityOf, serveOnly, portalGuards, shellAgents, agentDetector, agentOffered, agentInstaller, openCodeState, cliProxyRoutes, usageLogin, usage, usageAccounts, systemSampler, fontsDir: join(stateDir, "fonts"), voice, browserSnapshot, core, seen, piReader, orderSequence, clientConnectionLog, requestLog, portalStartup,
+    options, directAuthority, directBroker, directEnabled: directListener !== undefined, configuredDirect, relay: ovisRelay, relayReceiptIds: new RelayReceiptIds(), hostname, token, bridgeToken, bootId, devices, accountMailbox, accountIntroductions: new AccountIntroductions(Date.now, join(stateDir, "account-introductions.json")), accountHolds, preferences, herdrSidebar, identityOf, serveOnly, portalGuards, shellAgents, agentDetector, agentOffered, agentInstaller, openCodeState, cliProxyRoutes, usageLogin, usage, usageAccounts, systemSampler, fontsDir: join(stateDir, "fonts"), voice, browserSnapshot, core, seen, piReader, orderSequence, clientConnectionLog, requestLog, portalStartup,
     get portalStartupResult() { return portalStartupResult; },
   };
+  let directServer: Bun.Server<SocketData> | null = null;
+  try {
+    if (directListener) directServer = Bun.serve<SocketData>({
+      hostname: directListener.hostname, port: directListener.port, maxRequestBodySize: BUN_BODY_CEILING,
+      fetch: (request, bunServer) => handleRequest(request, { ...socketContext(bunServer), directOnly: true }),
+      websocket: core.websocket,
+    });
+  } catch (error) {
+    directBroker?.stop();
+    directAuthority.stop();
+    services.runtimeMove?.stop();
+    accountMailbox.stop();
+    core.stop(() => clearInterval(draftTimer));
+    piReader.close();
+    stopPinBridge?.stop();
+    void usageLogin.stopAll();
+    void shellAgents.stop();
+    agentDetector.close();
+    server.stop(true);
+    ipv6?.stop(true);
+    requestLog.close();
+    throw error;
+  }
+
   ovisRelay.resume(services, server.port ?? DEFAULT_PORT);
   accountMailbox.start();
 
@@ -548,6 +584,7 @@ export function createServer(
   core.start();
 
   return {
+    directPort: directServer?.port,
     context: socketContext(server),
     port: server.port ?? 0,
     hostname,
@@ -564,6 +601,9 @@ export function createServer(
       });
     },
     stop: () => {
+      directBroker?.stop();
+      directAuthority.stop();
+      directServer?.stop(true);
       services.runtimeMove?.stop();
       accountMailbox.stop();
       void ovisRelay.shutdown();

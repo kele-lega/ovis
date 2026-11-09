@@ -1,3 +1,6 @@
+import { DIRECT_PROTOCOL, DIRECT_TICKET_PREFIX, directApiPath, type DirectClaims } from "../shared/direct.ts";
+import type { DirectAuthority } from "./direct-auth.ts";
+import { directSubject, type DirectBroker, type DirectConfig } from "./direct-broker.ts";
 import { handleWorkspaceRequest } from "./workspace-routes.ts";
 import { handleAlertWebhookRequest } from "./alert-webhook.ts";
 import { connectionData, type createCore, type SocketData } from "./core/index.ts";
@@ -9,7 +12,7 @@ import type { OrderSequence } from "./order-sequence.ts";
 import type { DevicePairedEvent, DeviceRemovedEvent, HealthAuth, RelayPairingsEvent, RemotePairingsEvent, SecuritySummary, SessionSnapshot } from "../shared/protocol.ts";
 import { DEFAULT_PORT } from "../shared/protocol.ts";
 import { authClient, deviceAuthorizationValue, deviceCookieValue, bearerMatches, handleAuthRequest, isAuthenticated, isSecureRequest, parseCookies, presentedToken, presentedTokenHeld, recordPresentedTokenFailure, requiresAuth, unauthorizedJson } from "./auth.ts";
-import { bindScope, cameThroughProxy, decideAccess, forwardingHeaders, inTailnet, isLoopbackAddress, isServeOwnerRequest, lanExposed, observedIngress, ownerAccess } from "./access.ts";
+import { bindScope, cameThroughProxy, decideAccess, forwardingHeaders, inTailnet, isLoopbackAddress, isServeOwnerRequest, lanExposed, observedIngress, ownerAccess, type Access } from "./access.ts";
 import { type DeviceStore, handleDeviceRequest, newStreamKey, sameBrowser, streamCookie, streamKeys, type DeviceMatch } from "./devices.ts";
 import { handlePreferencesRequest, type PreferenceStore } from "./preferences.ts";
 import { handleSeenRequest, type SeenStore } from "./seen.ts";
@@ -29,7 +32,7 @@ import type { AgentDetector } from "./agent-catalog-detect.ts";
 import { handleAgentCatalogRequest } from "./agent-catalog-routes.ts";
 import { type AgentInstaller, INSTALL_PATH, SIGN_IN_PATH } from "./agent-catalog-install.ts";
 import { forgetPageMedia } from "./file-view.ts";
-import { textEditAllowed } from "./file-edit.ts";
+import { readCappedText, textEditAllowed } from "./file-edit.ts";
 import { handleFileRequest } from "./file-routes.ts";
 import { BACKGROUND_AGENT_PATH, handleBackgroundAgentRequest } from "./background-agent.ts";
 import { paneGet, ping, herdrSocketPath } from "./herdr/client.ts";
@@ -65,7 +68,7 @@ import { handleSessionHistoryRequest, handleSessionResumeRequest, SESSION_HISTOR
 import type { PiSessionReader } from "./pi-session-metadata.ts";
 import type { HerdrSidebarConfig } from "./herdr-sidebar.ts";
 import { readHerdrUi } from "./herdr-ui.ts";
-import { MachineRelay, type RelayReceiptIds } from "./machine-relay.ts";
+import { MachineRelay, receiptPrincipal, type RelayReceiptIds } from "./machine-relay.ts";
 import { sameOrigin } from "./machine-security.ts";
 import { handlePluginRequest } from "./plugin-routes.ts";
 import type { createServer } from "./index.ts";
@@ -82,6 +85,10 @@ export interface RequestServices {
   /** the move of herdr's session to herdr-core, where the runtime can be switched from here */
   readonly runtimeMove: MoveService | null;
   readonly relay: RelayService;
+  readonly directAuthority: DirectAuthority;
+  readonly directBroker: DirectBroker | null;
+  readonly directEnabled: boolean;
+  readonly configuredDirect: DirectConfig;
   readonly relayReceiptIds: RelayReceiptIds;
   readonly options: NonNullable<Parameters<typeof createServer>[0]>;
   readonly hostname: string;
@@ -137,6 +144,7 @@ export interface ServerContext {
    * it gets in only with the token or a paired device, never as an open install, by the bridge token,
    * and its wrong tokens share one budget with every other peer there.
    */
+  readonly directOnly?: boolean;
   readonly lanHttps?: boolean;
 }
 
@@ -146,7 +154,10 @@ const OTHER_MACHINE_FILES = /^\/api\/(?:fs\/|pane\/(?:files|docs|image)$|workspa
 export async function handleRequest(request: Request, ctx: ServerContext): Promise<Response | undefined> {
   const { options, hostname, token, bridgeToken, bootId, devices, preferences, herdrSidebar, identityOf, serveOnly, portalGuards, shellAgents, agentDetector, agentOffered, agentInstaller, openCodeState, cliProxyRoutes, usageLogin, usage, voice, browserSnapshot, core, seen, piReader, orderSequence, clientConnectionLog, requestLog, portalStartupResult, portalStartup } = ctx.services;
   const { sidecar, serialize, push, alertWebhook, logPushError, omo, claudeAgents, opencodeAgents, plans, clientSnapshot, machines, broadcastAll, collector, queueFirstMessage } = core;
-  return requestLog.handle(request, async (headers) => {
+  const { directAuthority, directBroker } = ctx.services;
+  let directClaims: DirectClaims | null = null;
+  const cors = ctx.directOnly ? directAuthority.corsHeaders(request.headers.get("origin")) : null;
+  const response = await requestLog.handle(request, async (headers) => {
   const startup = portalStartupResult ?? await portalStartup;
   if (!startup.ok) {
     setRequestRoute("startup");
@@ -157,7 +168,23 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
   const url = new URL(request.url);
   let { pathname } = url;
   const relayPeer = ctx.peer.kind === "relay" ? ctx.peer.device : undefined;
-  const bridgeAuthorized = relayPeer === undefined && ctx.lanHttps !== true && isAuthenticated(request, bridgeToken);
+  if (ctx.directOnly) {
+    if (pathname !== "/ws" && !directApiPath(pathname)) return jsonResponse({ error: { code: "not_found", message: "Direct ingress serves session data only" } }, 404);
+    if (request.method === "OPTIONS") {
+      if (!cors || !["GET", "HEAD", "POST", "PATCH", "DELETE", "PUT"].includes(request.headers.get("access-control-request-method") ?? "")) return new Response(null, { status: 403 });
+      const allowed = new Set((cors.get("access-control-allow-headers") ?? "").split(",").map((header) => header.trim()));
+      if ((request.headers.get("access-control-request-headers") ?? "").split(",").some((header) => header.trim() && !allowed.has(header.trim().toLowerCase()))) return new Response(null, { status: 403 });
+      return new Response(null, { status: 204 });
+    }
+    const protocols = (request.headers.get("sec-websocket-protocol") ?? "").split(",").map((part) => part.trim());
+    const tickets = protocols.filter((part) => part.startsWith(DIRECT_TICKET_PREFIX));
+    const credential = pathname === "/ws" ? (tickets.length === 1 && protocols.includes(DIRECT_PROTOCOL) ? tickets[0]!.slice(DIRECT_TICKET_PREFIX.length) : "")
+      : /^Bearer (.+)$/.exec(request.headers.get("authorization") ?? "")?.[1] ?? "";
+    directClaims = directAuthority.verify(credential, pathname === "/ws" ? "ws" : "http", request.headers.get("origin"));
+    if (!directClaims || (pathname === "/ws" && url.searchParams.has("machine_id"))) return unauthorizedJson();
+  }
+  const bridgeAuthorized = !ctx.directOnly && relayPeer === undefined && ctx.lanHttps !== true
+    && (isAuthenticated(request, bridgeToken) || options.bridgeOnly === true && bearerMatches(request, token));
   // the connection server that reaches this one as its PC reads its update status and asks for the
   // update on offer: an Ovis run on this PC by itself is updated through its own updater, never
   // replaced (server/machines.ts ownOffer). An install still names the offered revision and the
@@ -178,7 +205,24 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
   // the guessing budget of the address that asks (auth.ts): a token presented while it waits is not compared
   // on the LAN listener `via lan-https` puts every peer in one shared budget too (auth.ts sharedKey)
   const client = relayPeer !== undefined ? `relay:${relayPeer.id}` : ctx.lanHttps === true && ip !== null ? `${ip.address} via lan-https` : authClient(ip?.address ?? null, request.headers);
-  const presented = relayPeer === undefined ? presentedToken(request, token, client) : null;
+  if (!ctx.directOnly && pathname === "/api/direct/trust") {
+    setRequestRoute(pathname);
+    const bridgeBearer = relayPeer === undefined && ctx.lanHttps !== true && bearerMatches(request, bridgeToken);
+    const bearerRequest = new Request(request.url, { headers: { authorization: request.headers.get("authorization") ?? "" } });
+    const presented = bridgeBearer ? "none" : presentedToken(bearerRequest, token, client);
+    if (presented === "wrong") recordPresentedTokenFailure(client);
+    if (presented === "held") return presentedTokenHeld(client);
+    if (relayPeer !== undefined || ctx.lanHttps === true || !ctx.services.directEnabled || !(bridgeBearer || presented === "match")) return unauthorizedJson();
+    try {
+      const body = JSON.parse(await readCappedText(request, 96 * 1024)) as Record<string, unknown>;
+      if (request.method === "POST") directAuthority.register(body);
+      else if (request.method === "PATCH" && typeof body.issuer === "string" && typeof body.subject === "string") directAuthority.revoke(body.issuer, body.subject);
+      else if (request.method === "DELETE" && typeof body.issuer === "string") directAuthority.remove(body.issuer);
+      else return badRequest("invalid_direct_request", "Use POST, PATCH or DELETE with a valid direct trust request");
+      return new Response(null, { status: 204 });
+    } catch { return badRequest("invalid_direct_request", "Invalid direct trust request"); }
+  }
+  const presented = directClaims ? null : relayPeer === undefined ? presentedToken(request, token, client) : null;
   // counted at once, before any await below lets a concurrent guess pass the same check. Every
   // wrong token counts, a paired watch device's too (a right one would upgrade it to drive);
   // the connection server's own bridge token does not
@@ -187,7 +231,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
   let pairedDevice: DeviceMatch | null;
   try {
     // a script's `Authorization: Device` header stands for the cookie a browser holds (#2744)
-    pairedDevice = relayPeer ?? devices.match(deviceAuthorizationValue(request) ?? deviceCookieValue(parseCookies(request.headers.get("cookie"))));
+    pairedDevice = directClaims ? null : relayPeer ?? devices.match(deviceAuthorizationValue(request) ?? deviceCookieValue(parseCookies(request.headers.get("cookie"))));
   } catch (error) {
     // First-cookie confirmation is an authorization write, not best-effort telemetry.
     return errorResponse(error);
@@ -201,7 +245,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
     : { owner: null, tagged: false, soleLogin: null, dnsName: null, tailnetIp: null };
   // Portal reaches this server over loopback, never the LAN listener: its proof is not a way in there
   const portalProven = relayPeer === undefined && ctx.lanHttps !== true && (options.portal?.vouches(request.headers.get("x-portal-proof") ?? null) ?? false);
-  const access = decideAccess({
+  const access: Access = directClaims ? { level: "full", via: "direct", role: directClaims.role === "observe" ? "watch" : "drive" } : decideAccess({
     relayPeer,
     ...requestShape,
     host: requestHost,
@@ -231,7 +275,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
   // who started a followed sign-in: only that device (or that signed-in browser) reaches it again
   const loginOwner = access.level === "full" ? (access.device ? `device:${access.device.id}` : `${access.via}:${access.login ?? ""}`) : null;
   const mutating = !["GET", "HEAD", "OPTIONS"].includes(request.method);
-  if (pathname.startsWith("/api/") && mutating && !sameOrigin(request)) {
+  if (pathname.startsWith("/api/") && mutating && !directClaims && !sameOrigin(request)) {
     setRequestRoute("origin-refusal");
     return jsonResponse({ error: { code: "invalid_origin", message: "Use controls from this app" } }, 403);
   }
@@ -251,7 +295,8 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
   // /api/push/test stays with a session that can drive only because it is a mutation; /api/push/status
   // is a POST only to keep the subscription out of the address, and answers the device about its own.
   // A watch device may report its own connection metadata, never terminal input or file data.
-  const ownPreferences = pathname === "/api/auth" || pathname === "/api/push/subscribe" || pathname === "/api/push/status" || pathname === "/api/connection-diagnostics";
+  const directAccess = /^\/api\/machines\/([a-zA-Z0-9_-]+)\/direct-access$/.exec(pathname);
+  const ownPreferences = directAccess !== null || pathname === "/api/auth" || pathname === "/api/push/subscribe" || pathname === "/api/push/status" || pathname === "/api/connection-diagnostics";
   // a repository's changes are file contents too: the patch of a credential file is that file; its
   // history (commit messages, branch names) is read the same way
   const repositoryDiff = /^\/api\/(?:machines\/[^/]+\/)?workspace\/(?:diff|git)\//.test(pathname);
@@ -351,6 +396,25 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
     return jsonResponse({ error: { code: "unsupported", message: "Files on another machine of herdr-core are not reachable from Ovis yet" } }, 501);
   }
 
+  if (directAccess && request.method === "POST") {
+    setRequestRoute("/api/machines/:machine_id/direct-access");
+    if (!sameOrigin(request) || request.headers.get("x-herdr-machine") !== "1") return badRequest("invalid_direct_request", "Use direct access from this app");
+    const subject = directSubject(access, token);
+    if (!directBroker || !subject) return jsonResponse({ error: { code: "direct_unavailable", message: "Direct access is not configured" } }, 404);
+    try {
+      const raw = await readCappedText(request, 1024);
+      const body = (raw ? JSON.parse(raw) : {}) as { receipt_resume_id?: unknown };
+      if (!body || typeof body !== "object" || Array.isArray(body)) return badRequest("invalid_direct_request", "Direct request must be an object");
+      const resume = !readOnly && typeof body.receipt_resume_id === "string"
+        ? ctx.services.relayReceiptIds.scope(directAccess[1]!, receiptPrincipal(access), body.receipt_resume_id) : undefined;
+      const deviceId = access.level === "full" ? access.device?.id : undefined;
+      const credential = await directBroker.issue(directAccess[1]!, request.headers.get("origin") ?? "", subject, readOnly,
+        deviceId ? (close) => devices.onRevoke(deviceId, close) : portalRecheckMs !== undefined ? (close) => { const timer = setTimeout(close, portalRecheckMs); return () => clearTimeout(timer); } : undefined, resume);
+      if (deviceId && devices.canDrive(deviceId) !== !readOnly) { directBroker.revoke(subject); throw new Error("Device role changed"); }
+      return credential ? jsonResponse(credential, 200, { "cache-control": "no-store" }) : jsonResponse({ error: { code: "direct_unavailable", message: "Direct access is not configured" } }, 404);
+    } catch { return jsonResponse({ error: { code: "direct_unavailable", message: "Direct access is unavailable" } }, 503); }
+  }
+
   if (pathname === "/api/bridge") {
     setRequestRoute(pathname);
     if (token === "" && !bridgeAuthorized) return unauthorizedJson();
@@ -405,7 +469,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
   }
   if (pathname === "/ws") {
     setRequestRoute(pathname);
-    if (!sameOrigin(request)) return new Response("invalid origin", { status: 403 });
+    if (!directClaims && !sameOrigin(request)) return new Response("invalid origin", { status: 403 });
     const deviceId = access.level === "full" ? access.device?.id : undefined;
     const recheck = portalRecheckMs === undefined ? {} : { recheckMs: portalRecheckMs };
     const machineId = url.searchParams.get("machine_id");
@@ -413,9 +477,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
       if (access.level === "none") return unauthorizedJson(access.reason);
       if (!machines?.endpoint(machineId)) return jsonResponse({ error: { code: "machine_offline", message: "This PC is disconnected" } }, 503);
       // whose receipts these are: the paired device, else the Portal user or Tailscale login the request proved
-      const principal = deviceId !== undefined ? JSON.stringify(["device", deviceId])
-        : access.portal ? JSON.stringify(["portal", access.portal.method, access.portal.user])
-        : access.login !== undefined ? JSON.stringify(["tailscale", access.login.toLowerCase()]) : undefined;
+      const principal = receiptPrincipal(access);
       let relay: MachineRelay | undefined;
       try {
         relay = new MachineRelay(machines, machineId, readOnly, browserSnapshot,
@@ -434,7 +496,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
     const ingress: TelemetryIngress = observed === "direct" ? (loopback ? "local" : "lan") : observed;
     // Reuse the terminal socket for the same authorized event document as /api/machines/events.
     // A server-side switch keeps the old SSE path available for immediate transport rollback.
-    const useMachineEvents = machines && !bridgeAuthorized && process.env["OVIS_MACHINE_EVENTS_WS"] !== "0";
+    const useMachineEvents = machines && !bridgeAuthorized && !directClaims && process.env["OVIS_MACHINE_EVENTS_WS"] !== "0";
     const presentedKeys = streamKeys(request);
     const issuedKey = useMachineEvents && presentedKeys.length === 0 ? newStreamKey() : null;
     const keys = issuedKey === null ? presentedKeys : [issuedKey];
@@ -458,7 +520,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
         return () => { stopPaired(); stopRemoved?.(); stopRelay?.(); };
       } },
     } : undefined;
-    const upgraded = ctx.upgrade(request, { headers, data: connectionData({ machineEvents, deviceId, readOnly, bridge: bridgeAuthorized, ...(surface ? { surface } : {}), ...(surface === false ? {} : { ingress }), ...recheck }) });
+    const upgraded = ctx.upgrade(request, { headers: directClaims ? { ...Object.fromEntries(headers), "sec-websocket-protocol": DIRECT_PROTOCOL } : headers, data: connectionData({ directClaims: directClaims ?? undefined, directAuthority: directClaims ? directAuthority : undefined, machineEvents, deviceId, readOnly, bridge: bridgeAuthorized, ...(surface ? { surface } : {}), ...(surface === false ? {} : { ingress }), ...recheck }) });
     if (upgraded) return undefined;
     return new Response("websocket upgrade required", { status: 426 });
   }
@@ -470,6 +532,9 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
     // a browser can hold the token and a device cookie at once, and its renders are then the
     // client's: signing out ends both kinds
     if (request.method === "DELETE" && authenticated) {
+      const subject = directSubject(access, token);
+      if (subject) directBroker?.revoke(subject);
+      if (pairedDevice) directBroker?.revoke(`device:${pairedDevice.id}`);
       if (pairedDevice !== null) forgetPageMedia({ device: pairedDevice.id });
       forgetPageMedia({ client });
     }
@@ -480,6 +545,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
       // one device, or all of them: the registry names what was revoked, and the cleanup follows its ids
       return await handleDeviceRequest(request, pathname, devices, access, ctx.peer.kind === "relay" ? ctx.peer.key : null, (revoked) => {
         for (const id of revoked) {
+          directBroker?.revoke(`device:${id}`);
           // The device registry is the delivery authority even if cleaning the push file fails.
           try { push.revokeDevice(id); } catch (error) { logPushError(error); }
           // and every page media address its renders were given
@@ -752,7 +818,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
     try {
       // another Ovis server reading this PC (its bridge token) applies its own rows; a browser gets this server's
       const snapshot = await clientSnapshot();
-      return jsonResponse({ snapshot: bridgeAuthorized ? snapshot : browserSnapshot(snapshot) });
+      return jsonResponse({ snapshot: bridgeAuthorized ? snapshot : directClaims ? directAuthority.snapshot(directClaims, browserSnapshot(snapshot)) : browserSnapshot(snapshot) });
     } catch (error) {
       return errorResponse(error);
     }
@@ -836,9 +902,17 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
 
   // static client - public even when the API is gated, so the login UI can load
   setRequestRoute("static");
-  return serveStatic(pathname, request.headers.get("accept-encoding"), requestOrigin(request));
+  return serveStatic(pathname, request.headers.get("accept-encoding"), requestOrigin(request), Object.values(ctx.services.configuredDirect.endpoints));
   })());
   });
+  if (response && /^\/api\/machines\/(?:bootstrap(?:\/|$)|[^/]+\/revoke-bootstrap$)/.test(new URL(request.url).pathname)) response.headers.set("cache-control", "no-store");
+  if (response && cors) {
+    for (const [name, value] of cors) {
+      if (name === "vary") response.headers.append(name, value);
+      else response.headers.set(name, value);
+    }
+  }
+  return response;
 }
 
 /** Why a stop of a busy pane did nothing, in the words the move's dialog shows. */

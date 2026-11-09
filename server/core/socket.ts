@@ -148,7 +148,8 @@ export function createSocket({ clients, present, stopped, admit, setRole, watcha
       countVisit(snapshot, { surface: client.data.surface, ingress: client.data.ingress });
       try {
         const read = await snapshot;
-        send(client, { type: "snapshot", snapshot: client.data.bridge ? read : browserSnapshot(read), features, connection: client.data.connectionId });
+        const shown = client.data.bridge ? read : browserSnapshot(read);
+        send(client, { type: "snapshot", snapshot: client.data.directClaims ? client.data.directAuthority!.snapshot(client.data.directClaims, shown) : shown, features, connection: client.data.connectionId });
       } catch (error) {
         const code = error instanceof HerdrError ? error.code : "snapshot_failed";
         send(client, { type: "error", code, message: error instanceof Error ? error.message : String(error) });

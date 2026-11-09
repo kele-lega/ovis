@@ -1,3 +1,5 @@
+import type { AgentRowTokens } from "./pane-tokens.ts";
+
 export const DIRECT_PROTOCOL = "ovis.v1";
 export const DIRECT_TICKET_PREFIX = "ovis.ticket.";
 export const DIRECT_TRUST_TTL_MS = 90_000;
@@ -18,6 +20,8 @@ export interface DirectClaims {
   iat: number;
   exp: number;
   jti: string;
+  /** A-derived principal + machine + browser scope, never the browser's raw resume ID. WS only. */
+  receipt_resume_id?: string;
 }
 
 export interface DirectTrust {
@@ -26,6 +30,8 @@ export interface DirectTrust {
   public_key: string;
   origins: string[];
   expires_at: number;
+  /** A's normalized server-owned hide policy; composed with B's local policy. */
+  snapshot_policy?: AgentRowTokens | null;
 }
 
 export interface DirectCredentialResponse {

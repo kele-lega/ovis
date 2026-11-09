@@ -1,3 +1,5 @@
+import { receiptResumeId } from "./receiptResume.ts";
+import { nativeFetch } from "./transport.ts";
 import { DIRECT_PROTOCOL, DIRECT_TICKET_PREFIX, directApiPath, normalizeDirectOrigin, type DirectCredentialResponse } from "../../shared/direct.ts";
 import { LOCAL_MACHINE } from "../../shared/machines.ts";
 import type { SocketEndpointResolver } from "./ws.ts";
@@ -55,7 +57,7 @@ export class DirectTransport {
   private readonly origin: () => string;
 
   constructor(options: DirectTransportOptions = {}) {
-    this.fetcher = options.fetch ?? ((url, init) => globalThis.fetch(url, init));
+    this.fetcher = options.fetch ?? ((url, init) => nativeFetch(url, init));
     this.now = options.now ?? Date.now;
     this.origin = options.origin ?? browserOrigin;
   }
@@ -85,7 +87,7 @@ export class DirectTransport {
       const response = await this.fetcher(`/api/machines/${encodeURIComponent(machineId)}/direct-access`, {
         method: "POST",
         headers: { "content-type": "application/json", "x-herdr-machine": "1" },
-        body: "{}",
+        body: JSON.stringify({ receipt_resume_id: receiptResumeId() }),
         credentials: "same-origin",
         cache: "no-store",
         signal,

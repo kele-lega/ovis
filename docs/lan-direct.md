@@ -85,9 +85,11 @@ existing CSP and proxy paths.
 - Each existing MachineSession retains its HerdrSocket object across pane views. Each transport
   connection resolves a fresh endpoint and a fresh one-use WS ticket. PaneCanvas remains keyed by
   machine ID so equal pane IDs on different servers cannot share terminal output or drafts.
-- A authenticates the browser through its existing cookie gate, checks the exact page Origin and
-  registers an ephemeral Ed25519 public key on B over the authenticated SSH bridge connection.
-  Browser-facing addresses come only from administrator configuration, never from request bodies.
+- A authenticates the browser through its existing token, pairing or verified identity gate, checks
+  the exact page Origin and registers an ephemeral Ed25519 public key on B over the authenticated
+  SSH bridge connection. Only machines with an actual SSH target qualify: relay-PC and hc carriers
+  keep their original transports. Browser-facing addresses come only from administrator configuration,
+  never from request bodies.
 - `POST /api/machines/:id/direct-access` returns a 30-second one-use WS ticket and a 60-second HTTP
   bearer token. Both bind issuer, target machine, subject, role and exact page origin. The ticket
   travels in the offered `ovis.ticket.*` subprotocol; B selects only `ovis.v1`. Nothing is placed in
@@ -97,6 +99,14 @@ existing CSP and proxy paths.
   the bounded redaction policy supplied by A over its authenticated trust channel, so a hidden
   token does not become visible merely by changing transports. Watching devices remain read-only even if
   they send an interact role frame. Administrative APIs and trust registration are not exposed there.
+- Direct snapshots enforce both B's local hidden-token policy and A's authenticated sidebar policy,
+  including a bridge-only B. A sends bounded normalized rules in trust registration, never browser
+  fields; oversized policies disable direct grants rather than dropping redaction. Policy changes
+  drop the old lease and close its sockets; renewed reads use the current trusted rules.
+- A derives receipt-resume identities with the same server-lifetime principal + machine + browser
+  scope used by SSH relay and binds that opaque scope into interacting WS tickets. B replaces raw
+  attach resume IDs with the signed scope; watchers and HTTP credentials carry none. Receipt resume
+  remains presentation evidence only: input receipts, held input and drafts keep their upstream fences.
 - A renews each active bridge trust lease every 25 seconds; B closes connections if the lease is not
   renewed within 90 seconds. Device revocation, logout and machine disconnect revoke direct access.
   Revocation uses the validated device, shared token or verified Serve login, not unrelated cookies

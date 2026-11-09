@@ -2,6 +2,7 @@
 import "./lib/builtins.ts";
 // then: every module below may read browser storage as it loads
 import "./lib/legacyStorage.ts";
+import { browserDirectTransport, setTransport } from "./lib/transport.ts";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import type { Root } from "react-dom/client";
@@ -63,4 +64,4 @@ function renderApp(): Root {
 // sets the transport, and only then mounts the app; the build a PC serves has no such meta and
 // mounts the app as before
 if (shellMode() === "relay") bootRelayShell(mount, renderApp);
-else renderApp();
+else { setTransport(browserDirectTransport); renderApp(); }

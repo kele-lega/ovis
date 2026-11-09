@@ -111,9 +111,15 @@ function defaultUrl(): string {
  *   socket must not fire later, unannounced); PaneTerminal keeps it as a draft the
  *   user reviews instead. Control frames (attach/resize/role) replay as before.
  */
+export interface SocketEndpoint { url: string; protocols?: string[]; opened?: () => void; failed?: () => void }
+export type SocketEndpointResolver = (signal: AbortSignal) => Promise<SocketEndpoint>;
+interface ConnectionAttempt { controller: AbortController; endpoint?: SocketEndpoint; failed: boolean }
+
 export class HerdrSocket {
   private socket: WebSocketLike | null = null;
   private readonly url: string;
+  private readonly endpoint: string | SocketEndpointResolver;
+  private attempt: ConnectionAttempt | null = null;
   private readonly handlers = new Set<Handler>();
   private readonly disconnectHandlers = new Set<() => void>();
   private readonly beforeReplayHandlers = new Set<() => void>();
@@ -234,11 +240,10 @@ export class HerdrSocket {
     if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     const socket = this.socket;
-    if (!socket) return;
+    if (!socket && !this.attempt) return;
     this.endConnection();
     // its close event must not schedule a reconnect behind the page; a late 4008 still stops output
-    this.endedEarly.add(socket);
-    socket.close();
+    if (socket) { this.endedEarly.add(socket); socket.close(); }
     this.connectionState = "waiting";
   };
   private mode: ClientRole = "interact";
@@ -270,9 +275,10 @@ export class HerdrSocket {
   private connectionEpoch = 0;
   private probeRefusalRecorded = false;
 
-  constructor(url: string = defaultUrl()) {
-    this.url = url;
-    this.trace = new ConnectionTrace(url, () => ({
+  constructor(endpoint: string | SocketEndpointResolver = defaultUrl(), traceUrl?: string) {
+    this.endpoint = endpoint;
+    this.url = traceUrl ?? (typeof endpoint === "string" ? endpoint : "");
+    this.trace = new ConnectionTrace(this.url, () => ({
       connection: this.connectionEpoch, socket_state: this.socket?.readyState ?? null,
       visibility: typeof document === "undefined" ? "unknown" : document.visibilityState === "hidden" ? "hidden" : "visible",
       online: typeof navigator === "undefined" || typeof navigator.onLine !== "boolean" ? null : navigator.onLine,
@@ -338,13 +344,14 @@ export class HerdrSocket {
       this.endConnection();
       this.endedEarly.add(previous);
     }
+    if (this.attempt) return;
     // a backoff retry still waiting would only open a second attempt later, past whatever ends this one
     if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
-    const socket = getTransport().openSocket(this.url);
+    const attempt: ConnectionAttempt = { controller: new AbortController(), failed: false };
+    this.attempt = attempt;
     const epoch = ++this.connectionEpoch;
     const started = Date.now();
-    this.socket = socket;
     this.connectionState = "connecting";
     this.trace.record("connect", { attempt: this.retries });
     this.features = new Set();
@@ -358,14 +365,44 @@ export class HerdrSocket {
     this.clearConnectTimer();
     this.connectTimer = window.setTimeout(() => {
       this.connectTimer = null;
-      if (this.socket !== socket || socket.readyState !== SOCKET_CONNECTING) return;
+      if (this.attempt !== attempt || this.socket?.readyState === SOCKET_OPEN) return;
       this.trace.record("connect_timeout", { elapsed_ms: Date.now() - started, attempt: this.connectTimeouts }, true);
       this.connectTimeouts += 1;
-      socket.close();
-      // the close event of an attempt that never opened may come late or not at all: end it here
-      this.closed(socket, 1006);
+      this.failAttempt(attempt);
     }, Math.min(CONNECT_TIMEOUT_MAX_MS, CONNECT_TIMEOUT_MS * 2 ** this.connectTimeouts));
+    const resolver = typeof this.endpoint === "function" ? this.endpoint
+      : getTransport().resolveSocket ? (signal: AbortSignal) => getTransport().resolveSocket!(this.url, signal) : undefined;
+    try {
+      if (resolver) {
+        void resolver(attempt.controller.signal).then((endpoint) => {
+          if (this.attempt === attempt && !attempt.controller.signal.aborted) this.bindEndpoint(attempt, endpoint, epoch, started);
+        }).catch(() => { if (this.attempt === attempt) this.failAttempt(attempt); });
+      } else this.bindEndpoint(attempt, { url: this.url }, epoch, started);
+    } catch { this.failAttempt(attempt); }
+  }
 
+  private failAttempt(attempt: ConnectionAttempt): void {
+    if (this.attempt !== attempt) return;
+    this.failEndpoint();
+    const socket = this.socket;
+    if (socket && this.openedAt !== null) this.endedEarly.add(socket);
+    this.endConnection();
+    socket?.close();
+    this.scheduleReconnect();
+  }
+
+  private failEndpoint(): void {
+    const attempt = this.attempt;
+    if (!attempt || attempt.failed) return;
+    attempt.failed = true;
+    try { attempt.endpoint?.failed?.(); } catch { /* bookkeeping never breaks reconnects */ }
+  }
+
+  private bindEndpoint(attempt: ConnectionAttempt, endpoint: SocketEndpoint, epoch: number, started: number): void {
+    if (this.attempt !== attempt || attempt.controller.signal.aborted) return;
+    attempt.endpoint = endpoint;
+    const socket = getTransport().openSocket(endpoint.url, endpoint.protocols);
+    this.socket = socket;
     socket.addEventListener("open", () => {
       if (this.socket !== socket) return;
       this.clearConnectTimer();
@@ -376,6 +413,8 @@ export class HerdrSocket {
       this.lostAt = null;
       this.lastFrameAt = this.openedAt;
       this.watchIdle(socket);
+      try { endpoint.opened?.(); } catch { /* bookkeeping cannot break attachment replay */ }
+      if (this.socket !== socket) return;
       // the path is back: reads sent on the lost one would hold the browser's connections to the server
       if (this.pathLost) {
         this.pathLost = false;
@@ -391,7 +430,7 @@ export class HerdrSocket {
       // a new connection is a new client to the server: it has to hear again whether the page is in use
       if (this.presence !== null) this.rawSend({ type: "presence", active: this.presence });
       // Mounted panes decide whether a new connection may acquire an attach before any replay.
-      for (const handler of this.beforeReplayHandlers) handler();
+      for (const handler of this.beforeReplayHandlers) { handler(); if (this.socket !== socket) return; }
       for (const [paneId, state] of this.attached) {
         state.releaseSizeOwed = !state.keepSize;
         this.rawSend({ type: "attach", pane_id: paneId, cols: state.cols, rows: state.rows, flow_control: "ack", receipt_resume_id: receiptResumeId(), ...(state.keepSize ? { keep_size: true } : {}) });
@@ -554,14 +593,16 @@ export class HerdrSocket {
     });
 
     socket.addEventListener("error", () => {
+      if (this.socket !== socket) return;
       this.trace.record("socket_error", { connection: epoch, socket_state: socket.readyState }, true);
-      socket.close();
+      this.failAttempt(attempt);
     });
   }
 
   /** The end of this connection, from its close event or a connect deadline; a stale socket's is ignored. */
-  private closed(socket: WebSocketLike, code: number): void {
+  private closed(socket: WebSocketLike, code: number, failed = true): void {
     if (this.socket !== socket) return;
+    if (failed && code !== 1000 && code !== 1001 && code !== OUTPUT_STALLED_CLOSE_CODE) this.failEndpoint();
     this.endConnection();
     if (code === OUTPUT_STALLED_CLOSE_CODE) {
       this.stopOutput();
@@ -572,6 +613,8 @@ export class HerdrSocket {
 
   /** Drops the current connection: its submits settle as disconnected and the disconnect handlers run. */
   private endConnection(): void {
+    this.attempt?.controller.abort();
+    this.attempt = null;
     this.machineEventsOffered = null;
     if (this.submits.size > 0) this.trace.record("submit_disconnect", { pending: this.submits.size }, true);
     if (this.openedAt !== null && Date.now() - this.openedAt >= STABLE_CONNECTION_MS) this.retries = 0;
@@ -592,6 +635,19 @@ export class HerdrSocket {
     for (const handler of this.disconnectHandlers) handler();
     this.markFeatures();
     this.settleSubmits(DISCONNECTED);
+  }
+
+  /** Replace only the carrier; subscriptions, receipts, drafts and role stay on this client. */
+  reconnect(): void {
+    if (this.disposed || this.left || this.stopped) return;
+    if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    const socket = this.socket;
+    if (socket || this.attempt) this.endConnection();
+    if (socket) { this.endedEarly.add(socket); socket.close(); }
+    this.retries = 0;
+    this.connectTimeouts = 0;
+    this.connect();
   }
 
   private stopOutput(): void {
@@ -691,6 +747,7 @@ export class HerdrSocket {
     this.trace.record("probe_drop", { pending: this.submits.size }, true);
     this.probeDrops += 1;
     this.pathLost = true;
+    this.failEndpoint();
     this.endConnection();
     // a server close (4008) that comes after this still stops output
     this.endedEarly.add(socket);
@@ -768,7 +825,7 @@ export class HerdrSocket {
       this.closed(socket, 1006);
     } else if (socket?.readyState === SOCKET_CLOSED) {
       // ended now so its submits and listeners settle; its close event, when it runs, can still stop output
-      this.closed(socket, 1006);
+      this.closed(socket, 1006, false);
       this.endedEarly.add(socket);
     }
     if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
@@ -1276,6 +1333,8 @@ export class HerdrSocket {
   close(): void {
     this.trace.close();
     this.disposed = true;
+    this.attempt?.controller.abort();
+    this.attempt = null;
     if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.clearConnectTimer();

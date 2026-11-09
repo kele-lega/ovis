@@ -1,3 +1,4 @@
+import type { AgentRowTokens } from "../shared/pane-tokens.ts";
 import { createHash } from "node:crypto";
 import { normalizeDirectOrigin, type DirectCredentialResponse } from "../shared/direct.ts";
 import type { Access } from "./access.ts";
@@ -32,7 +33,14 @@ export class DirectBroker {
   private readonly generations = new Map<string, number>();
   private stopped = false;
 
-  constructor(private readonly manager: MachineManager, readonly config: DirectConfig) {
+  private readonly stopPolicy: (() => void) | undefined;
+  constructor(private readonly manager: MachineManager, readonly config: DirectConfig, private readonly snapshotPolicy?: {
+    get(): AgentRowTokens | null; subscribe(listener: () => void): () => void;
+  }) {
+    // Prime a file-backed policy before subscribing: its initial read is not a live policy change.
+    snapshotPolicy?.get();
+    // Drop the lease before any refresh can issue with an old policy. Reconnect registers the new one.
+    this.stopPolicy = snapshotPolicy?.subscribe(() => { for (const id of this.leases.keys()) this.drop(id); });
     this.timer = setInterval(() => {
       for (const [id, lease] of this.leases) void this.refresh(id, lease).catch(() => {});
     }, 25_000);
@@ -48,18 +56,28 @@ export class DirectBroker {
     if (!response.ok) throw new Error("Direct bridge control unavailable");
   }
 
-  private refresh(id: string, lease: Lease): Promise<void> {
+  private async refresh(id: string, lease: Lease): Promise<void> {
     if (lease.updating) return lease.updating;
-    lease.updating = this.control(lease, lease.signer.trust(id, this.config.origins, Date.now() - SIGNING_MARGIN_MS)).finally(() => { lease.updating = undefined; });
+    // A file-backed get() can synchronously report a policy change and drop this lease.
+    // Publish the in-flight promise first, so drop waits for any registration before deleting it.
+    lease.updating = Promise.resolve().then(() => {
+      const policy = this.snapshotPolicy?.get() ?? null;
+      if (this.stopped || this.leases.get(id) !== lease) throw new Error("Direct policy changed");
+      return this.control(lease, lease.signer.trust(id, this.config.origins, Date.now() - SIGNING_MARGIN_MS, policy));
+    }).finally(() => { lease.updating = undefined; });
     return lease.updating;
   }
 
-  async issue(id: string, origin: string, subject: string, readOnly: boolean, onRevoke?: (close: () => void) => () => void): Promise<DirectCredentialResponse | null> {
+  async issue(id: string, origin: string, subject: string, readOnly: boolean, onRevoke?: (close: () => void) => () => void, receiptResumeId?: string): Promise<DirectCredentialResponse | null> {
     const target = this.config.endpoints[id];
-    if (!target || !this.config.origins.includes(origin) || this.stopped) return null;
+    // Relay-PC endpoint tokens authenticate an A-local adapter, not B's SSH bridge.
+    // Only real SSH targets participate; hc and relay carriers keep their own paths.
+    if (!target || !this.config.origins.includes(origin) || this.stopped || !this.manager.list().some((machine) => machine.id === id && machine.kind === "ssh" && machine.target !== undefined)) return null;
     const endpoint = this.manager.endpoint(id);
     if (!endpoint) throw new Error("This PC is disconnected");
+    if (!this.generations.has(subject) && this.generations.size >= 4096) throw new Error("Too many direct identities");
     const generation = this.generations.get(subject) ?? 0;
+    this.generations.set(subject, generation);
     const scopedSubject = `${subject}:${generation}`;
     let lease = this.leases.get(id);
     if (lease && (lease.endpoint.url !== endpoint.url || lease.endpoint.token !== endpoint.token)) { this.drop(id); lease = undefined; }
@@ -73,7 +91,8 @@ export class DirectBroker {
     // Device revocation can happen while the SSH registration request is in flight.
     const unwatch = onRevoke?.(() => {
       revoked = true;
-      void this.control(captured, { issuer: captured.signer.issuer, subject: scopedSubject }, "PATCH").catch(() => this.drop(id));
+      // Role changes revoke old authority too; a fresh grant must use a new subject.
+      if ((this.generations.get(subject) ?? 0) === generation) this.revoke(subject);
     });
     try {
       await this.refresh(id, captured);
@@ -84,13 +103,15 @@ export class DirectBroker {
       }
       const fields = { aud: id, sub: scopedSubject, origin, role: readOnly ? "observe" as const : "interact" as const };
       const signingNow = Date.now() - SIGNING_MARGIN_MS;
-      const ticket = captured.signer.issue({ ...fields, kind: "ws" }, signingNow);
+      const ticket = captured.signer.issue({ ...fields, kind: "ws", ...(!readOnly && receiptResumeId ? { receipt_resume_id: receiptResumeId } : {}) }, signingNow);
       const http = captured.signer.issue({ ...fields, kind: "http" }, signingNow);
       return { origin: target, ticket: ticket.token, access_token: http.token, expires_at: http.expires_at };
     } catch (error) { unwatch?.(); if (revoked) this.drop(id); throw error; }
   }
 
   revoke(subject: string): void {
+    // Unknown identities hold no grants; never grow this bounded table on logout guesses.
+    if (!this.generations.has(subject)) return;
     const generation = this.generations.get(subject) ?? 0;
     this.generations.set(subject, generation + 1);
     for (const [id, lease] of this.leases) void this.control(lease, { issuer: lease.signer.issuer, subject: `${subject}:${generation}` }, "PATCH").catch(() => this.drop(id));
@@ -108,6 +129,7 @@ export class DirectBroker {
 
   stop(): void {
     this.stopped = true;
+    this.stopPolicy?.();
     clearInterval(this.timer);
     for (const id of this.leases.keys()) this.drop(id);
   }
@@ -121,8 +143,9 @@ export class DirectBroker {
 export function directSubject(access: Access, sharedToken: string): string | null {
   if (access.level !== "full") return null;
   const hash = (value: string) => createHash("sha256").update(value).digest("hex");
-  if (access.via === "device") return access.device ? `device:${access.device.id}` : null;
+  if (access.device) return `device:${access.device.id}`;
+  if (access.portal) return `portal:${hash(JSON.stringify(access.portal))}`;
   if (access.via === "token") return sharedToken ? `token:${hash(sharedToken)}` : null;
   if (access.via === "tailscale") return access.login ? `tailscale:${hash(access.login.toLowerCase())}` : null;
-  return `access:${access.via}`;
+  return access.via === "direct" || access.via === "relay" ? null : `access:${access.via}`;
 }

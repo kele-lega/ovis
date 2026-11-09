@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { bindScope, cameThroughProxy, decideAccess, forwardingHeaders, isLoopbackAddress, isLoopbackBind, isLoopbackHost, lanExposed, observedIngress, type AccessInput } from "./access.ts";
+import { bindScope, cameThroughProxy, decideAccess, forwardingHeaders, isLoopbackAddress, isLoopbackBind, isLoopbackHost, lanExposed, observedIngress, ownerAccess, type AccessInput } from "./access.ts";
 
 const device = { id: "d1", label: "Phone", role: "drive" as const };
 const base: AccessInput = { loopback: true, forwarded: false, funnel: false, tailscaleLogin: null, forwardedFor: "100.64.0.9", host: null, tokenMatched: false, device: null, owner: null, tagged: false, soleLogin: null, dnsName: null, tailnetIp: null, serveOnly: false, tokenConfigured: false, gated: false };
@@ -7,6 +7,13 @@ const NODE = "pc.tail5cc90b.ts.net";
 const IP = "100.64.0.7";
 const node = { host: NODE, dnsName: NODE, tailnetIp: IP } as const;
 const via = (input: Partial<AccessInput>) => { const a = decideAccess({ ...base, ...input }); return a.level === "full" ? a.via : `refused:${a.reason}`; };
+
+it("keeps bounded direct delegation distinct from owner and local authority", () => {
+  expect(ownerAccess({ level: "full", via: "direct", role: "drive" })).toBe(false);
+  expect(ownerAccess({ level: "full", via: "direct", role: "watch" })).toBe(false);
+  expect(ownerAccess({ level: "full", via: "local", role: "drive" })).toBe(true);
+  expect(ownerAccess({ level: "full", via: "token", role: "drive" })).toBe(true);
+});
 
 describe("decideAccess", () => {
   it("uses the authenticated relay principal before every socket credential", () => {

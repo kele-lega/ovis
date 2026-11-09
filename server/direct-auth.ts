@@ -1,3 +1,7 @@
+import { PANE_TOKEN_NAME, type AgentRowTokens, type PaneTokenSpec } from "../shared/pane-tokens.ts";
+import type { SessionSnapshot } from "../shared/protocol.ts";
+import { snapshotWithoutHiddenTokens } from "./herdr-sidebar.ts";
+import { RECEIPT_RESUME_ID } from "../shared/receipt-resume.ts";
 import { createPublicKey, generateKeyPairSync, randomUUID, sign, verify, type KeyObject } from "node:crypto";
 import { DIRECT_HTTP_TTL_MS, DIRECT_TICKET_TTL_MS, DIRECT_TRUST_TTL_MS, normalizeDirectOrigin, type DirectClaims, type DirectKind, type DirectTrust } from "../shared/direct.ts";
 
@@ -18,13 +22,37 @@ function canonicalOrigin(value: unknown): value is string {
 }
 
 function validClaims(value: unknown, now: number): value is DirectClaims {
-  if (!record(value) || !exactKeys(value, CLAIM_KEYS)) return false;
+  if (!record(value) || !exactKeys(value, value.receipt_resume_id === undefined ? CLAIM_KEYS : [...CLAIM_KEYS, "receipt_resume_id"])) return false;
+  if (value.receipt_resume_id !== undefined && (value.kind !== "ws" || value.role !== "interact" || typeof value.receipt_resume_id !== "string" || !RECEIPT_RESUME_ID.test(value.receipt_resume_id))) return false;
   return value.v === 1 && text(value.iss) && text(value.aud) && text(value.sub) && text(value.jti)
     && canonicalOrigin(value.origin) && (value.role === "interact" || value.role === "observe")
     && (value.kind === "ws" || value.kind === "http")
     && typeof value.iat === "number" && Number.isSafeInteger(value.iat) && value.iat >= 0 && value.iat <= now
     && typeof value.exp === "number" && Number.isSafeInteger(value.exp) && value.exp > now
     && value.exp > value.iat && value.exp - value.iat <= ttl(value.kind);
+}
+
+/** Bounded normalized policy, never arbitrary request fields or silently truncated rules. */
+export function directSnapshotPolicy(value: unknown): AgentRowTokens | null {
+  if (value === null) return null;
+  if (!record(value) || !exactKeys(value, ["rows", "by_agent"]) || !record(value.by_agent) || JSON.stringify(value).length > 64 * 1024) throw new Error("Invalid direct snapshot policy");
+  let specs = 0, rules = 0;
+  const rows = (input: unknown): input is PaneTokenSpec[] => Array.isArray(input) && input.every((spec: unknown) => {
+    if (++specs > 512 || !record(spec) || !text(spec.name, 32) || !PANE_TOKEN_NAME.test(spec.name)
+      || !exactKeys(spec, spec.rules === undefined ? ["name"] : ["name", "rules"])) return false;
+    return spec.rules === undefined || Array.isArray(spec.rules) && spec.rules.every((rule: unknown) => {
+      if (++rules > 2048 || !record(rule)) return false;
+      const conditions = ["equals", "contains", "starts_with", "gt", "lt"].filter((key) => Object.hasOwn(rule, key));
+      if (conditions.length !== 1) return false;
+      const key = conditions[0]!, numeric = key === "gt" || key === "lt";
+      return Object.keys(rule).every((name) => name === key || name === "hide" || !numeric && name === "ignore_case")
+        && (numeric ? typeof rule[key] === "number" && Number.isFinite(rule[key]) : typeof rule[key] === "string" && rule[key].length <= 4096)
+        && (rule.hide === undefined || typeof rule.hide === "boolean") && (rule.ignore_case === undefined || typeof rule.ignore_case === "boolean");
+    });
+  });
+  if (!(value.rows === null || rows(value.rows)) || Object.keys(value.by_agent).length > 128
+    || !Object.entries(value.by_agent).every(([agent, entries]) => /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(agent) && rows(entries))) throw new Error("Invalid direct snapshot policy");
+  return JSON.parse(JSON.stringify(value)) as AgentRowTokens;
 }
 
 /** Ephemeral process identity: no persistent private key and no negotiable signing algorithm. */
@@ -39,15 +67,16 @@ export class DirectSigner {
     this.publicKey = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
   }
 
-  trust(audience: string, origins: readonly string[], now = Date.now()): DirectTrust {
+  trust(audience: string, origins: readonly string[], now = Date.now(), snapshotPolicy?: AgentRowTokens | null): DirectTrust {
     if (!text(audience) || !Array.isArray(origins) || origins.length === 0 || origins.length > MAX_POLICIES
       || !Number.isSafeInteger(now) || now < 0 || !Number.isSafeInteger(now + DIRECT_TRUST_TTL_MS)) throw new Error("Invalid direct trust");
-    return { issuer: this.issuer, audience, public_key: this.publicKey, origins: [...new Set(Array.from(origins, normalizeDirectOrigin))], expires_at: now + DIRECT_TRUST_TTL_MS };
+    return { issuer: this.issuer, audience, public_key: this.publicKey, origins: [...new Set(Array.from(origins, normalizeDirectOrigin))], expires_at: now + DIRECT_TRUST_TTL_MS, ...(snapshotPolicy === undefined ? {} : { snapshot_policy: directSnapshotPolicy(snapshotPolicy) }) };
   }
 
-  issue(fields: Pick<DirectClaims, "aud" | "sub" | "origin" | "role" | "kind">, now = Date.now()): { token: string; expires_at: number } {
+  issue(fields: Pick<DirectClaims, "aud" | "sub" | "origin" | "role" | "kind" | "receipt_resume_id">, now = Date.now()): { token: string; expires_at: number } {
     const claims: DirectClaims = { v: 1, iss: this.issuer, aud: fields.aud, sub: fields.sub, origin: normalizeDirectOrigin(fields.origin),
-      role: fields.role, kind: fields.kind, iat: now, exp: now + ttl(fields.kind), jti: randomUUID() };
+      role: fields.role, kind: fields.kind, iat: now, exp: now + ttl(fields.kind), jti: randomUUID(),
+      ...(fields.receipt_resume_id === undefined ? {} : { receipt_resume_id: fields.receipt_resume_id }) };
     if (!Number.isSafeInteger(now) || !validClaims(claims, now)) throw new Error("Invalid direct claims");
     const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
     const signature = sign(null, Buffer.from(payload), this.privateKey).toString("base64url");
@@ -55,7 +84,7 @@ export class DirectSigner {
   }
 }
 
-type Policy = { issuer: string; audience: string; publicKey: string; key: KeyObject; origins: Set<string>; expiresAt: number };
+type Policy = { snapshotPolicy: AgentRowTokens | null; issuer: string; audience: string; publicKey: string; key: KeyObject; origins: Set<string>; expiresAt: number };
 type Revocation = { issuer: string; expiresAt: number };
 type Watcher = { claims: DirectClaims; publicKey: string; close: () => void };
 
@@ -74,11 +103,12 @@ export class DirectAuthority {
   register(value: unknown): void {
     this.prune();
     const now = this.now();
-    if (this.stopped || !record(value) || !exactKeys(value, TRUST_KEYS) || !text(value.issuer) || !text(value.audience)
+    if (this.stopped || !record(value) || !exactKeys(value, value.snapshot_policy === undefined ? TRUST_KEYS : [...TRUST_KEYS, "snapshot_policy"]) || !text(value.issuer) || !text(value.audience)
       || typeof value.public_key !== "string" || value.public_key.length === 0 || value.public_key.length > 1024
       || !Array.isArray(value.origins) || value.origins.length === 0 || value.origins.length > MAX_POLICIES
       || typeof value.expires_at !== "number" || !Number.isSafeInteger(value.expires_at)
       || value.expires_at <= now || value.expires_at > now + DIRECT_TRUST_TTL_MS) throw new Error("Invalid direct trust");
+    const snapshotPolicy = directSnapshotPolicy(value.snapshot_policy ?? null);
     const origins = new Set(Array.from(value.origins, normalizeDirectOrigin));
     let key: KeyObject;
     try {
@@ -91,7 +121,12 @@ export class DirectAuthority {
     // One issuer is one process identity, even when it vouches for more than one audience.
     const publicKey = key.export({ type: "spki", format: "pem" }).toString();
     if ([...this.policies.values()].some((policy) => policy.issuer === value.issuer && policy.publicKey !== publicKey)) throw new Error("Direct issuer key changed");
-    this.policies.set(id, { issuer: value.issuer, audience: value.audience, publicKey, key, origins, expiresAt: value.expires_at });
+    const previous = this.policies.get(id);
+    const policyChanged = previous !== undefined && JSON.stringify(previous.snapshotPolicy) !== JSON.stringify(snapshotPolicy);
+    this.policies.set(id, { snapshotPolicy, issuer: value.issuer, audience: value.audience, publicKey, key, origins, expiresAt: value.expires_at });
+    if (policyChanged) for (const watcher of [...this.watchers]) {
+      if (watcher.claims.iss === value.issuer && watcher.claims.aud === value.audience) this.close(watcher);
+    }
     // Refreshing any audience must not undo a device revocation for this issuer.
     for (const revoked of this.revoked.values()) if (revoked.issuer === value.issuer) revoked.expiresAt = Math.max(revoked.expiresAt, value.expires_at);
     if (this.saturatedUntil > now) this.saturatedUntil = Math.max(this.saturatedUntil, value.expires_at);
@@ -158,6 +193,14 @@ export class DirectAuthority {
     const watcher: Watcher = { claims: { ...claims }, publicKey: policy.publicKey, close };
     this.watchers.add(watcher);
     return () => { this.watchers.delete(watcher); };
+  }
+
+  /** Applied at delivery time, so an in-flight HTTP read follows the newest trust policy. */
+  snapshot<S extends SessionSnapshot>(claims: DirectClaims, snapshot: S): S {
+    this.prune();
+    const policy = this.policyFor(claims);
+    if (!policy) throw new Error("Direct access revoked");
+    return snapshotWithoutHiddenTokens(policy.snapshotPolicy, snapshot);
   }
 
   allowedOrigin(origin: string | null): boolean {

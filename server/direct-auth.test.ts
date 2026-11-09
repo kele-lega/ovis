@@ -2,6 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { DIRECT_HTTP_TTL_MS, DIRECT_TICKET_TTL_MS, DIRECT_TRUST_TTL_MS, directApiPath, normalizeDirectOrigin, type DirectClaims } from "../shared/direct.ts";
 import { DirectAuthority, DirectSigner } from "./direct-auth.ts";
+import type { AgentRowTokens } from "../shared/pane-tokens.ts";
+import type { SessionSnapshot } from "../shared/protocol.ts";
 
 const ORIGIN = "https://broker.example";
 const fields = { aud: "pc-one", sub: "device-one", origin: ORIGIN, role: "interact", kind: "ws" } as const;
@@ -154,6 +156,57 @@ describe("direct credentials", () => {
       for (let i = 1; i < 128; i++) f.authority.register(f.signer.trust(`pc-${i}`, [ORIGIN], f.now()));
       expect(() => f.authority.register(f.signer.trust("overflow", [ORIGIN], f.now()))).toThrow();
       expect(f.authority.verify(f.signer.issue(fields, f.now()).token, "ws", ORIGIN)).not.toBeNull();
+    } finally { f.authority.stop(); }
+  });
+
+  it("binds receipt resume scope only to interacting WS grants", () => {
+    const f = fixture();
+    const receipt = crypto.randomUUID();
+    try {
+      expect(f.authority.verify(f.signer.issue({ ...fields, receipt_resume_id: receipt }, f.now()).token, "ws", ORIGIN)?.receipt_resume_id).toBe(receipt);
+      for (const patch of [{ kind: "http" as const }, { role: "observe" as const }, { receipt_resume_id: "raw-browser-value" }]) {
+        expect(() => f.signer.issue({ ...fields, receipt_resume_id: receipt, ...patch }, f.now())).toThrow();
+      }
+    } finally { f.authority.stop(); }
+  });
+
+  it("applies the current trusted redaction at delivery and closes live connections on policy changes", () => {
+    const f = fixture();
+    const hidden: AgentRowTokens = { rows: [{ name: "secret", rules: [{ contains: "", hide: true }] }], by_agent: {} };
+    const snapshot = { panes: [{ pane_id: "p", tokens: { secret: "private", shown: "safe" } }], agents: [] } as unknown as SessionSnapshot;
+    try {
+      const claims = f.authority.verify(f.signer.issue(fields, f.now()).token, "ws", ORIGIN)!;
+      let closed = 0;
+      f.authority.onRevoke(claims, () => { closed++; });
+      expect(f.authority.snapshot(claims, snapshot)).toBe(snapshot);
+      f.authority.register(f.signer.trust(fields.aud, [ORIGIN], f.now(), hidden));
+      expect(closed).toBe(1);
+      expect(f.authority.snapshot(claims, snapshot).panes[0]!.tokens).toEqual({ shown: "safe" });
+      expect(snapshot.panes[0]!.tokens).toEqual({ secret: "private", shown: "safe" });
+      f.authority.register(f.signer.trust(fields.aud, [ORIGIN], f.now(), hidden));
+      expect(closed).toBe(1);
+      f.advance(DIRECT_TRUST_TTL_MS);
+      expect(() => f.authority.snapshot(claims, snapshot)).toThrow("revoked");
+    } finally { f.authority.stop(); }
+  });
+
+  it("rejects malformed or oversized redaction without replacing good trust", () => {
+    const f = fixture();
+    const hidden: AgentRowTokens = { rows: [{ name: "secret", rules: [{ contains: "", hide: true }] }], by_agent: {} };
+    try {
+      f.authority.register(f.signer.trust(fields.aud, [ORIGIN], f.now(), hidden));
+      const trust = f.signer.trust(fields.aud, [ORIGIN], f.now());
+      for (const snapshot_policy of [
+        {}, { ...hidden, extra: true }, { rows: [{ name: "bad token" }], by_agent: {} },
+        { rows: [{ name: "secret", rules: [{ contains: "", equals: "private", hide: true }] }], by_agent: {} },
+        { rows: Array.from({ length: 513 }, () => ({ name: "secret" })), by_agent: {} },
+        { rows: [{ name: "secret", rules: Array.from({ length: 2049 }, () => ({ gt: 1 })) }], by_agent: {} },
+        { rows: [{ name: "secret", rules: [{ contains: "x".repeat(4097), hide: true }] }], by_agent: {} },
+        { rows: [{ name: "secret", rules: Array.from({ length: 20 }, () => ({ contains: "x".repeat(4096), hide: true })) }], by_agent: {} },
+      ]) expect(() => f.authority.register({ ...trust, snapshot_policy })).toThrow();
+      const claims = f.authority.verify(f.signer.issue(fields, f.now()).token, "ws", ORIGIN)!;
+      const snapshot = { panes: [{ pane_id: "p", tokens: { secret: "private" } }], agents: [] } as unknown as SessionSnapshot;
+      expect(f.authority.snapshot(claims, snapshot).panes[0]!.tokens).toEqual({});
     } finally { f.authority.stop(); }
   });
 

@@ -1,15 +1,25 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as herdr from "./herdr/client.ts";
+import * as collector from "./collector.ts";
+import type { SessionSnapshot } from "../shared/protocol.ts";
 import { createServer, type ServerInstance } from "./index.ts";
+import { snapshotWithoutHiddenTokens } from "./herdr-sidebar.ts";
+import type { AgentRowTokens } from "../shared/pane-tokens.ts";
 import { DirectSigner } from "./direct-auth.ts";
 import { DIRECT_PROTOCOL, DIRECT_TICKET_PREFIX } from "../shared/direct.ts";
 import { contentSecurityPolicy } from "./static.ts";
 
 const root = mkdtempSync(join(tmpdir(), "ovis-direct-contract-"));
 const page = "https://ovis.example.test";
+const hide = (name: string): AgentRowTokens => ({ rows: [{ name, rules: [{ contains: "", hide: true }] }], by_agent: {} });
+const fixtureSnapshot = { protocol: 22, version: "fixture", workspaces: [], tabs: [], layouts: [], panes: [{ pane_id: "fictional", terminal_id: "fictional-term", workspace_id: "w", tab_id: "t", cwd: root, agent_status: "idle", focused: false, revision: 0, agent: null, tokens: { secretA: "from-A", secretB: "from-B", shown: "safe" } }], agents: [] } as unknown as SessionSnapshot;
 const signer = new DirectSigner();
+let snapshotSpy: ReturnType<typeof spyOn>;
+let processSpy: ReturnType<typeof spyOn>;
+let collectorSpy: ReturnType<typeof spyOn>;
 let app: ServerInstance;
 const control = (method: string, body: unknown, authorized = true) => fetch(`http://127.0.0.1:${app.port}/api/direct/trust`, {
   method, headers: { "content-type": "application/json", ...(authorized ? { authorization: "Bearer fictional-bridge-secret" } : {}) }, body: JSON.stringify(body),
@@ -20,12 +30,17 @@ const direct = (path: string, token: string, origin = page, init: RequestInit = 
 });
 
 beforeAll(async () => {
-  app = createServer({ port: 0, hostname: "127.0.0.1", token: "fictional-bridge-secret", stateDir: root, machines: false,
+  snapshotSpy = spyOn(herdr, "sessionSnapshot").mockImplementation(async () => structuredClone(fixtureSnapshot));
+  processSpy = spyOn(herdr, "paneProcessInfo").mockResolvedValue(undefined);
+  collectorSpy = spyOn(collector, "startStatusCollector").mockReturnValue({ ready: Promise.resolve(), structureReady: Promise.resolve(), focusReady: Promise.resolve(), trackPane() {}, stop() {} });
+  const configPath = join(root, "herdr.toml");
+  writeFileSync(configPath, '[ui.sidebar.agents]\nrows = [[{ token = "$secretB", rules = [{ contains = "", hide = true }] }]]\n');
+  app = createServer({ herdrConfigPath: configPath, bridgeOnly: true, sidecar: false, terminalAttach: false, tailscaleOwner: null, port: 0, hostname: "127.0.0.1", token: "fictional-bridge-secret", stateDir: root, machines: false,
     direct: { endpoints: {}, origins: [] }, directListener: { hostname: "127.0.0.1", port: 0 } });
-  await app.statusReady;
+  // This ingress contract uses a stood-in snapshot, never the user's daemon or event stream.
   expect((await control("POST", signer.trust("fictional-machine", [page]))).status).toBe(204);
 });
-afterAll(() => { app?.stop(); rmSync(root, { recursive: true, force: true }); });
+afterAll(() => { app?.stop(); snapshotSpy?.mockRestore(); processSpy?.mockRestore(); collectorSpy?.mockRestore(); rmSync(root, { recursive: true, force: true }); });
 
 describe("ticket-only direct ingress", () => {
   it("requires bridge credentials for trust and never grants normal cookie/loopback access", async () => {
@@ -49,6 +64,48 @@ describe("ticket-only direct ingress", () => {
     expect((await response.json()).snapshot).toBeDefined();
     expect((await direct("/api/session", token, "https://untrusted.example.test")).status).toBe(401);
     expect((await direct("/api/session", token)).status).toBe(200);
+  });
+
+  it("intersects A and B snapshot policies over HTTP and WS even on a bridge-only core", async () => {
+    const redactor = new DirectSigner();
+    const fields = { aud: "redacted-machine", sub: "redacted-device", origin: page, role: "interact" as const };
+    expect((await control("POST", redactor.trust(fields.aud, [page], Date.now(), hide("secretA")))).status).toBe(204);
+    const http = redactor.issue({ ...fields, kind: "http" }).token;
+    const expected = snapshotWithoutHiddenTokens(hide("secretA"), snapshotWithoutHiddenTokens(hide("secretB"), fixtureSnapshot));
+    const response = await direct("/api/session", http);
+    expect(response.status).toBe(200);
+    expect((await response.json()).snapshot).toMatchObject(expected);
+    const raw = await fetch(`http://127.0.0.1:${app.port}/api/session`, { headers: { authorization: "Bearer fictional-bridge-secret" } });
+    expect((await raw.json()).snapshot).toMatchObject(fixtureSnapshot);
+    const RuntimeSocket = WebSocket as unknown as new (url: string, options: { protocols: string[]; headers: Record<string, string> }) => WebSocket;
+    const ticket = redactor.issue({ ...fields, kind: "ws" }).token;
+    const ws = new RuntimeSocket(`ws://127.0.0.1:${app.directPort}/ws`, { protocols: [DIRECT_PROTOCOL, `${DIRECT_TICKET_PREFIX}${ticket}`], headers: { origin: page } });
+    const closed = new Promise<number>((resolve) => ws.addEventListener("close", (event) => resolve(event.code)));
+    try {
+      const snapshot = await new Promise<SessionSnapshot>((resolve, reject) => {
+        ws.addEventListener("error", () => reject(new Error("direct WebSocket failed")));
+        ws.addEventListener("message", (event) => { const frame = JSON.parse(String(event.data)); if (frame.type === "snapshot") resolve(frame.snapshot); });
+      });
+      expect(snapshot).toMatchObject(expected);
+      expect(snapshot.panes[0]!.tokens).toEqual({ shown: "safe" });
+      expect((await control("POST", redactor.trust(fields.aud, [page], Date.now(), hide("shown")))).status).toBe(204);
+      expect(await closed).toBe(1008);
+      const changed = await direct("/api/session", http);
+      expect((await changed.json()).snapshot.panes[0].tokens).toEqual({ secretA: "from-A" });
+      expect((await control("DELETE", { issuer: redactor.issuer })).status).toBe(204);
+      expect((await direct("/api/session", http)).status).toBe(401);
+    } finally { ws.close(); }
+  });
+
+  it("permits authenticated direct CORS file reads without weakening ordinary cross-site reads", async () => {
+    const path = join(root, "cors-file.txt");
+    writeFileSync(path, "fictional file");
+    const headers = { "sec-fetch-site": "cross-site", "sec-fetch-mode": "cors" };
+    const response = await direct(`/api/fs/stat?path=${encodeURIComponent(path)}`, credential("http"), page, { headers });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("access-control-allow-origin")).toBe(page);
+    const ordinary = await fetch(`http://127.0.0.1:${app.port}/api/fs/stat?path=${encodeURIComponent(path)}`, { headers: { ...headers, authorization: "Bearer fictional-bridge-secret" } });
+    expect(ordinary.status).toBe(403);
   });
 
   it("keeps observing credentials read-only on HTTP and WebSocket, and revokes live connections", async () => {

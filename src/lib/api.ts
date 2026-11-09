@@ -1,3 +1,4 @@
+import { clearDirectTransports } from "./directTransport.ts";
 import { apiFetch } from "./api-request-id.ts";
 import type { PreferencesChange, SharedPreferences } from "../../shared/preferences.ts";
 import type { AlertWebhookSave, AlertWebhookView } from "../../shared/alert-webhook.ts";
@@ -966,6 +967,7 @@ export async function revokeAllDevices(): Promise<DevicesRevokedAll> {
 
 /** DELETE /api/auth: clears the session and device cookies, so the next health check reports the gate again. */
 export async function signOut(): Promise<void> {
+  clearDirectTransports();
   const response = await apiFetch("/api/auth", { method: "DELETE" });
   if (!response.ok) throw await errorFrom("/api/auth", response);
 }

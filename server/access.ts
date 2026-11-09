@@ -254,7 +254,7 @@ export function portalLogin(input: Pick<AccessInput, "portal">): PortalLogin | n
  * PCs). Never a visitor of an open install (nothing paired), a Portal visitor, or a device that only watches.
  */
 export function ownerAccess(access: Access): boolean {
-  return access.level === "full" && access.role === "drive" && access.via !== "open" && access.via !== "portal";
+  return access.level === "full" && access.role === "drive" && access.via !== "open" && access.via !== "portal" && access.via !== "direct";
 }
 
 export function decideAccess(input: AccessInput): Access {

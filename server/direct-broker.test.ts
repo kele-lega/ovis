@@ -2,6 +2,8 @@ import { expect, it, spyOn } from "bun:test";
 import { DirectAuthority } from "./direct-auth.ts";
 import { DirectBroker, directConfig } from "./direct-broker.ts";
 import type { MachineManager } from "./machines.ts";
+import type { AgentRowTokens } from "../shared/pane-tokens.ts";
+import type { SessionSnapshot } from "../shared/protocol.ts";
 
 it("issues machine-scoped credentials over the authenticated control plane and revokes them on disconnect", async () => {
   const authority = new DirectAuthority();
@@ -15,10 +17,12 @@ it("issues machine-scoped credentials over the authenticated control plane and r
   } });
   const endpoint = { url: `http://127.0.0.1:${server.port}`, token: "fictional-control-secret" };
   let disconnect = () => {};
-  const manager = { endpoint: () => endpoint, trackTerminal: (_id: string, close: () => void) => { disconnect = close; return () => {}; } } as unknown as MachineManager;
+  const manager = { list: () => [{ id: "machine-b", kind: "ssh", target: { destination: "fictional" } }], endpoint: () => endpoint, trackTerminal: (_id: string, close: () => void) => { disconnect = close; return () => {}; } } as unknown as MachineManager;
   const page = "https://ovis.example.test";
   const broker = new DirectBroker(manager, directConfig('{"machine-b":"https://192.168.1.20:7443"}', page));
   try {
+    // Arbitrary logout identities must not consume the bounded grant identity table.
+    for (let id = 0; id < 5000; id++) broker.revoke(`never-granted-${id}`);
     expect(await broker.issue("unknown", page, "device", false)).toBeNull();
     expect(await broker.issue("machine-b", "https://untrusted.example.test", "device", false)).toBeNull();
     const credential = (await broker.issue("machine-b", page, "device", true))!;
@@ -57,7 +61,7 @@ it("backdates trust and both credentials across independent bridge clocks withou
     } catch { return new Response(null, { status: 400 }); }
   } });
   const endpoint = { url: `http://127.0.0.1:${server.port}`, token: "fictional-control-secret" };
-  const manager = { endpoint: () => endpoint, trackTerminal: () => () => {} } as unknown as MachineManager;
+  const manager = { list: () => [{ id: "machine-b", kind: "ssh", target: { destination: "fictional" } }], endpoint: () => endpoint, trackTerminal: () => () => {} } as unknown as MachineManager;
   const broker = new DirectBroker(manager, directConfig('{"machine-b":"https://bridge.example.test:7443"}', page));
   try {
     for (const offset of [-250, -8, 0, 250]) {
@@ -87,6 +91,57 @@ it("backdates trust and both credentials across independent bridge clocks withou
     bridgeNow = signerNow + 85_000;
     await expect(broker.issue("machine-b", page, "device", false)).rejects.toThrow("Direct bridge control unavailable");
   } finally { broker.stop(); authority.stop(); server.stop(true); clock.mockRestore(); }
+});
+
+it("refuses relay, hc, local and incomplete SSH targets before reading their endpoint tokens", async () => {
+  let machine: unknown;
+  let endpoints = 0;
+  const manager = { list: () => [machine], endpoint: () => { endpoints++; throw new Error("must not use adapter credentials"); } } as unknown as MachineManager;
+  const page = "https://ovis.example.test";
+  const broker = new DirectBroker(manager, { endpoints: { "machine-b": "https://bridge.example.test" }, origins: [page] });
+  try {
+    for (const kind of ["relay", "hc", "local", "ssh"]) {
+      machine = { id: "machine-b", kind, ...(kind === "ssh" ? {} : { target: { destination: "not-ssh" } }) };
+      expect(await broker.issue("machine-b", page, "device", false)).toBeNull();
+    }
+    expect(endpoints).toBe(0);
+  } finally { broker.stop(); }
+});
+
+it("drops changed policy leases, regrants under the new policy, and fails closed on policy overflow", async () => {
+  const authority = new DirectAuthority();
+  const page = "https://ovis.example.test";
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(request) {
+    const body = await request.json() as Record<string, unknown>;
+    if (request.method === "POST") authority.register(body);
+    if (request.method === "DELETE") authority.remove(body.issuer as string);
+    return new Response(null, { status: 204 });
+  } });
+  const endpoint = { url: `http://127.0.0.1:${server.port}`, token: "fictional-secret" };
+  const manager = { list: () => [{ id: "machine-b", kind: "ssh", target: {} }], endpoint: () => endpoint, trackTerminal: () => () => {} } as unknown as MachineManager;
+  let policy: AgentRowTokens | null = null;
+  let changed = () => {};
+  let changeOnRead = false;
+  const source = { get() { if (changeOnRead) { changeOnRead = false; changed(); } return policy; }, subscribe(listener: () => void) { changed = listener; return () => { changed = () => {}; }; } };
+  const broker = new DirectBroker(manager, { endpoints: { "machine-b": "https://bridge.example.test" }, origins: [page] }, source);
+  const snapshot = { panes: [{ pane_id: "p", tokens: { private: "secret", shown: "safe" } }], agents: [] } as unknown as SessionSnapshot;
+  try {
+    const first = (await broker.issue("machine-b", page, "device", false))!;
+    const claims = authority.verify(first.ticket, "ws", page)!;
+    const closed = new Promise<void>((resolve) => authority.onRevoke(claims, resolve));
+    policy = { rows: [{ name: "private", rules: [{ contains: "", hide: true }] }], by_agent: {} };
+    changed();
+    await closed;
+    expect(authority.verify(first.access_token, "http", page)).toBeNull();
+    const next = (await broker.issue("machine-b", page, "device", false))!;
+    const nextClaims = authority.verify(next.ticket, "ws", page)!;
+    expect(authority.snapshot(nextClaims, snapshot).panes[0]!.tokens).toEqual({ shown: "safe" });
+    changeOnRead = true;
+    await expect(broker.issue("machine-b", page, "device", false)).rejects.toThrow("policy changed");
+    policy = { rows: Array.from({ length: 513 }, () => ({ name: "private" })), by_agent: {} };
+    changed();
+    await expect(broker.issue("machine-b", page, "device", false)).rejects.toThrow("snapshot policy");
+  } finally { broker.stop(); authority.stop(); server.stop(true); }
 });
 
 it("does not turn an SSH alias or arbitrary HTTP LAN URL into a browser endpoint", () => {

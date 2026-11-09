@@ -8,6 +8,7 @@ import * as coreAttach from "../herdr-core/attach-session.ts";
 import type { CoreAttachOptions } from "../herdr-core/attach-session.ts";
 import * as herdr from "../herdr/client.ts";
 import type { ServerMessage } from "../../shared/protocol.ts";
+import type { DirectClaims } from "../../shared/direct.ts";
 
 let attachment: PaneAttachment;
 beforeEach(() => {
@@ -19,10 +20,10 @@ const { createTerminalRegistry } = await import("./terminals.ts");
 
 afterEach(() => mock.restore());
 
-async function join({ readOnly = false, ready, recovering, times = 1, receiptResumeId, verifyResume, replayPrefix, retained = "retained screen" }: { readOnly?: boolean; ready: boolean; recovering?: boolean; times?: number; receiptResumeId?: string; verifyResume?: (id: string | undefined) => void; replayPrefix?: string; retained?: string }): Promise<ServerMessage[]> {
+async function join({ readOnly = false, ready, recovering, times = 1, receiptResumeId, directClaims, verifyResume, replayPrefix, retained = "retained screen" }: { readOnly?: boolean; ready: boolean; recovering?: boolean; times?: number; receiptResumeId?: string; directClaims?: DirectClaims; verifyResume?: (id: string | undefined) => void; replayPrefix?: string; retained?: string }): Promise<ServerMessage[]> {
   const frames: ServerMessage[] = [];
   const client = {
-    data: connectionData({ deviceId: undefined, readOnly }), readyState: WebSocket.OPEN,
+    data: connectionData({ deviceId: undefined, readOnly, directClaims }), readyState: WebSocket.OPEN,
     getBufferedAmount: () => 0, send: (text: string) => { frames.push(JSON.parse(text)); return text.length; },
     close() {},
   };
@@ -99,6 +100,17 @@ it("retains only a bounded opaque resume ID on an attach claim", async () => {
     "00000000-0000-0000-0000-000000000000", "12345678-1234-1234-8234-123456789abc", valid.toUpperCase()]) {
     await join({ ready: true, receiptResumeId: value, verifyResume: (id) => expect(id).toBe(value === valid ? valid : undefined) });
   }
+});
+
+it("replaces browser direct resume IDs with the signed scope, and never falls back to raw IDs", async () => {
+  const scoped = crypto.randomUUID(), raw = crypto.randomUUID();
+  const claims: DirectClaims = { v: 1, iss: "issuer", aud: "ssh-pc", sub: "device:0", origin: "https://page.test", role: "interact", kind: "ws", iat: 1, exp: 2, jti: "ticket", receipt_resume_id: scoped };
+  await join({ ready: true, receiptResumeId: raw, directClaims: claims, verifyResume: (id) => expect(id).toBe(scoped) });
+  await join({ ready: true, receiptResumeId: "invalid", directClaims: claims, verifyResume: (id) => expect(id).toBe(scoped) });
+  for (const receipt_resume_id of [undefined, "invalid"]) {
+    await join({ ready: true, receiptResumeId: raw, directClaims: { ...claims, receipt_resume_id }, verifyResume: (id) => expect(id).toBeUndefined() });
+  }
+  await join({ ready: true, readOnly: true, receiptResumeId: raw, directClaims: { ...claims, role: "observe" }, verifyResume: (id) => expect(id).toBeUndefined() });
 });
 
 for (const readOnly of [false, true]) for (const ready of [false, true]) {

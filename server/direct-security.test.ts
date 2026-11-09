@@ -11,6 +11,7 @@ import { directSubject } from "./direct-broker.ts";
 import { DeviceStore } from "./devices.ts";
 import { createServer, type ServerInstance } from "./index.ts";
 import { MachineManager } from "./machines.ts";
+import { receiptPrincipal } from "./machine-relay.ts";
 
 const TOKEN = "fictional-direct-security-secret";
 const PAGE = "https://ovis.example.test";
@@ -117,6 +118,8 @@ function revocationFixture(options: { token?: string; tailscaleOwner?: string | 
   } });
   cleanups.push(() => control.stop(true));
   const endpoint = { url: `http://127.0.0.1:${control.port}`, token: TOKEN };
+  const listSpy = spyOn(MachineManager.prototype, "list").mockReturnValue([{ id: MACHINE, kind: "ssh", target: { destination: "fictional" } }] as ReturnType<MachineManager["list"]>);
+  cleanups.push(() => listSpy.mockRestore());
   const endpointSpy = spyOn(MachineManager.prototype, "endpoint").mockImplementation((id) => id === MACHINE ? endpoint : undefined);
   cleanups.push(() => endpointSpy.mockRestore());
   const stateDir = root();
@@ -126,12 +129,12 @@ function revocationFixture(options: { token?: string; tailscaleOwner?: string | 
   const connection = app({ machines: true, stateDir, ...options, direct: {
     endpoints: { [MACHINE]: `http://127.0.0.1:${bridge.directPort}` }, origins: [PAGE],
   } });
-  const request = (path: string, headers: Record<string, string>, method = "POST") => fetch(`http://127.0.0.1:${connection.port}${path}`, { method, headers: {
+  const request = (path: string, headers: Record<string, string>, method = "POST", body?: unknown) => fetch(`http://127.0.0.1:${connection.port}${path}`, { method, headers: {
     host: "ovis.example.test", origin: PAGE, "x-forwarded-proto": "https", "x-forwarded-for": "100.64.0.61",
     "x-herdr-machine": "1", ...headers,
-  } });
-  const issue = async (headers: Record<string, string>) => {
-    const response = await request(`/api/machines/${MACHINE}/direct-access`, headers);
+  }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  const issue = async (headers: Record<string, string>, body?: unknown) => {
+    const response = await request(`/api/machines/${MACHINE}/direct-access`, headers, "POST", body);
     expect(response.status).toBe(200);
     return await response.json() as DirectCredentialResponse;
   };
@@ -159,7 +162,9 @@ function revocationFixture(options: { token?: string; tailscaleOwner?: string | 
     await opened;
     return { ws, closed };
   };
-  return { connection, pairing, request, issue, claims, expectPatch, direct, socket, holdTrust() {
+  return { connection, pairing, request, issue, claims, expectPatch, direct, socket, setRole(role: "drive" | "watch") {
+    return connection.context.services.devices.update(pairing.device.id, { role });
+  }, holdTrust() {
     const pending = { started: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() };
     hold = pending;
     cleanups.push(() => pending.release.resolve());
@@ -259,6 +264,60 @@ describe("stable authenticated direct revocation identities", () => {
     held.release.resolve();
     expect((await issuing).status).toBe(503);
     expect((await f.request(`/api/machines/${MACHINE}/direct-access`, { cookie: `ovis_device=${f.pairing.token}` })).status).toBe(401);
+  });
+
+  it("uses the relay's principal + machine + browser receipt scope in signed grants only", async () => {
+    const f = revocationFixture();
+    f.setRole("drive");
+    const browser = crypto.randomUUID(), otherBrowser = crypto.randomUUID();
+    const device = { cookie: `ovis_device=${f.pairing.token}` };
+    const granted = await f.issue(device, { receipt_resume_id: browser });
+    const decode = (token: string) => JSON.parse(Buffer.from(token.split(".")[0]!, "base64url").toString());
+    const ids = f.connection.context.services.relayReceiptIds;
+    const principal = receiptPrincipal({ level: "full", via: "device", role: "drive", device: { ...f.pairing.device, role: "drive" } });
+    const scope = ids.scope(MACHINE, principal, browser);
+    expect(decode(granted.ticket).receipt_resume_id).toBe(scope);
+    expect(scope).not.toBe(browser);
+    expect(decode(granted.access_token).receipt_resume_id).toBeUndefined();
+    expect(decode((await f.issue(device, { receipt_resume_id: browser })).ticket).receipt_resume_id).toBe(scope);
+    expect(decode((await f.issue(device, { receipt_resume_id: otherBrowser })).ticket).receipt_resume_id).not.toBe(scope);
+    expect(ids.scope("other-machine", principal, browser)).not.toBe(scope);
+    expect(decode((await f.issue({ authorization: `Bearer ${TOKEN}` }, { receipt_resume_id: browser })).ticket).receipt_resume_id).not.toBe(scope);
+    expect(decode((await f.issue(device, { receipt_resume_id: "not-uuid" })).ticket).receipt_resume_id).toBeUndefined();
+    f.setRole("watch");
+    expect(decode((await f.issue(device, { receipt_resume_id: browser })).ticket).receipt_resume_id).toBeUndefined();
+  });
+
+  it("closes old driving grants on role changes and issues fresh bounded watch authority", async () => {
+    const f = revocationFixture();
+    f.setRole("drive");
+    const headers = { cookie: `ovis_device=${f.pairing.token}` };
+    const driving = await f.issue(headers);
+    expect((await f.direct(driving)).status).toBe(200);
+    const live = await f.socket(driving);
+    const revoked = f.expectPatch(f.claims(driving).sub);
+    f.setRole("watch");
+    await revoked;
+    expect(await live.closed).toBe(1008);
+    expect((await f.direct(driving)).status).toBe(401);
+    const watching = await f.issue(headers);
+    expect(f.claims(watching).sub).not.toBe(f.claims(driving).sub);
+    expect((await f.direct(watching)).status).toBe(403);
+    const observer = await f.socket(watching);
+    observer.ws.close();
+  });
+
+  it("rejects a role downgrade while registration is in flight, but allows a new watch grant", async () => {
+    const f = revocationFixture();
+    f.setRole("drive");
+    const headers = { cookie: `ovis_device=${f.pairing.token}` };
+    const held = f.holdTrust();
+    const issuing = f.request(`/api/machines/${MACHINE}/direct-access`, headers);
+    await held.started.promise;
+    f.setRole("watch");
+    held.release.resolve();
+    expect((await issuing).status).toBe(503);
+    expect((await f.direct(await f.issue(headers))).status).toBe(403);
   });
 
   it("revokes Serve grants using the verified login despite arbitrary cookies and invalid Bearer headers", async () => {

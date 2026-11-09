@@ -7,6 +7,7 @@
  * or shell pins the installed PWA to a build the user can no longer get rid of.
  */
 
+import { normalizeDirectOrigin } from "../shared/direct.ts";
 import type { BunFile } from "bun";
 import { existsSync } from "node:fs";
 import { join, normalize } from "node:path";
@@ -171,7 +172,11 @@ export function accountServiceOrigin(value = process.env["OVIS_ACCOUNT_SERVICE_U
   } catch { return null; }
 }
 
-export function contentSecurityPolicy(origin?: string): string {
+export function contentSecurityPolicy(origin?: string, direct: readonly string[] = []): string {
+  const connections = [...new Set(direct.flatMap((value) => {
+    const origin = normalizeDirectOrigin(value);
+    return [origin, origin.replace(/^http/, "ws")];
+  }))];
   let host: string | null = null;
   try {
     host = origin === undefined ? null : new URL(origin).hostname;
@@ -182,7 +187,7 @@ export function contentSecurityPolicy(origin?: string): string {
   const account = accountServiceOrigin();
   return CSP_DIRECTIVES.map((directive) => {
     if (directive === "frame-src 'self'" && frameable) return `frame-src 'self' http://${host}:* https://${host}:*`;
-    if (directive === "connect-src 'self'" && account !== null) return `connect-src 'self' ${account}`;
+    if (directive === "connect-src 'self'") return [directive, ...connections, ...(account === null ? [] : [account])].join(" ");
     return directive;
   }).join("; ");
 }
@@ -192,9 +197,9 @@ export function contentSecurityPolicy(origin?: string): string {
  *   logs what the policy would have blocked and the app keeps working. `report-only` is the
  *   measurement mode; anything else enforces.
  */
-function cspHeader(origin?: string): Record<string, string> {
+function cspHeader(origin?: string, direct: readonly string[] = []): Record<string, string> {
   const mode = process.env["OVIS_CSP"];
-  const policy = contentSecurityPolicy(origin);
+  const policy = contentSecurityPolicy(origin, direct);
   return mode === "report-only"
     ? { "content-security-policy-report-only": policy }
     : { "content-security-policy": policy };
@@ -285,7 +290,7 @@ function encodings(header: string | null | undefined): Array<"br" | "gzip" | "id
 }
 
 /** `origin` is what requestOrigin answers; a caller that has no request (a QA script) may leave it out. */
-export async function serveStatic(pathname: string, acceptEncoding?: string | null, origin?: string): Promise<Response> {
+export async function serveStatic(pathname: string, acceptEncoding?: string | null, origin?: string, direct: readonly string[] = []): Promise<Response> {
   const indexPath = join(DIST_DIR, "index.html");
   if (!existsSync(indexPath)) {
     return new Response(
@@ -311,7 +316,7 @@ export async function serveStatic(pathname: string, acceptEncoding?: string | nu
       }
       const kind = pathname === "/manifest.webmanifest" ? "manifest" : candidate === indexPath ? "shell" : null;
       return new Response(await body(file, kind, origin), {
-        headers: { "content-type": contentTypeFor(candidate), "cache-control": cacheControlFor(pathname), ...cspHeader(origin) },
+        headers: { "content-type": contentTypeFor(candidate), "cache-control": cacheControlFor(pathname), ...cspHeader(origin, direct) },
       });
     }
   }
@@ -321,6 +326,6 @@ export async function serveStatic(pathname: string, acceptEncoding?: string | nu
     return new Response(null, { status: 404, headers: { "cache-control": REVALIDATE, ...cspHeader() } });
   }
   return new Response(await body(Bun.file(indexPath), "shell"), {
-    headers: { "content-type": "text/html; charset=utf-8", "cache-control": REVALIDATE, ...cspHeader(origin) },
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": REVALIDATE, ...cspHeader(origin, direct) },
   });
 }

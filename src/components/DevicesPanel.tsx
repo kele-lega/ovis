@@ -55,6 +55,7 @@ export const VIA: Record<NonNullable<HealthAuth["via"]>, string> = {
   device: "This is a paired device.",
   relay: "This is a paired device, reaching the PC through the Ovis relay.",
   token: "You are in with the access token.",
+  direct: "You are in with the access token.",
   portal: "You are in through Portal's sign-in.",
   open: "This browser is in only because nothing is paired yet: from anywhere that can reach this address, so would anyone.",
 };

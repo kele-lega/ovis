@@ -5,6 +5,9 @@
  * demo's site/demo/transport.ts) still answers. Another transport is set once, at boot.
  */
 
+import { directFetch, resolveMachineSocket } from "./directTransport.ts";
+import type { SocketEndpoint } from "./ws.ts";
+
 /** What HerdrSocket needs of a WebSocket; the browser's own is one. */
 export interface WebSocketLike {
   readonly CONNECTING: 0;
@@ -37,7 +40,8 @@ export interface EventSourceLike {
 export interface Transport {
   readonly kind: "native" | "relay";
   fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
-  openSocket(url: string): WebSocketLike;
+  openSocket(url: string, protocols?: string[]): WebSocketLike;
+  resolveSocket?(url: string, signal: AbortSignal): Promise<SocketEndpoint>;
   openEventSource(url: string): EventSourceLike;
   /** The address the browser loads a server path from (an <img>, a <video>, a download link). */
   resourceUrl(path: string, signal?: AbortSignal): string | Promise<string>;
@@ -52,14 +56,15 @@ function readMachine(pathname: string): string {
   return remote ? decodeURIComponent(remote[1]!) : "local";
 }
 
-function nativeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+function trackedNativeFetch(input: RequestInfo | URL, init: RequestInit | undefined, send: Transport["fetch"]): Promise<Response> {
+  const own = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+  if (own?.aborted) return Promise.reject(own.reason ?? new DOMException("The operation was aborted", "AbortError"));
   const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
   const origin = typeof location === "undefined" ? "http://localhost" : location.origin;
   const target = new URL(input instanceof Request ? input.url : String(input), origin);
   // only this server's reads: a write is never given up for the caller (the server may have done it),
   // and another host's connections were not found dead
-  if ((method !== "GET" && method !== "HEAD") || target.origin !== origin || !target.pathname.startsWith("/api/")) return fetch(input, init);
-  const own = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+  if ((method !== "GET" && method !== "HEAD") || target.origin !== origin || !target.pathname.startsWith("/api/")) return send(input, init);
   const read = new AbortController();
   // the caller's abort keeps reaching the body after the headers came
   let signal = read.signal;
@@ -67,7 +72,11 @@ function nativeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   else if (own?.aborted) read.abort(own.reason);
   else own?.addEventListener("abort", () => read.abort(own.reason), { once: true });
   nativeReads.set(read, readMachine(target.pathname));
-  return fetch(input, { ...init, signal }).finally(() => { nativeReads.delete(read); });
+  return send(input, { ...init, signal }).finally(() => { nativeReads.delete(read); });
+}
+
+export function nativeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  return trackedNativeFetch(input, init, (input, init) => fetch(input, init));
 }
 
 /**
@@ -89,7 +98,24 @@ export function abandonNativeReads(machineId = "local"): void {
 export const nativeTransport: Transport = {
   kind: "native",
   fetch: nativeFetch,
-  openSocket: (url) => new WebSocket(url),
+  openSocket: (url, protocols) => protocols === undefined ? new WebSocket(url) : new WebSocket(url, protocols),
+  openEventSource: (url) => new EventSource(url),
+  resourceUrl: (path) => path,
+};
+
+/** Ordinary browsers only. Native relay shells retain their own authenticated carrier. */
+export const browserDirectTransport: Transport = {
+  ...nativeTransport,
+  fetch: (input, init) => input instanceof Request ? nativeFetch(input, init)
+    : trackedNativeFetch(input, init, (input, init) => directFetch(String(input), init)),
+  resolveSocket: async (url, signal) => {
+    const target = new URL(url);
+    const machine = target.searchParams.get("machine_id");
+    if (!machine || machine === "local") return { url };
+    const endpoint = await resolveMachineSocket(machine)(signal);
+    // Preserve upstream surface/liveness diagnostics and every relay query on fallback.
+    return endpoint.protocols === undefined ? { ...endpoint, url } : endpoint;
+  },
   openEventSource: (url) => new EventSource(url),
   resourceUrl: (path) => path,
 };
