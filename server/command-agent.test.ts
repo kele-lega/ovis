@@ -78,6 +78,13 @@ describe("atomic command observation", () => {
     const f = fixture(); f.deps.processInfo = async () => ({ ...running(314), foreground_processes: [{ pid: 314, name: "node", argv: ["node", `/fixture/${kind}`] }] });
     expect(await observeCommandAgent(kind, target, {}, f.deps)).toBe(314);
   });
+  it.each(["omo", "gjc"])("does not bind the first of multiple matching %s processes", async (kind) => {
+    const f = fixture();
+    f.deps.processInfo = async () => ({ ...running(), foreground_processes: [314, 315].map((pid) => ({ pid, name: "node", argv: ["node", `/fixture/${kind}`] })) });
+    expect(await observeCommandAgent(kind, target, {}, f.deps)).toBeNull();
+    expect(f.sleeps).toEqual([]);
+    expect(f.renamed).toEqual([{ paneId: target, name: kind }]);
+  });
   it("ignores wrong-pane process evidence for shell kinds", async () => {
     const f = fixture(); f.deps.processInfo = async () => ({ ...running(), pane_id: other, foreground_processes: [{ pid: 314, name: "gjc", argv: ["gjc"] }] });
     expect((await failure(observeCommandAgent("gjc", target, { timeoutMs: 500 }, f.deps))).code).toBe("agent_not_detected");

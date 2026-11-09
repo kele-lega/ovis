@@ -32,7 +32,7 @@ const created = {
   root_pane: { pane_id: target }, worktree: { path: "/fixture/checkout", branch: "fixture" }, already_open: false,
 };
 interface Rpc { id: string; method: string; params: Record<string, unknown> }
-async function daemon(capability: unknown = true, processEvidence: "single" | "ambiguous" | "failed" = "single", extraCapabilities: Record<string, unknown> = {}) {
+async function daemon(capability: unknown = true, processEvidence: "single" | "ambiguous" | "failed" = "single", extraCapabilities: Record<string, unknown> = {}, kind: string = "claude") {
   const dir = mkdtempSync(join(tmpdir(), "ovis-atomic-contract-")), path = join(dir, "herdr.sock");
   const calls: Rpc[] = [], open = new Set<Socket>();
   let failCreate: string | null = null, creates = 0;
@@ -45,10 +45,10 @@ async function daemon(capability: unknown = true, processEvidence: "single" | "a
       const answer = (result: unknown) => socket.end(`${JSON.stringify({ id: request.id, result })}\n`);
       switch (request.method) {
         case "ping": return answer({ version: "test", protocol: 1, capabilities: { ...extraCapabilities, ...(capability === undefined ? {} : { atomic_command_launch: capability }) } });
-        case "session.snapshot": return answer({ snapshot: { panes: [{ pane_id: target, agent: "claude" }], agents: [] } });
+        case "session.snapshot": return answer({ snapshot: { panes: [{ pane_id: target, agent: kind }], agents: [] } });
         case "pane.process_info": {
           if (processEvidence === "failed") return socket.end(`${JSON.stringify({ id: request.id, error: { code: "process_info_failed", message: "private diagnostic" } })}\n`);
-          const foreground = [{ pid: 42, name: "claude", argv: ["claude"] }, ...(processEvidence === "ambiguous" ? [{ pid: 41, name: "sh", argv: ["sh", "-c", "wrapper"] }] : [])];
+          const foreground = [{ pid: 42, name: kind, argv: [kind] }, ...(processEvidence === "ambiguous" ? [{ pid: 43, name: kind, argv: [kind] }] : [])];
           return answer({ process_info: { pane_id: target, shell_pid: 41, foreground_process_group_id: 41, foreground_processes: foreground } });
         }
         case "agent.rename": return answer({ agent: { pane_id: target, name: request.params["name"] } });
@@ -115,6 +115,19 @@ describe.skipIf(process.platform === "win32")("atomic custom creation contract",
       // with no pending queue that could later deliver it to a same-kind replacement process.
       expect(outcome.kind === "not_queued" ? request.first_message : null).toBe("  user text to recover 世界  ");
     }
+    expect(f.calls.some((call) => call.method === "pane.send_text" || call.method === "agent.start")).toBeFalse();
+  });
+  it.each(["omo", "gjc"])("retains a not_queued draft for multiple matching %s custom processes", async (kind) => {
+    const f = await daemon(true, "ambiguous", {}, kind);
+    for (const path of ["workspace/create", "tab/create"]) {
+      const request = { ...payload("fixture"), agent: { kind, command: "fixture" }, first_message: "text to recover", first_message_connection: "page" };
+      const response = await post(`/api/${path}`, request);
+      expect(response.status).toBe(200);
+      const result = await response.json() as WorkspaceCreated;
+      expect(result).toMatchObject({ agent_started: true, first_message: { error: { code: "first_message_not_queued" } } });
+      expect(firstMessageOutcome(request, result)).toMatchObject({ kind: "not_queued", error: { code: "first_message_not_queued" } });
+    }
+    expect(f.creates()).toBe(2);
     expect(f.calls.some((call) => call.method === "pane.send_text" || call.method === "agent.start")).toBeFalse();
   });
   it("rejects absent, false and nonboolean capabilities before creating anything", async () => {

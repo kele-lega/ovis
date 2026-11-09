@@ -45,10 +45,14 @@ export async function observeCommandAgent(kind: string, paneId: string,
       if (isShellAgentKind(kind)) {
         const info = await bounded(() => processInfo(paneId));
         const processes = info?.pane_id === paneId ? info.foreground_processes ?? [] : [];
-        const started = processes.find((entry) => positivePid(entry.pid) && (kind === "omo"
+        const matching = processes.filter((entry) => positivePid(entry.pid) && (kind === "omo"
           ? omoProcessIdentity({ pid: entry.pid, argv: entry.argv ?? undefined, cwd: entry.cwd ?? undefined }, "", process.env["HOME"] ?? "") !== null
           : SHELL_AGENTS[kind]!(entry.argv ?? [])));
-        if (started) { pid = started.pid; break; }
+        if (matching.length > 0) {
+          // The kind is detected, but multiple plausible destinations cannot own its first message.
+          pid = matching.length === 1 ? matching[0]!.pid : null;
+          break;
+        }
       } else if (pane.agent === kind) {
         try {
           const info = await bounded(() => processInfo(paneId));
