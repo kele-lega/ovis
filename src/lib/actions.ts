@@ -9,7 +9,7 @@ import type { ZoomMode } from "./layoutMap.ts";
 import type { Machine } from "../../shared/machines.ts";
 
 /** what Add a connection → SSH fills the Add PC dialog with: the address to connect to and, where known, a name */
-export interface AddPcPreset { destination: string; name?: string }
+export interface AddPcPreset { destination: string; name?: string; tailnet?: import("../../shared/tailnet.ts").MachineSetupInitial }
 
 export type PaneView = "chat" | "terminal";
 

@@ -211,13 +211,16 @@ export class PcInstaller {
   private readonly pollMs: number;
   private readonly startMs: number;
   private readonly stopMs: number;
-  constructor(private readonly options: { sshDir: string; connect: InstallConnect; release?: string; onChange?(job: PcInstallJob): void; pollMs?: number; startMs?: number; stopMs?: number;
+  constructor(private readonly options: { createConnection?(target: SshTarget, machineId?: string): SshConnection; sshDir: string; connect: InstallConnect; release?: string; onChange?(job: PcInstallJob): void; pollMs?: number; startMs?: number; stopMs?: number;
     /** Settings -> Experimental -> PCs: start a replaced server again. Off (or absent), a server started by hand that an install
      * stopped is never copied or started again: a failed or cancelled replacement leaves it stopped */
     restore?: () => boolean }) {
     this.pollMs = options.pollMs ?? 1000;
     this.startMs = options.startMs ?? 180_000;
     this.stopMs = options.stopMs ?? STOP_WAIT_MS;
+  }
+  private connection(target: SshTarget, machineId?: string): SshConnection {
+    return this.options.createConnection?.(target, machineId) ?? new SshConnection(target, this.options.sshDir, machineId ? join(this.options.sshDir, machineId) : undefined);
   }
   start(request: { target: SshTarget; name?: string; machine_id?: string; plan?: InstallPlan; revision?: string }): PcInstallJob {
     const id = randomUUID();
@@ -276,7 +279,7 @@ export class PcInstaller {
     let ssh: SshConnection | undefined;
     try {
       for (let tries = 0; ; tries++) {
-        ssh = new SshConnection(request.target, this.options.sshDir, request.machine_id ? join(this.options.sshDir, request.machine_id) : undefined);
+        ssh = this.connection(request.target, request.machine_id);
         try { await ssh.start(); break; } catch (error) { ssh.close(); ssh = undefined; if (tries >= 1) throw error; }
       }
       const at = ssh!;
@@ -345,7 +348,7 @@ export class PcInstaller {
     try {
       // the installer sets Ovis up for herdr's default session; one for a named session is not this app's to guess
       if (target.session) throw new InstallFailed("unsupported", `Installing from here sets Ovis up for herdr's default session only, and this PC is added with the session "${target.session}". Add it without a session to install there.`);
-      const ssh = new SshConnection(target, this.options.sshDir, request.machine_id ? join(this.options.sshDir, request.machine_id) : undefined);
+      const ssh = this.connection(target, request.machine_id);
       state.ssh = ssh;
       // no challenge: BatchMode, so a PC that wants a password or an unknown host key refuses instead of asking
       try { await ssh.start(); } catch (error) { if (abort.signal.aborted) throw error; throw sshFailure(error); }

@@ -35,6 +35,9 @@ import { RUNTIME_MOVE_ZH } from "./i18n/runtime-move.zh.ts";
 const BASE: Record<string, string> = {
   "Saved custom command. No permission, model or effort flags are added.": "自定义命令已保存，不会附加权限、模型或推理强度参数。",
   "Custom command": "自定义命令",
+  "First-time SSH setup": "首次 SSH 接入",
+  "Add {name}": "添加 {name}",
+  "Offline": "离线",
   "View only": "仅查看",
   "Not pasted: the file's path holds a line break, which the terminal would take as Enter.": "未粘贴：文件路径中含有换行，终端会将其当作 Enter。",
   "Attach files": "附加文件",

@@ -114,6 +114,29 @@ describe("normal setup integration with a reserved bootstrap identity", () => {
     const observe = spyOn(internals, "observe").mockResolvedValue(); cleanup.push(() => observe.mockRestore());
     return { dir, manager, internals, start, prepare, observe };
   }
+  it("pins official installer and recovery connections to the bootstrap identity without fallback", async () => {
+    const f = fixture(); const attempt = await f.manager.createBootstrap(request);
+    const job = f.manager.connectBootstrap(attempt.id); await f.internals.jobs.get(job.id)!.finished;
+    const installer = (f.manager as unknown as { installer: { connection(target: unknown, id: string): SshConnection } }).installer;
+    for (let i = 0; i < 2; i++) {
+      const ssh = installer.connection(attempt.target, attempt.machine_id);
+      try {
+        expect(ssh.exclusiveIdentity).toBe(true); expect(ssh.keyOnly).toBe(true);
+        expect(ssh.keyPath).toBe(join(f.dir, "ssh", attempt.machine_id));
+        const options = (ssh as unknown as { options(): string[] }).options();
+        expect(options).toContain("none"); expect(options).toContain("PasswordAuthentication=no"); expect(options).toContain("IdentityAgent=none");
+      } finally { ssh.close(); }
+    }
+    expect(() => installer.connection({ destination: "mallory@100.70.1.2", port: 22 }, attempt.machine_id)).toThrow("do not match");
+    unlinkSync(join(f.dir, "ssh", attempt.machine_id));
+    const missing = installer.connection(attempt.target, attempt.machine_id);
+    try { expect(() => (missing as unknown as { options(): string[] }).options()).toThrow("Dedicated SSH identity is unavailable"); }
+    finally { missing.close(); }
+    f.manager.remove(attempt.machine_id);
+    const forgotten = installer.connection(attempt.target, attempt.machine_id);
+    try { expect(forgotten.exclusiveIdentity).toBe(true); expect(() => (forgotten as unknown as { options(): string[] }).options()).toThrow("Dedicated SSH identity is unavailable"); }
+    finally { forgotten.close(); }
+  });
   it("does not autoconnect; connects/persists/promotes the same key and updates live path", async () => {
     const f = fixture(); const attempt = await f.manager.createBootstrap(request); expect(f.start).not.toHaveBeenCalled(); expect(f.manager.list()).toHaveLength(1);
     const job = f.manager.connectBootstrap(attempt.id); await f.internals.jobs.get(job.id)!.finished; expect(job.phase).toBe("connected"); expect(job.machine_id).toBe(attempt.machine_id);
@@ -160,7 +183,7 @@ describe("normal setup integration with a reserved bootstrap identity", () => {
       expect(frames).toContain('"type":"machine-setups"');
       expect(frames).toContain('"name":"Fixture PC"');
       for (const secret of ["FIXTURE_PRIVATE", "ssh-ed25519", "source_ip", "challenge", "ssh_output"]) expect(frames).not.toContain(secret);
-    } finally { controller.abort(); await reader.cancel(); }
+    } finally { controller.abort(); await reader.cancel().catch(() => {}); }
     expect(f.manager.list()).toHaveLength(1);
     expect(existsSync(join(f.dir, "machines.json"))).toBe(false);
     expect(existsSync(join(f.dir, "bootstrap-machines.json"))).toBe(false);
@@ -293,6 +316,19 @@ describe("normal setup integration with a reserved bootstrap identity", () => {
     expect(restored.list()[1]!.can_revoke_bootstrap).toBe(true); expect(existsSync(join(f.dir, "ssh", attempt.machine_id))).toBe(true);
     run.mockResolvedValue("ovis-bootstrap-revoked"); await restored.revokeBootstrap(attempt.machine_id);
     expect(restored.list()[1]!.can_revoke_bootstrap).toBe(false); expect(existsSync(join(f.dir, "ssh", attempt.machine_id))).toBe(true);
+  });
+  it("refuses revocation while an upstream install, own update or closing setup holds the PC", async () => {
+    const f = fixture(); const attempt = await f.manager.createBootstrap(request);
+    const job = f.manager.connectBootstrap(attempt.id); await f.internals.jobs.get(job.id)!.finished;
+    const internal = f.manager as unknown as { installer: { runningFor(id: string): unknown }; machines: Map<string, { ownJob?: unknown }>; jobs: Map<string, { closing?: boolean }> };
+    const runtime = internal.machines.get(attempt.machine_id)!;
+    const running = spyOn(internal.installer, "runningFor").mockReturnValue({ id: "fixture-install" });
+    try { await expect(f.manager.revokeBootstrap(attempt.machine_id)).rejects.toMatchObject({ code: "bootstrap_busy" }); } finally { running.mockRestore(); }
+    runtime.ownJob = { id: "fixture-own-update" };
+    try { await expect(f.manager.revokeBootstrap(attempt.machine_id)).rejects.toMatchObject({ code: "bootstrap_busy" }); } finally { runtime.ownJob = undefined; }
+    internal.jobs.get(job.id)!.closing = true;
+    try { await expect(f.manager.revokeBootstrap(attempt.machine_id)).rejects.toMatchObject({ code: "bootstrap_busy" }); } finally { internal.jobs.get(job.id)!.closing = false; }
+    expect(f.start).toHaveBeenCalledTimes(1);
   });
   it("keeps reconnect scheduling when a retry meets an in-flight revocation", async () => {
     const f = fixture(); const attempt = await f.manager.createBootstrap(request);

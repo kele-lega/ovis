@@ -33,6 +33,9 @@ import { RUNTIME_MOVE_JA } from "./i18n/runtime-move.ja.ts";
 const BASE: Record<string, string> = {
   "Saved custom command. No permission, model or effort flags are added.": "カスタムコマンドを保存済みです。権限、モデル、推論レベルのフラグは追加されません。",
   "Custom command": "カスタムコマンド",
+  "First-time SSH setup": "初回 SSH セットアップ",
+  "Add {name}": "{name} を追加",
+  "Offline": "オフライン",
   "View only": "表示のみ",
   "Not pasted: the file's path holds a line break, which the terminal would take as Enter.": "貼り付けていません: ファイルのパスに改行があり、ターミナルが Enter として受け取ります。",
   "Attach files": "ファイルを添付",

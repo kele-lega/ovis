@@ -24,6 +24,7 @@ import { failureText, openOwnOffer, RelayPairing, statusText } from "./RelayPane
 import { SettingsQuery, Toggle } from "./SettingsControls.tsx";
 import { PortalPanel } from "./PortalPanel.tsx";
 import { usePortal } from "../lib/portal.ts";
+import { TailnetPcs } from "./TailnetPcs.tsx";
 import { CompactPair } from "./CompactPair.tsx";
 
 /** the sheet's ways, one tab each: PCs over SSH, phones and browsers on this PC's address, and the Ovis relay through the account */
@@ -178,6 +179,7 @@ export function SshTab({ machines, onAddPc, onConnectMachine }: { machines: read
   const [found, setFound] = useState<SshCandidate[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [reads, setReads] = useState(0);
+  const [firstTime, setFirstTime] = useState(false);
   const [typed, setTyped] = useState("");
   // the Tailscale PCs whose Ovis is older than 0.5 (#3253), by MagicDNS name: told to update it there instead of Add
   const [outdated, setOutdated] = useState<ReadonlySet<string>>(new Set());
@@ -243,6 +245,10 @@ export function SshTab({ machines, onAddPc, onConnectMachine }: { machines: read
           <button type="button" className="btn" onClick={() => { setFound(null); setReads((count) => count + 1); }}><RefreshCw aria-hidden="true" />{t("Try again")}</button>
         </div>
       )}
+      <details className="machine-tailnet-help" onToggle={(event) => setFirstTime(event.currentTarget.open)}>
+        <summary>{t("First-time SSH setup")}</summary>
+        {firstTime && <TailnetPcs onAdd={(tailnet) => onAddPc({ destination: tailnet.destination, name: tailnet.name, tailnet })} />}
+      </details>
       <form className="connect-ssh-form" onSubmit={add}>
         <label className="settings-label" htmlFor="connect-ssh-address">{t("Or type an SSH address")}</label>
         <div className="connect-ssh-field">

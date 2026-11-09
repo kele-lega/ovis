@@ -1,4 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import type { Machine } from "../../shared/machines.ts";
+import { revokeMachineBootstrap } from "../lib/machineBootstrapApi.ts";
+import { usePhoneSheetBack } from "../lib/sheetHistory.ts";
+import { X } from "lucide-react";
 import type { BootstrapAttempt } from "../../shared/bootstrap.ts";
 import { copyText } from "../lib/clipboard.ts";
 import { useT } from "../lib/i18n.ts";
@@ -63,4 +67,31 @@ function BootstrapCommand({ command, label }: { command: string; label: string }
     <button type="button" className="btn" onClick={() => void copy()}>{t(copied ? "Copied" : "Copy")}</button>
     <span className={copied || failed ? "field-hint" : "visually-hidden"} role="status">{copied ? t("Copied") : failed ? t("Could not copy automatically. Select the command and copy it manually.") : ""}</span>
   </div>;
+}
+
+/** Explicitly revoke first; forgetting is a separate action and a failed revoke never loses the key. */
+export function BootstrapRevokeDialog({ machine, removeFirewall, onRemoveFirewall, onClose }: { machine: Machine; removeFirewall: boolean; onRemoveFirewall(value: boolean): void; onClose(): void }) {
+  const t = useT();
+  const dialog = useRef<HTMLDialogElement>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inFlight = useRef(false);
+  useEffect(() => { dialog.current?.showModal(); }, []);
+  usePhoneSheetBack(() => { if (inFlight.current) return false; onClose(); });
+  const revoke = async () => {
+    if (inFlight.current) return;
+    inFlight.current = true; setPending(true); setError(null);
+    try { await revokeMachineBootstrap(machine.id, removeFirewall); onClose(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { inFlight.current = false; setPending(false); }
+  };
+  return <dialog ref={dialog} className="modal machine-dialog" aria-labelledby="bootstrap-revoke-title" onCancel={(event) => { event.preventDefault(); if (!pending) onClose(); }}>
+    <header className="modal-header"><h2 className="modal-title" id="bootstrap-revoke-title">{t("Revoke SSH key")}</h2><button type="button" className="icon-button" aria-label={t("Close")} disabled={pending} onClick={onClose}><X aria-hidden="true" /></button></header>
+    <div className="modal-body">
+      <p>{machine.name}</p><p>{t("The dedicated key is removed from the PC. SSH and existing sessions remain running. The local registration is kept until you remove it separately.")}</p>
+      <label className="machine-bootstrap-check"><input type="checkbox" checked={removeFirewall} disabled={pending} onChange={(event) => onRemoveFirewall(event.target.checked)} /><span>{t("Also remove this setup’s Windows firewall rule, if present")}</span></label>
+      {error && <p role="alert" className="machine-error">{error}</p>}
+    </div>
+    <footer className="modal-footer"><button type="button" className="btn" autoFocus disabled={pending} onClick={onClose}>{t("Cancel")}</button><button type="button" className="btn btn-danger" disabled={pending} onClick={() => void revoke()}>{t("Revoke SSH key")}</button></footer>
+  </dialog>;
 }

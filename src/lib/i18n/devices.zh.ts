@@ -193,7 +193,6 @@ export const DEVICES_ZH: Record<string, string> = {
   "This PC takes connections on Tailscale. Only devices paired through the relay can sign in there; nothing new pairs.": "这台电脑在 Tailscale 上接受连接。只有通过中继配对的设备能在这里登录，不能在这里配对新设备。",
   "This PC takes connections on your home network and on Tailscale. Only devices paired through the relay can sign in there; nothing new pairs.": "这台电脑在家庭网络和 Tailscale 上接受连接。只有通过中继配对的设备能在这里登录，不能在这里配对新设备。",
   "This PC takes connections at {host} on Tailscale. Only devices paired through the relay can sign in there; nothing new pairs.": "这台电脑在 Tailscale 的 {host} 上接受连接。只有通过中继配对的设备能在这里登录，不能在这里配对新设备。",
-  "Add {name}": "添加 {name}",
   "How to connect": "连接方式",
   "Looking for PCs…": "正在查找 PC…",
   "Update Ovis on that PC to 0.5 first.": "请先把那台电脑上的 Ovis 更新到 0.5。",

@@ -99,6 +99,39 @@ try {
           console.log(`PASS ${width}px: version failure → validated update by Enter → separate approval → Open PC`);
 
           await page.unroute("**/api/machines/setup**");
+          // A password is an uncontrolled DOM value: submit clears it synchronously, before a
+          // held reply, and a different challenge mounts an empty field instead of reusing it.
+          const secretActions: unknown[] = [];
+          let secretReply: (() => void) | undefined;
+          let secretChallenge = "secret-1";
+          await page.route("**/api/machines/setup**", async (route) => {
+            const request = route.request();
+            if (request.method() === "POST" && new URL(request.url()).pathname === "/api/machines/setup") {
+              job = { id: "secret", machine_id: "fixture", target: { destination: "fixture-only" }, phase: "authentication", step: "Fictional password question", error: null, installations: [], challenge: { id: secretChallenge, kind: "secret", prompt: "Fixture SSH password" }, ssh_output: null };
+            } else if (request.method() === "POST") {
+              secretActions.push(request.postDataJSON());
+              await new Promise<void>((resolve) => { secretReply = resolve; });
+              job = { ...job!, phase: "connected", challenge: null, step: "Connected" };
+            } else job = { ...job!, challenge: { id: secretChallenge, kind: "secret", prompt: "Fixture SSH password" } };
+            await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(job!) });
+          });
+          await page.reload();
+          await destination.fill("fixture-only");
+          await destination.press("Enter");
+          const secret = dialog.locator('input[name="ssh-secret"]');
+          await secret.fill("Fictional password not a credential");
+          secretChallenge = "secret-2";
+          await page.waitForFunction(() => document.querySelector<HTMLInputElement>('input[name="ssh-secret"]')?.value === "");
+          await secret.fill("Fictional password not a credential");
+          await secret.press("Enter");
+          await page.waitForFunction(() => document.querySelector<HTMLInputElement>('input[name="ssh-secret"]')?.disabled === true);
+          assert.equal(await secret.inputValue(), "", "the input is cleared while the network reply is held");
+          assert.deepEqual(secretActions, [{ action: "answer", challenge_id: "secret-2", answer: "Fictional password not a credential" }]);
+          assert.equal(await page.evaluate(() => JSON.stringify(localStorage).includes("Fictional password")), false);
+          secretReply!();
+          await dialog.getByRole("button", { name: "Open PC", exact: true }).waitFor();
+          await page.unroute("**/api/machines/setup**");
+          console.log(`PASS ${width}px: SSH secret clears before held reply and never carries into another challenge`);
           for (const decision of ["early_close", "cancel", "close", "start_headless"] as const) {
             const actions: unknown[] = [];
             await page.route("**/api/machines/setup**", async (route) => {

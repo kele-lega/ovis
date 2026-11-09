@@ -81,7 +81,7 @@ async function freePort(): Promise<number> {
 }
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
 
-function fixture(pc: Pc) {
+function fixture(pc: Pc, createConnection?: (target: { destination: string }, machineId?: string) => SshConnection) {
   const dir = mkdtempSync(join(tmpdir(), "ovis-pc-install-"));
   const real = { start: SshConnection.prototype.start, run: SshConnection.prototype.run, close: SshConnection.prototype.close };
   cleanups.push(() => { Object.assign(SshConnection.prototype, real); rmSync(dir, { recursive: true, force: true }); });
@@ -159,7 +159,7 @@ function fixture(pc: Pc) {
   const waiters: { phase: string; resolve(): void }[] = [];
   const onChange = (job: PcInstallJob) => { for (const waiter of waiters.splice(0)) if (waiter.phase === job.phase) waiter.resolve(); else waiters.push(waiter); };
   const reached = (phase: string) => new Promise<void>((resolve) => { waiters.push({ phase, resolve }); });
-  const installer = new PcInstaller({ sshDir: join(dir, "ssh"), connect, release: "v9.9.9", pollMs: 1, startMs: 200, stopMs: 100, onChange, restore: () => !pc.restoreOff });
+  const installer = new PcInstaller({ ...(createConnection ? { createConnection } : {}), sshDir: join(dir, "ssh"), connect, release: "v9.9.9", pollMs: 1, startMs: 200, stopMs: 100, onChange, restore: () => !pc.restoreOff });
   cleanups.push(() => installer.stop());
   const settled = async (job: PcInstallJob) => { await installer.finished(job.id); return installer.job(job.id)!; };
   return { installer, commands, challenges, connects, settled, alive, registerNew: register, failConnect: (words: string) => { answer = words; }, holdConnect: (gate: Promise<void>) => { held = gate; }, cancelled: () => cancelled, reached, followUps, installerAnswer: (answer: { exit: number; output: string }) => { pc.installer = answer; } };
@@ -179,6 +179,27 @@ describe("which PCs an install over SSH is offered for", () => {
 });
 
 describe("installing Ovis on a PC over SSH", () => {
+  it("uses the supplied identity factory for the initial install and failed-replacement recovery", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ovis-installer-identity-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const identity = join(dir, "fixture-key"); writeFileSync(identity, "FIXTURE_PRIVATE", { mode: 0o600 });
+    const connections: SshConnection[] = [];
+    const pc = fixture({ descriptors: [descriptor(4242)], installer: { exit: 1, output: "Ovis: could not download the installer of v9.9.9 from github.com" } }, (at, id) => {
+      expect(id).toBe("bootstrap-pc");
+      const ssh = new SshConnection(at, join(dir, "ssh"), identity, true, false, true);
+      connections.push(ssh); return ssh;
+    });
+    const job = await pc.settled(pc.installer.start({ target, machine_id: "bootstrap-pc", plan: { mode: "replace", pid: 4242 } }));
+    expect(job.phase).toBe("failed");
+    expect(connections).toHaveLength(2);
+    for (const ssh of connections) {
+      expect(ssh.keyPath).toBe(identity); expect(ssh.exclusiveIdentity).toBe(true); expect(ssh.keyOnly).toBe(true);
+      const options = (ssh as unknown as { options(): string[] }).options();
+      expect(options).toContain("IdentityAgent=none"); expect(options).toContain("PasswordAuthentication=no"); expect(options).toContain("IdentitiesOnly=yes");
+    }
+    expect(pc.alive.has(4243), job.error ?? undefined).toBe(true);
+  });
+
   it("runs the official installer pinned to this app's release with keys only, waits for it to answer, then connects it", async () => {
     const pc = fixture({});
     const job = await pc.settled(pc.installer.start({ target, name: "Lab" }));

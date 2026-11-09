@@ -1,10 +1,10 @@
 import { authenticatedWebSocket } from "./remote-websocket.ts";
 import { randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer as tcpServer } from "node:net";
 import { hostname } from "node:os";
 import { basename, join } from "node:path";
-import { BRIDGE_PROTOCOL, LOCAL_MACHINE, OWN_UPDATE_OFFER, REMOTE_BUNDLE_VERSION, type BridgeIdentity, type HerdrIdentity, type RemoteOvis, type Machine, type MachineAction, type MachineEvent, type MachineSettings, type PcInstallJob, type PcInstallRequest, type PcUpdateAll, type PcUpdateOffer, type SetupAction, type SetupJob, type SetupProgress, type SetupRequest, type SshTarget } from "../shared/machines.ts";
+import { BRIDGE_PROTOCOL, LOCAL_MACHINE, OWN_UPDATE_OFFER, REMOTE_BUNDLE_VERSION, type BridgeIdentity, type HerdrIdentity, type RemoteOvis, type Machine, type MachineAction, type MachineEvent, type MachineSettings, type MachineSetupSummary, type PcInstallJob, type PcInstallRequest, type PcUpdateAll, type PcUpdateOffer, type SetupAction, type SetupJob, type SetupProgress, type SetupRequest, type SshTarget } from "../shared/machines.ts";
 import type { ServerMessage, SessionSnapshot, HerdrPane } from "../shared/protocol.ts";
 import type { PushService } from "./push.ts";
 import { alertStatus } from "../shared/notify-policy.ts";
@@ -32,6 +32,8 @@ import { followOwnUpdate, offerFromStatus, readOwnStatus, cancelledWords, cancel
 import { appRelease, INSTALLER, installPlanFor, PcInstaller, samePc, type InstallConnect, type InstallPlan } from "./pc-install.ts";
 import { warmSshAddresses } from "./ssh-address.ts";
 import { readMoveOffer } from "./remote-move.ts";
+import { BootstrapError, revokeBootstrap, SshBootstrap, type BootstrapDependencies, type BootstrapLease } from "./ssh-bootstrap.ts";
+import type { BootstrapAttempt } from "../shared/bootstrap.ts";
 
 import type { RelaySocket } from "../shared/relay-channel.ts";
 import { newRouteProbes, openRelayPcTunnel, RelayPcKey, RelayPcRefused, relayPcLabel, removeRelayPcKey, type RelayPcTunnel, type RouteProbes } from "./relay-pc.ts";
@@ -112,6 +114,8 @@ interface Runtime {
 /** An update asked for that the PC cannot take now: answered 409 `update_unavailable` with these words. */
 export class PcUpdateRefused extends Error {}
 interface JobState {
+  setupName?: string;
+  backgroundVisible?: boolean;
   /** an own update asked for in this job (runOwnUpdate): asks that PC to stop it, and says what became of it */
   ownCancel?: () => Promise<string>;
   /** cancelled, its connection still closing (after ownCancel): its PC stays busy */
@@ -423,11 +427,16 @@ export class MachineManager {
   private serverId?: () => string | undefined;
   /** other PCs of this PC's Tailscale login, added through the relay with one tap (server/tailnet-pcs.ts) */
   private readonly tailnet: TailnetPcs;
+  private bootstrap: SshBootstrap;
+  private bootstrapPath: string;
+  private revoking = new Set<string>();
+  /** A removed guided PC may still be unwinding an official install: never fall back to ambient SSH. */
+  private bootstrapIdentities = new Set<string>();
   /** where the SSH tab's list is read from (server/ssh-candidates.ts) */
   private readonly sshCandidateOptions: SshCandidatesOptions;
 
   constructor(readonly stateDir: string, private push: PushService, private completions: CompletionTracker, private readLocal: () => Promise<SessionSnapshot> = () => this.completions.readSnapshot(sessionSnapshot, labelOmoPanes),
-    options: { /** Settings -> Experimental -> PCs: start a replaced server again (PcInstaller) */ restoreReplaced?: () => boolean; bootId?: string; localFinishEpoch?: () => string; now?: () => number; ownUpdate?: { pollMs?: number; startMs?: number; checkMs?: number; offerMs?: number }; moveOfferMs?: { idle: number; active: number }; relaySocket?: (url: string) => RelaySocket; relayDirectSocket?: (url: string) => RelaySocket; serverId?: () => string | undefined; tailnet?: TailnetPcsOptions; sshCandidates?: SshCandidatesOptions } = {}) {
+    options: { /** Settings -> Experimental -> PCs: start a replaced server again (PcInstaller) */ restoreReplaced?: () => boolean; bootId?: string; localFinishEpoch?: () => string; now?: () => number; ownUpdate?: { pollMs?: number; startMs?: number; checkMs?: number; offerMs?: number }; moveOfferMs?: { idle: number; active: number }; relaySocket?: (url: string) => RelaySocket; relayDirectSocket?: (url: string) => RelaySocket; serverId?: () => string | undefined; tailnet?: TailnetPcsOptions; sshCandidates?: SshCandidatesOptions; bootstrap?: BootstrapDependencies } = {}) {
     this.bootId = options.bootId;
     this.tailnet = new TailnetPcs(options.tailnet);
     this.sshCandidateOptions = options.sshCandidates ?? (options.tailnet?.readStatus === undefined ? {} : { readStatus: options.tailnet.readStatus });
@@ -446,7 +455,14 @@ export class MachineManager {
     this.statePath = join(stateDir, "machines.json");
     this.relayStatePath = join(stateDir, "relay-pcs.json");
     this.sshDir = join(stateDir, "ssh");
-    this.installer = new PcInstaller({ sshDir: this.sshDir, connect: (request) => this.installConnect(request), onChange: (job) => this.showInstall(job), restore: () => options.restoreReplaced?.() === true });
+    this.bootstrapPath = join(stateDir, "bootstrap-machines.json");
+    this.bootstrap = new SshBootstrap(stateDir, options.bootstrap);
+    this.installer = new PcInstaller({ createConnection: (target, machineId) => {
+      const metadata = machineId ? this.bootstrap.metadata(machineId, target) : undefined;
+      if (machineId && this.revoking.has(machineId)) throw new Error("SSH bootstrap revocation is in progress");
+      const exclusive = !!metadata || !!machineId && this.bootstrapIdentities.has(machineId);
+      return new SshConnection(target, this.sshDir, machineId ? join(this.sshDir, machineId) : undefined, exclusive, undefined, exclusive);
+    }, sshDir: this.sshDir, connect: (request) => this.installConnect(request), onChange: (job) => this.showInstall(job), restore: () => options.restoreReplaced?.() === true });
     this.settingsPath = join(stateDir, "machine-settings.json");
     try {
       const saved: unknown = JSON.parse(readFileSync(this.settingsPath, "utf8"));
@@ -483,12 +499,29 @@ export class MachineManager {
           } else if (item.kind === "relay") throw new Error("Invalid machine registration");
           // its relay ID as its health last said it, so its alerts are known by it before it answers again
           else machine = { ...common, kind: "ssh", target: validateTarget(item.target), ...(typeof item.server_id === "string" && SERVER_ID_PATTERN.test(item.server_id) ? { server_id: item.server_id } : {}) };
+          if (machine.kind === "ssh" && this.bootstrap.metadata(item.id, machine.target)) throw new Error("Bootstrap PC in legacy storage; registrations and credentials were preserved");
           const runtime = this.runtime(machine);
           this.machines.set(item.id, runtime);
-          if (item.enabled) queueMicrotask(() => void this.reconnect(runtime));
         }
       }
     }
+    let guided: Extract<StoredMachine, { target: SshTarget }>[] = [];
+    if (existsSync(this.bootstrapPath)) {
+      if (lstatSync(this.bootstrapPath).isSymbolicLink()) throw new Error("Invalid bootstrap-machines.json; registrations were preserved");
+      const saved = JSON.parse(readFileSync(this.bootstrapPath, "utf8")) as { version?: unknown; machines?: unknown } | null;
+      if (saved?.version !== 1 || !Array.isArray(saved.machines)) throw new Error("Invalid bootstrap-machines.json; registrations were preserved");
+      guided = saved.machines;
+    }
+    for (const item of guided) {
+      if (!item || !/^[a-f0-9-]{36}$/.test(item.id) || typeof item.name !== "string" || typeof item.enabled !== "boolean" || this.machines.has(item.id)) throw new Error("Invalid machine registration");
+      const machine: Machine = { id: item.id, name: item.name, kind: "ssh", enabled: item.enabled, target: validateTarget(item.target), ...(typeof item.server_id === "string" && SERVER_ID_PATTERN.test(item.server_id) ? { server_id: item.server_id } : {}), state: "disconnected", snapshot: item.snapshot ?? null, error: null };
+      const metadata = this.bootstrap.metadata(item.id, machine.target);
+      if (!metadata) throw new Error("Missing bootstrap SSH metadata; registrations and credentials were preserved");
+      machine.can_revoke_bootstrap = !metadata.revoked;
+      this.bootstrapIdentities.add(item.id);
+      this.machines.set(item.id, this.runtime(machine));
+    }
+    for (const runtime of this.machines.values()) if (runtime.machine.enabled) queueMicrotask(() => void this.reconnect(runtime));
     // the saved PCs' addresses, resolved in the background now they are loaded, for the checks that keep one job per PC
     void warmSshAddresses([...this.machines.values()].flatMap((runtime) => runtime.machine.kind === "ssh" && runtime.machine.target ? [runtime.machine.target] : []));
     void this.refreshLocal();
@@ -670,6 +703,13 @@ export class MachineManager {
    * The update a PC can take from here (Machine.ovis_update): a connected PC's own Ovis's offer, else what its last
    * try to connect was refused for (a bridge of another version, or an own Ovis older than this app).
    */
+  setupSummaries(): MachineSetupSummary[] {
+    return [...this.jobs.values()].filter((job) => job.backgroundVisible && job.public.phase !== "cancelled").map(({ public: job, setupName }) => ({
+      id: job.id, machine_id: job.machine_id, name: setupName!, phase: job.phase,
+      step: job.step, error: job.error, progress: job.progress ?? null,
+    }));
+  }
+  private emitSetups(): void { this.emit({ type: "machine-setups", setups: this.setupSummaries() }); }
   private updateOffer(runtime: Runtime): PcUpdateOffer | null {
     const machine = runtime.machine;
     // a disabled PC is not this app's to touch: updating it would connect it again (setup enables what it connects)
@@ -753,6 +793,7 @@ export class MachineManager {
   subscribe(listener: (event: MachineEvent) => void): () => void {
     this.listeners.add(listener);
     listener({ type: "machines", machines: this.list() });
+    listener({ type: "machine-setups", setups: this.setupSummaries() });
     return () => this.listeners.delete(listener);
   }
   private emit(event?: MachineEvent): void {
@@ -846,7 +887,8 @@ export class MachineManager {
     if (!relayLast) this.persistRelayPcs();
     // herdr's saved machines and herdr-core's are their catalogs': read again, never saved here
     const owned = [...this.machines.values()].filter(({ machine }) => !machine.herdr_profile_id && machine.kind !== "hc").map(({ machine }) => machine);
-    const data: StoredMachine[] = owned.filter((m) => m.kind !== "relay").map((m) => ({ id: m.id, name: m.name, target: m.target!, ...(m.server_id ? { server_id: m.server_id } : {}), enabled: m.enabled, snapshot: m.snapshot }));
+    const guided: StoredMachine[] = owned.filter((m) => m.kind === "ssh" && this.bootstrap.metadata(m.id, m.target)).map((m) => ({ id: m.id, name: m.name, target: m.target!, ...(m.server_id ? { server_id: m.server_id } : {}), enabled: m.enabled, snapshot: m.snapshot }));
+    const data: StoredMachine[] = owned.filter((m) => m.kind !== "relay" && !this.bootstrap.metadata(m.id, m.target)).map((m) => ({ id: m.id, name: m.name, target: m.target!, ...(m.server_id ? { server_id: m.server_id } : {}), enabled: m.enabled, snapshot: m.snapshot }));
     const text = JSON.stringify(data);
     // the PCs' registrations are written last: a save that fails before them leaves them as they were on disk, so a
     // PC moved to another address (setup) is saved there only when nothing else of its save can still fail (#2075)
@@ -855,6 +897,7 @@ export class MachineManager {
     // the file on disk may have been deleted or replaced since this manager wrote it
     if (text !== this.written || !holdsDocument(this.statePath, text)) { writePrivateState(this.statePath, data); this.written = text; }
     if (relayLast) this.persistRelayPcs();
+    if (guided.length || existsSync(this.bootstrapPath)) writePrivateState(this.bootstrapPath, { version: 1, machines: guided });
   }
   private persistRelayPcs(): void {
     const relayPcs: StoredMachine[] = [...this.machines.values()].map(({ machine }) => machine).filter((m) => !m.herdr_profile_id && m.kind === "relay")
@@ -1086,7 +1129,7 @@ export class MachineManager {
   }
   private updateRunning(runtime: Runtime): boolean {
     // an automatic bridge update already waiting for this PC counts too: Update all would only repeat it
-    return !!runtime.ownJob || this.updateQueued.has(runtime.machine.id) || this.autoQueued.has(runtime.machine.id) || !!this.installer.runningFor(runtime.machine.id) || [...this.jobs.values()].some((j) => j.public.machine_id === runtime.machine.id && !TERMINAL.has(j.public.phase));
+    return this.revoking.has(runtime.machine.id) || !!runtime.ownJob || this.updateQueued.has(runtime.machine.id) || this.autoQueued.has(runtime.machine.id) || !!this.installer.runningFor(runtime.machine.id) || [...this.jobs.values()].some((j) => j.public.machine_id === runtime.machine.id && (!TERMINAL.has(j.public.phase) || j.closing));
   }
   /** room for one more own update: four at once, and those through setup leave one setup slot of the four free */
   private mayStartOwn(runtime: Runtime): boolean {
@@ -1200,12 +1243,47 @@ export class MachineManager {
     runtime.ownJob.finished = finished;
     return id;
   }
-  setup(request: SetupRequest, options: { auto?: boolean; expectedRevision?: string; keysOnly?: boolean; fromInstall?: boolean } = {}): SetupJob {
+  createBootstrap(value: unknown, signal?: AbortSignal): Promise<BootstrapAttempt> { return this.bootstrap.create(value, this.list(), signal); }
+  bootstrapAttempt(id: string): BootstrapAttempt { return this.bootstrap.snapshot(id); }
+  cancelBootstrap(id: string): Promise<void> { return this.bootstrap.cancel(id); }
+  connectBootstrap(id: string, updateRemote = false): SetupJob {
+    const lease = this.bootstrap.begin(id);
+    try {
+      const result = this.setup({ ...lease.metadata.target, name: lease.request.name, update_remote: updateRemote }, { bootstrap: lease });
+      const job = this.jobs.get(result.id)!;
+      this.bootstrap.running(id, { cancel: () => this.cancelJob(result.id), finished: job.finished });
+      return result;
+    } catch (error) { this.bootstrap.finish(id, false); throw error; }
+  }
+  async revokeBootstrap(id: string, removeFirewall = false): Promise<void> {
+    const runtime = this.machines.get(id);
+    const metadata = runtime && this.bootstrap.metadata(id, runtime.machine.target);
+    if (!runtime || !metadata || metadata.revoked) throw new BootstrapError("bootstrap_not_managed", "This PC has no managed SSH bootstrap key", 404);
+    if (this.updateRunning(runtime)) throw new BootstrapError("bootstrap_busy", "Finish the current PC connection or update first", 409);
+    this.revoking.add(id);
+    let ssh: SshConnection | undefined;
+    try {
+      // A fresh key-only connection checks the stored host fingerprint strictly and never asks
+      // for passwords, learns a new fingerprint, or borrows a pre-existing SSH master.
+      ssh = new SshConnection(metadata.target, this.sshDir, join(this.sshDir, id), true, undefined, true);
+      await ssh.start();
+      await revokeBootstrap(ssh, id, metadata, removeFirewall);
+      this.bootstrap.register(id, { ...metadata, revoked: true });
+      runtime.machine.can_revoke_bootstrap = false;
+      // Preserve the local key/registration until the UI's separate, explicit forget step.
+      this.emit();
+    } catch { throw new BootstrapError("bootstrap_revoke_failed", "The SSH bootstrap key could not be revoked. The local PC and key were kept; retry after checking SSH permissions.", 502); }
+    finally { try { ssh?.close(); } finally { this.revoking.delete(id); } }
+  }
+  setup(request: SetupRequest, options: { auto?: boolean; expectedRevision?: string; keysOnly?: boolean; fromInstall?: boolean; bootstrap?: BootstrapLease } = {}): SetupJob {
     if (this.stopped) throw new Error("Server stopping");
     let target = validateTarget(request);
     // an install over SSH stops and starts that PC's Ovis: nothing else connects there until it hands over
     if (!options.fromInstall && (this.installer.runningAt(target) || request.machine_id && this.installer.runningFor(request.machine_id))) throw new Error("Ovis is being installed on this PC; wait for it to finish, or cancel it.")
     const existing = request.machine_id ? this.machines.get(request.machine_id) : undefined;
+    if (request.machine_id && this.revoking.has(request.machine_id)) throw new Error("SSH bootstrap revocation is in progress");
+    const managed = existing && this.bootstrap.metadata(existing.machine.id);
+    if (managed && JSON.stringify(target) !== JSON.stringify(managed.target)) throw new Error("Bootstrap SSH connection details cannot be changed");
     // a PC saved in herdr is named by its catalog (any length); a name sent with it is not read
     const name = existing?.machine.herdr_profile_id ? undefined : request.name;
     if (name !== undefined && (typeof name !== "string" || name.length > 100)) throw new Error("PC name must be at most 100 characters");
@@ -1220,7 +1298,8 @@ export class MachineManager {
     // and one per PC as ssh resolves it, for another saved PC or a new one too, whatever herdr session each names
     if ([...this.jobs.values()].some((job) => (!TERMINAL.has(job.public.phase) || job.closing) && samePc(job.public.target, target))) throw new Error("This app is already connecting to this PC; wait for that to finish, or cancel it.");
     const id = randomUUID();
-    const machineId = existing?.machine.id ?? randomUUID();
+    const machineId = existing?.machine.id ?? options.bootstrap?.machineId ?? randomUUID();
+    if (options.bootstrap && this.machines.has(machineId)) throw new Error("PC already registered");
     if (existing?.machine.herdr_profile_id && (!existing.machine.enabled || !existing.machine.target || !sameSshSession(target, existing.machine.target))) throw new Error("This PC is managed by herdr; refresh its saved machine before setup");
     if (existing?.machine.herdr_profile_id) {
       if (target.identity_file) throw new Error("SSH connection details are managed by herdr; use the account's SSH config for keys");
@@ -1240,11 +1319,17 @@ export class MachineManager {
     this.jobs.set(id, job);
     if (this.jobs.size > 40) for (const [key, j] of this.jobs) if (["connected", "failed", "cancelled"].includes(j.public.phase) && key !== id) { this.jobs.delete(key); break; }
     const runtime = existing ?? this.runtime({ id: machineId, name: name?.trim() || target.destination, kind: "ssh", enabled: true, state: "connecting", target, snapshot: null, error: null });
+    if (!existing) {
+      job.setupName = runtime.machine.name;
+      for (const previous of this.jobs.values()) if (previous !== job && previous.public.machine_id === machineId) previous.backgroundVisible = false;
+      this.emitSetups();
+    }
     this.disconnect(runtime);
     // a setup or bridge update is a try to connect too: a failed one waits its interval (retryNow)
     runtime.triedAt = this.now();
     if (moving) runtime.move = {};
-    const ssh = new SshConnection(target, this.sshDir, join(this.sshDir, machineId));
+    const exclusive = !!options.bootstrap || !!managed;
+    const ssh = new SshConnection(target, this.sshDir, options.bootstrap?.keyPath ?? join(this.sshDir, machineId), exclusive, undefined, exclusive);
     job.ssh = ssh;
     runtime.ssh = ssh;
     runtime.abort = job.abort;
@@ -1253,10 +1338,12 @@ export class MachineManager {
     // ssh's own words reach the dialog while it waits, not only in the error it ends with
     ssh.onOutput = (text) => { if (job.public.phase === "connecting" || job.public.phase === "authentication") job.public.ssh_output = text || null; };
     let reached = false;
+    let bootstrapCommitted = false;
     job.finished = (async () => {
       try {
         // an automatic update never asks: a PC that needs a password says so and waits
         await ssh.start(auto || options.keysOnly ? undefined : (prompt, host) => {
+          if (exclusive && !host) throw new Error("The dedicated SSH key was refused. Run the bootstrap command for this local account before retrying.");
           job.public.phase = "authentication";
           job.public.challenge = { id: randomUUID(), kind: host ? "host_key" : "secret", prompt };
           job.public.step = host ? "Verify the server fingerprint" : "SSH authentication required";
@@ -1267,7 +1354,7 @@ export class MachineManager {
         await this.prepare(runtime, job);
         if (job.abort.signal.aborted || runtime.generation !== generation || this.stopped) throw new Error("Setup cancelled");
         runtime.machine.enabled = true;
-        this.machines.set(machineId, runtime);
+        if (!options.bootstrap) this.machines.set(machineId, runtime);
         await this.observe(runtime);
         if (job.abort.signal.aborted || runtime.generation !== generation || this.stopped) throw new Error("Setup cancelled");
         // connected there: the PC moves to the address it was set up at, with what this setup learnt there. A move is
@@ -1290,7 +1377,19 @@ export class MachineManager {
             this.profileState.allowConnection(runtime.machine.herdr_profile_id, target);
             if (job.installationApproved) this.profileState.approve(runtime.machine.herdr_profile_id, target);
           }
+        if (options.bootstrap) {
+          const path = join(this.sshDir, machineId);
+          if (existsSync(path) || existsSync(path + ".pub")) throw new Error("Reserved SSH identity already exists");
+          renameSync(options.bootstrap.keyPath + ".pub", path + ".pub");
+          try { renameSync(options.bootstrap.keyPath, path); } catch (error) { renameSync(path + ".pub", options.bootstrap.keyPath + ".pub"); throw error; }
+          ssh.keyPath = path;
+          this.bootstrap.register(machineId, options.bootstrap.metadata);
+          this.bootstrapIdentities.add(machineId);
+          runtime.machine.can_revoke_bootstrap = true;
+          this.machines.set(machineId, runtime);
+        }
           this.persist();
+          bootstrapCommitted = !!options.bootstrap;
         } catch (error) {
           if (move) {
             Object.assign(runtime.machine, { target: left.target, error: left.error, herdr: left.herdr, snapshot: left.snapshot });
@@ -1304,7 +1403,21 @@ export class MachineManager {
         this.stage(job, "connected", "Connected");
         this.emit();
       } catch (e) {
+        // Once the row is durable, never return its key to expiring pending state
+        // or discard its strict identity because a notification listener failed.
+        if (bootstrapCommitted) { job.public.phase = "connected"; job.public.step = "Connected"; return; }
         const ownsRuntime = runtime.generation === generation;
+        if (options.bootstrap && ownsRuntime) {
+          this.machines.delete(machineId);
+          const path = join(this.sshDir, machineId);
+          if (ssh.keyPath === path) {
+            // Failed persistence/observation returns the same credential to the retry lease.
+            if (existsSync(path)) renameSync(path, options.bootstrap.keyPath);
+            if (existsSync(path + ".pub")) renameSync(path + ".pub", options.bootstrap.keyPath + ".pub");
+            ssh.keyPath = options.bootstrap.keyPath;
+            this.bootstrap.forget(machineId);
+          }
+        }
         if (ownsRuntime && !this.stopped && !job.abort.signal.aborted && job.public.phase !== "cancelled") {
           this.remoteDiagnostics.failed(machineId, e instanceof MachineActionRequired ? "action_required" : "connection_lost", { operation: "bridge", machine_id: machineId });
         }
@@ -1350,6 +1463,8 @@ export class MachineManager {
         }
       } finally {
         clearTimeout(job.timer); job.public.challenge = null; job.public.ssh_output = null; job.pending = undefined; job.ssh = undefined;
+        if (options.bootstrap) this.bootstrap.finish(options.bootstrap.id, bootstrapCommitted);
+        if (job.setupName !== undefined) this.emitSetups();
         // a PC still waiting in Update all's queue keeps showing that it waits
         if (job.runtime && !this.updateQueued.has(job.runtime.machine.id)) { job.runtime.machine.updating = null; this.emit(); }
       }
@@ -1376,10 +1491,11 @@ export class MachineManager {
   }
   /** Mirror a bridge update onto its PC, so the sidebar and header show it without the dialog. */
   private showUpdate(job: JobState): void {
-    if (!job.runtime) return;
-    job.runtime.machine.updating = { job_id: job.public.id, step: job.public.step, progress: job.public.progress ?? null, ...(job.own ? { ovis: true } : {}) };
+    if (job.setupName !== undefined && ["installing", "starting"].includes(job.public.phase)) job.backgroundVisible = true;
+    if (!job.runtime && !job.backgroundVisible) return;
+    if (job.runtime) job.runtime.machine.updating = { job_id: job.public.id, step: job.public.step, progress: job.public.progress ?? null, ...(job.own ? { ovis: true } : {}) };
     // progress arrives per chunk: a few events a second are plenty
-    if (!this.emitTimer) { this.emitTimer = setTimeout(() => { this.emitTimer = undefined; this.emit(); }, 250); this.emitTimer.unref(); }
+    if (!this.emitTimer) { this.emitTimer = setTimeout(() => { this.emitTimer = undefined; this.emit(); this.emitSetups(); }, 250); this.emitTimer.unref(); }
   }
   private wait(job: JobState): Promise<string> {
     if (job.abort.signal.aborted) return Promise.reject(new Error("Setup cancelled"));
@@ -1410,6 +1526,7 @@ export class MachineManager {
     // before prepare resumes, and must not still carry the question that was just answered
     job.public.phase = action.action === "approve" ? "installing" : "connecting";
     job.public.step = actionStep(action.action);
+    this.showUpdate(job);
     pending.resolve(action.action === "answer" ? action.answer : "approved");
   }
   /** `asked`: the person cancelled it here (its Cancel, or the PC's cancel of its update): only then is that PC asked to stop its own update */
@@ -1418,7 +1535,9 @@ export class MachineManager {
     // only a cancel asked for here does: this server stopping (its own restart, say) only ends the waiting
     const ownCancel = this.stopped || !asked ? undefined : this.jobs.get(id)?.ownCancel;
     const job = this.jobs.get(id);
-    if (!job || ["connected", "failed", "cancelled"].includes(job.public.phase)) return;
+    if (!job) return;
+    if (["connected", "failed", "cancelled"].includes(job.public.phase)) { if (job.backgroundVisible) { job.backgroundVisible = false; this.emitSetups(); } return; }
+    job.backgroundVisible = false; this.emitSetups();
     job.timedOut = timedOut;
     job.public.phase = timedOut ? "failed" : "cancelled"; job.public.step = timedOut ? "Connection timed out" : "Cancelled"; job.public.challenge = null; job.public.ssh_output = null;
     if (timedOut) job.public.error = "Connection timed out";
@@ -2092,7 +2211,7 @@ export class MachineManager {
    */
   retryNow(id: string): void {
     const runtime = this.machines.get(id);
-    if (!runtime || runtime.retry === undefined || this.stopped || !runtime.machine.enabled) return;
+    if (!runtime || runtime.retry === undefined || this.stopped || !runtime.machine.enabled || this.revoking.has(id)) return;
     if (runtime.triedAt !== undefined && this.now() - runtime.triedAt < DEMANDED_RETRY_INTERVAL_MS) return;
     clearTimeout(runtime.retry); runtime.retry = undefined;
     void this.reconnect(runtime);
@@ -2100,6 +2219,7 @@ export class MachineManager {
   private async reconnect(runtime: Runtime): Promise<void> {
     if (!this.mayConnect(runtime)) return;
     if (this.stopped || !runtime.machine.enabled) return;
+    if (this.revoking.has(runtime.machine.id)) { this.retryLater(runtime); return; }
     this.disconnect(runtime);
     runtime.triedAt = this.now();
     runtime.machine.state = "reconnecting"; runtime.machine.action_required = null; this.emit();
@@ -2138,7 +2258,8 @@ export class MachineManager {
       } catch (e) { this.lost(runtime, generation, e); }
       return;
     }
-    runtime.ssh = new SshConnection(runtime.machine.target!, this.sshDir, join(this.sshDir, runtime.machine.id));
+    const exclusive = !!this.bootstrap.metadata(runtime.machine.id, runtime.machine.target);
+    runtime.ssh = new SshConnection(runtime.machine.target!, this.sshDir, join(this.sshDir, runtime.machine.id), exclusive, undefined, exclusive);
     try {
       await runtime.ssh.start(); await this.prepare(runtime);
       if (generation !== runtime.generation || this.stopped) return;
@@ -2308,6 +2429,7 @@ export class MachineManager {
     this.persist(); this.emit();
   }
   remove(id: string): void {
+    if (this.revoking.has(id)) throw new Error("SSH bootstrap revocation is in progress");
     const runtime = this.machines.get(id);
     if (!runtime) throw new Error("PC not found");
     if (runtime.machine.herdr_profile_id) throw new Error("Remove this machine in herdr");
@@ -2319,6 +2441,7 @@ export class MachineManager {
     if (runtime.machine.kind === "relay") removeRelayPcKey(this.relayKeyPath(id));
     this.machines.delete(id); this.persist();
     for (const suffix of ["", ".pub"]) try { unlinkSync(join(this.sshDir, id + suffix)); } catch {}
+    this.bootstrap.forget(id);
     this.emit();
   }
   private relayKeyPath(id: string): string { return join(this.stateDir, "relay-pcs", `${id}.json`); }
@@ -2426,6 +2549,7 @@ export class MachineManager {
     return runtime.machine;
   }
   stop(): void {
+    this.bootstrap.stop();
     this.stopped = true; clearTimeout(this.discoveryTimer); clearTimeout(this.hcTimer); clearInterval(this.localTimer); clearTimeout(this.saveTimer);
     for (const id of this.jobs.keys()) this.cancelJob(id);
     this.installer.stop();

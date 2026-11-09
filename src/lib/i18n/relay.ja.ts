@@ -63,7 +63,6 @@ export const RELAY_JA: Record<string, string> = {
   "Ready": "接続可能",
   "Needs approval": "承認が必要",
   "Offline · {when}": "オフライン · {when}",
-  "Offline": "オフライン",
   "The PC is off, or Ovis is not running on it.": "PCの電源が切れているか、Ovisが動いていません。",
   "The relay did not answer. Check this device's network.": "リレーが応答しません。このデバイスのネットワークを確認してください。",
   "Update Ovis on it": "Ovis の更新が必要",

@@ -2,11 +2,17 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handleMachineRequest } from "./machine-api.ts";
+import { handleMachineBootstrapRequest } from "./machine-bootstrap-api.ts";
 import { MachineManager } from "./machines.ts";
 import { CompletionTracker } from "./completion.ts";
 import type { PushService } from "./push.ts";
 import { createServer } from "./index.ts";
+
+const handleMachineRequest = async (request: Request, manager: MachineManager, _revoke?: unknown, _preferences?: unknown, readOnly = false): Promise<Response> => {
+  const response = await handleMachineBootstrapRequest(request, manager, readOnly, true);
+  if (!response) throw new Error("Fixture expected a bootstrap route");
+  return response;
+};
 
 const cleanups: (() => void)[] = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -18,7 +24,7 @@ function fixture() {
     verifyAsset: async () => {}, keygen: async (path, id) => { generated++; writeFileSync(path, "CONTRACT_PRIVATE", { mode: 0o600 }); writeFileSync(path + ".pub", `ssh-ed25519 ${"A".repeat(68)} ovis:${id}`); },
   } });
   cleanups.push(() => manager.stop());
-  const request = (suffix: string, method = "GET", body?: unknown, headers: Record<string, string> = {}) => new Request("http://localhost/api/machines/" + suffix, { method, headers: { "x-herdr-machine": "1", origin: "http://localhost", ...headers }, ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }) });
+  const request = (suffix: string, method = "GET", body?: unknown, headers: Record<string, string> = {}) => new Request("http://localhost/api/machines/" + suffix, { method, headers: { "x-herdr-machine": "1", "x-herdr-update": "1", origin: "http://localhost", ...headers }, ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }) });
   return { manager, dir, request, counts: () => ({ reads, generated }) };
 }
 const valid = { peer_id: "peer", username: "alice" };
@@ -36,6 +42,32 @@ describe("bootstrap HTTP contract", () => {
       }
     }
     expect(f.counts()).toEqual({ reads: 0, generated: 0 });
+  });
+  it("requires owner update approval and a canonical same-site write before any side effect", async () => {
+    const f = fixture();
+    for (const [suffix, body] of [["bootstrap", valid], ["bootstrap/id/connect", {}], ["id/revoke-bootstrap", {}]] as const) {
+      for (const headers of [{ "x-herdr-update": "" }, { "sec-fetch-site": "cross-site" }] as Record<string, string>[]) {
+        const response = await handleMachineBootstrapRequest(f.request(suffix, "POST", body, headers), f.manager, false, true);
+        expect(response?.status).toBe(403); expect(response?.headers.get("cache-control")).toBe("no-store");
+      }
+      const visitor = await handleMachineBootstrapRequest(f.request(suffix, "POST", body), f.manager, false, false);
+      expect(visitor?.status).toBe(403); expect(visitor?.headers.get("cache-control")).toBe("no-store");
+      const query = await handleMachineBootstrapRequest(f.request(suffix + "?approval=1", "POST", body), f.manager, false, true);
+      expect(query?.status).toBe(403);
+    }
+    for (const suffix of ["bootstrap/id/", "bootstrap/id%2fconnect", "bootstrap//id"]) {
+      const response = await handleMachineBootstrapRequest(f.request(suffix, "POST", valid), f.manager, false, true);
+      expect(response?.status).toBe(404); expect(response?.headers.get("cache-control")).toBe("no-store");
+    }
+    expect(f.counts()).toEqual({ reads: 0, generated: 0 });
+  });
+  it("allows watch devices to recover only public progress, not discovery or bootstrap", async () => {
+    const f = fixture();
+    const response = await handleMachineBootstrapRequest(f.request("setups"), f.manager, true, false);
+    expect(response?.status).toBe(200); expect(response?.headers.get("cache-control")).toBe("no-store");
+    expect(await response?.json()).toEqual({ setups: [] });
+    const discovery = await handleMachineBootstrapRequest(f.request("tailnet?ssh_bootstrap=1"), f.manager, true, false);
+    expect(discovery?.status).toBe(403); expect(f.counts()).toEqual({ reads: 0, generated: 0 });
   });
   it("validates bodies and emits public-only snapshots; DELETE is idempotent", async () => {
     const f = fixture();

@@ -31,6 +31,9 @@ import { RUNTIME_MOVE_KO } from "./i18n/runtime-move.ko.ts";
 const BASE: Record<string, string> = {
   "Saved custom command. No permission, model or effort flags are added.": "사용자 명령이 저장되었습니다. 권한, 모델, 노력 수준 플래그는 추가되지 않습니다.",
   "Custom command": "사용자 명령",
+  "First-time SSH setup": "최초 SSH 설정",
+  "Add {name}": "{name} 추가",
+  "Offline": "오프라인",
   "View only": "보기 전용",
   "Not pasted: the file's path holds a line break, which the terminal would take as Enter.": "붙여넣지 않았습니다: 파일 경로에 줄바꿈이 있어 터미널이 Enter로 받아들입니다.",
   "Attach files": "파일 첨부",

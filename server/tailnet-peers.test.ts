@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import type { Machine } from "../shared/machines.ts";
-import { handleMachineRequest } from "./machine-api.ts";
+import { handleMachineBootstrapRequest } from "./machine-bootstrap-api.ts";
+const handleMachineRequest = async (request: Request, manager: MachineManager, _revoke?: unknown, _preferences?: unknown, readOnly = false): Promise<Response> => {
+  const response = await handleMachineBootstrapRequest(request, manager, readOnly, true);
+  if (!response) throw new Error("Fixture expected a tailnet bootstrap route");
+  return response;
+};
 import type { MachineManager } from "./machines.ts";
 import { resolveSavedSshTarget, parseTailnetPeers, readTailnetPeers } from "./tailnet-peers.ts";
 
@@ -150,7 +155,7 @@ describe("tailnet PC discovery", () => {
 
 describe("tailnet route gate", () => {
   const manager = { list: () => { throw new Error("must not read the roster"); } } as unknown as MachineManager;
-  const request = (headers = {}, method = "GET") => new Request("http://127.0.0.1/api/machines/tailnet", { method, headers });
+  const request = (headers = {}, method = "GET") => new Request("http://127.0.0.1/api/machines/tailnet?ssh_bootstrap=1", { method, headers });
   it("refuses watch devices before reading the network", async () => {
     const response = await handleMachineRequest(request({ "x-herdr-machine": "1" }), manager, undefined, undefined, true);
     expect(response.status).toBe(403);

@@ -193,7 +193,6 @@ export const DEVICES_KO: Record<string, string> = {
   "This PC takes connections on Tailscale. Only devices paired through the relay can sign in there; nothing new pairs.": "이 PC가 Tailscale에서 연결을 받음 · 릴레이로 연결한 기기만 여기서 로그인할 수 있고, 새 기기는 여기서 연결할 수 없습니다.",
   "This PC takes connections on your home network and on Tailscale. Only devices paired through the relay can sign in there; nothing new pairs.": "이 PC가 집 네트워크와 Tailscale에서 연결을 받음 · 릴레이로 연결한 기기만 여기서 로그인할 수 있고, 새 기기는 여기서 연결할 수 없습니다.",
   "This PC takes connections at {host} on Tailscale. Only devices paired through the relay can sign in there; nothing new pairs.": "이 PC가 Tailscale의 {host}에서 연결을 받음 · 릴레이로 연결한 기기만 여기서 로그인할 수 있고, 새 기기는 여기서 연결할 수 없습니다.",
-  "Add {name}": "{name} 추가",
   "How to connect": "연결 방법",
   "Looking for PCs…": "PC를 찾는 중…",
   "Update Ovis on that PC to 0.5 first.": "먼저 그 PC의 Ovis를 0.5로 업데이트하세요.",

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
 import { ArrowLeftRight, ChevronDown, ChevronRight, Download, EyeOff, Monitor, Pencil, Plug, Plus, RefreshCw, Search, Settings, SlidersHorizontal, Trash2, Unplug, X } from "lucide-react";
-import { OWN_UPDATE_OFFER, type Machine, type MachineState, type MachineUpdate, type RemoteOvis } from "../../shared/machines.ts";
+import { OWN_UPDATE_OFFER, type Machine, type MachineState, type MachineSetupSummary, type MachineUpdate, type RemoteOvis } from "../../shared/machines.ts";
+import { BootstrapRevokeDialog } from "./MachineBootstrap.tsx";
 import { copyText } from "../lib/clipboard.ts";
 import { AppLayoutContext, FULL_LAYOUT, MachineContext, type LayoutOffer } from "../lib/machineContext.tsx";
 import { answerMachineSetup, machineRequest } from "../lib/api.ts";
@@ -56,7 +57,7 @@ export const STATE_WORD: Readonly<Record<MachineState, string>> = {
 
 /** `activity`: App's live counters per PC and finishes looked at here; both sidebar lists draw from it.
  *  `machines` are the PCs this device shows (Settings → Devices and PCs chooses them) */
-interface Props { machines: Machine[]; /** every PC of the roster, the hidden ones too: Manage PC's Hide on this device keeps those hidden (lib/hiddenMachines.ts) */ allMachines?: Machine[]; selectedMachineId: string; selectedPaneId: string | null; activity: SidebarActivity; actions: AppActions; watching?: boolean; /** whether the Herdr app's window owns a PC's workspaces (lib/machineContext.tsx AppLayoutContext); none without it */ appLayout?: (machineId: string) => LayoutOffer; /** a phone's drawer is out: closing it clears the filter */ drawerOpen?: boolean; /** counts the command palette's Filter workspaces and agents: each new count shows the field and focuses it */ filterRequest?: number;/** each open, connected PC shows its CPU, memory and disk (lib/settings.ts pcLoadOn) */ pcLoad?: boolean; /** the sidebar is on screen (a wide window's that is not hidden, a phone's open drawer): the PC load is asked for only then */ shown?: boolean; onSelect(machineId: string, paneId: string | null): void; onNew(machineId: string): void; onSetup(machine: Machine, update?: boolean): void; /** a sign-in tab the usage popover opened */ onUsageLogin(paneId: string): void }
+interface Props { setups?: MachineSetupSummary[]; onReopenSetup?(id: string): void; machines: Machine[]; /** every PC of the roster, the hidden ones too: Manage PC's Hide on this device keeps those hidden (lib/hiddenMachines.ts) */ allMachines?: Machine[]; selectedMachineId: string; selectedPaneId: string | null; activity: SidebarActivity; actions: AppActions; watching?: boolean; /** whether the Herdr app's window owns a PC's workspaces (lib/machineContext.tsx AppLayoutContext); none without it */ appLayout?: (machineId: string) => LayoutOffer; /** a phone's drawer is out: closing it clears the filter */ drawerOpen?: boolean; /** counts the command palette's Filter workspaces and agents: each new count shows the field and focuses it */ filterRequest?: number;/** each open, connected PC shows its CPU, memory and disk (lib/settings.ts pcLoadOn) */ pcLoad?: boolean; /** the sidebar is on screen (a wide window's that is not hidden, a phone's open drawer): the PC load is asked for only then */ shown?: boolean; onSelect(machineId: string, paneId: string | null): void; onNew(machineId: string): void; onSetup(machine: Machine, update?: boolean): void; /** a sign-in tab the usage popover opened */ onUsageLogin(paneId: string): void }
 export function MachineSidebar(props: Props) {
   const t = useT();
   const activity = props.activity;
@@ -257,6 +258,7 @@ export function MachineSidebar(props: Props) {
     <section className="pcs-sidebar" aria-label={t("PCs")}>
       <div ref={machineList} className="machine-list" id={listId} aria-label={t("PCs and workspaces")}>
         <p className={noMatchWords === null ? "visually-hidden" : "tree-state sidebar-filter-empty"} role="status">{noMatchWords}</p>
+        {props.setups?.map((setup) => <MachineSetupProgress key={setup.id} setup={setup} watching={props.watching} ready={(props.allMachines ?? props.machines).some((machine) => machine.id === setup.machine_id && machine.state === "connected")} onOpen={() => props.onSelect(setup.machine_id, null)} onNew={() => props.onNew(setup.machine_id)} onReopen={props.onReopenSetup ? () => props.onReopenSetup!(setup.id) : undefined} />)}
         {props.machines.map((machine) => <MachineGroup key={machine.id} {...props} machine={machine} headerless={machine.id === loneHost} canHide={canHideMachine(roster, hiddenIds, machine.id)} onHide={() => hideMachine(machine.id)} />)}
         <p className={loadingWords === null ? "visually-hidden" : "tree-state"} role="status">{loadingWords}</p>
       </div>
@@ -292,7 +294,7 @@ function SidebarCount({ className, n, words, tooltip = true }: { className: stri
 }
 
 /** What Manage PC offers, in its menu's order. */
-export type ManageAction = "rename" | "toggle" | "setup" | "update" | "hide" | "remove";
+export type ManageAction = "rename" | "toggle" | "setup" | "update" | "hide" | "revoke-bootstrap" | "remove";
 
 /**
  * Manage PC's items for `machine`, and which of them wait. Setup and the bridge update are an SSH PC's alone. A PC
@@ -302,7 +304,7 @@ export type ManageAction = "rename" | "toggle" | "setup" | "update" | "hide" | "
  * and a removal wait while one of them runs (`busy`): Hide drops the row, and with it the guard on that request. `canHide`: another PC stays shown (lib/hiddenMachines.ts
  * canHideMachine).
  */
-export function manageActions(machine: Pick<Machine, "kind" | "herdr_profile_id" | "enabled" | "target" | "action_required">, { busy, canHide }: { busy: boolean; canHide: boolean }): { id: ManageAction; disabled: boolean }[] {
+export function manageActions(machine: Pick<Machine, "kind" | "herdr_profile_id" | "enabled" | "target" | "action_required" | "can_revoke_bootstrap">, { busy, canHide }: { busy: boolean; canHide: boolean }): { id: ManageAction; disabled: boolean }[] {
   const own = !machine.herdr_profile_id && machine.kind !== "hc";
   const reachable = machine.enabled && Boolean(machine.target);
   const actions: { id: ManageAction; disabled: boolean }[] = [];
@@ -313,6 +315,7 @@ export function manageActions(machine: Pick<Machine, "kind" | "herdr_profile_id"
     if (machine.action_required !== "connect") actions.push({ id: "update", disabled: !reachable });
   }
   if (canHide) actions.push({ id: "hide", disabled: busy });
+  if (own && machine.can_revoke_bootstrap) actions.push({ id: "revoke-bootstrap", disabled: busy });
   if (own) actions.push({ id: "remove", disabled: busy });
   return actions;
 }
@@ -321,6 +324,35 @@ export function manageActions(machine: Pick<Machine, "kind" | "herdr_profile_id"
  *  and its notice are lines of their own, the + is the New workspace row under the workspaces, and nothing is
  *  folded with no caret to open it. A Host has no Manage PC menu; Add PC is in Settings and the palette.
  *  `canHide`/`onHide`: the menu's Hide on this device, under MachineSidebar's rules. */
+export function MachineSetupProgress({ setup, watching, ready = false, onOpen, onNew, onReopen }: { setup: MachineSetupSummary; watching?: boolean; ready?: boolean; onOpen?(): void; onNew?(): void; onReopen?(): void }) {
+  const t = useT();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inFlight = useRef(false);
+  const failed = setup.phase === "failed";
+  const complete = setup.phase === "connected";
+  const cancel = async () => {
+    if (inFlight.current) return;
+    inFlight.current = true; setBusy(true); setError(null);
+    try { await answerMachineSetup(setup.id, { action: "cancel" }); }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { inFlight.current = false; setBusy(false); }
+  };
+  return <section className="machine-group machine-setup-task" aria-label={t("PC {name}", { name: setup.name })}>
+    <header className="machine-header"><div className="machine-title"><span className="sidebar-mark" aria-hidden="true"><Monitor /></span><span className="machine-name">{setup.name}</span></div></header>
+    <div className={`machine-action ${complete ? "is-setup" : "is-updating"}`} role={failed ? "alert" : "status"}>
+      <p className="machine-action-text"><strong>{t(complete ? "PC setup complete" : failed ? "Connection failed" : "Setting up PC")}</strong></p>
+      {complete ? <p className="machine-action-text">{t("Open the PC to view its workspaces, or create a workspace and choose an agent.")}</p> : failed ? <p className="machine-error">{machineErrorText(setup.error ?? setup.step, t)}</p> : <BridgeUpdateProgress update={{ job_id: setup.id, step: setup.step, progress: setup.progress }} />}
+      {!watching && <div className="machine-action-buttons">
+        {!complete && onReopen && <button type="button" className="btn" onClick={onReopen}>{t("Show setup")}</button>}
+        {complete && <><button type="button" className="btn btn-primary" disabled={!ready || !onNew} onClick={onNew}>{t("New workspace")}</button><button type="button" className="btn" disabled={!ready || !onOpen} onClick={onOpen}>{t("Open PC")}</button></>}
+        <button type="button" className="btn" disabled={busy} onClick={() => void cancel()}>{t(complete || failed ? "Dismiss" : "Cancel install")}</button>
+      </div>}
+      {error && <p className="machine-error" role="alert">{error}</p>}
+    </div>
+  </section>;
+}
+
 function MachineGroup({ machine, headerless = false, canHide, onHide, ...props }: Props & { machine: Machine; headerless?: boolean; canHide: boolean; onHide(): void }) {
   const t = useT();
   const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem(`ovis:pc-collapsed:${machine.id}`) === "1"; } catch { return false; } });
@@ -330,6 +362,8 @@ function MachineGroup({ machine, headerless = false, canHide, onHide, ...props }
   const manageButton = useRef<HTMLButtonElement>(null);
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(machine.name);
+  const [removeFirewall, setRemoveFirewall] = useState(false);
+  const [confirmRevoke, setConfirmRevoke] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const online = machine.state === "connected";
@@ -385,6 +419,7 @@ function MachineGroup({ machine, headerless = false, canHide, onHide, ...props }
       case "setup": return { id, disabled, label: t("Reconnect / setup"), icon: RefreshCw, run: () => props.onSetup(machine) };
       case "update": return { id, disabled, label: t("Update bridge…"), icon: Download, run: () => props.onSetup(machine, true) };
       case "hide": return { id, disabled, label: t("Hide on this device"), icon: EyeOff, run: onHide };
+      case "revoke-bootstrap": return { id, disabled, label: t("Revoke SSH key"), icon: Unplug, danger: true, run: () => { setRemoveFirewall(false); setConfirmRevoke(true); } };
       case "remove": return { id, disabled, label: t("Remove PC…"), icon: Trash2, danger: true, divider: true, run: () => setConfirmRemove(true) };
     }
   });
@@ -464,7 +499,8 @@ function MachineGroup({ machine, headerless = false, canHide, onHide, ...props }
       <span className="machine-menu-state">{stateLine}</span>
       {manageNote !== null && <span className="machine-menu-note">{manageNote}</span>}
     </span>} />}
-    {confirmRemove && <ConfirmDialog title={t("Remove PC {name}?", { name: machine.name })} body={t(machine.kind === "relay" ? "Removes this PC here. To end its access too, revoke it under Phone & devices on that PC." : "Removes this registration. Remote sessions keep running.")} confirmLabel={t("Remove PC")}
+    {confirmRevoke && <BootstrapRevokeDialog machine={machine} removeFirewall={removeFirewall} onRemoveFirewall={setRemoveFirewall} onClose={() => setConfirmRevoke(false)} />}
+    {confirmRemove && <ConfirmDialog title={t("Remove PC {name}?", { name: machine.name })} body={t(machine.kind === "relay" ? "Removes this PC here. To end its access too, revoke it under Phone & devices on that PC." : machine.can_revoke_bootstrap ? "Forgetting this PC deletes only the local key. Its public key and any firewall rule remain on the PC until you remove them there." : "Removes this registration. Remote sessions keep running.")} confirmLabel={t("Remove PC")}
       onConfirm={async () => { await mutate("DELETE", undefined, true); setConfirmRemove(false); }} onClose={() => setConfirmRemove(false)} />}
     {error && <p className="machine-error" role="alert">{error}</p>}
     {/* under a filter a folded PC's roster is mounted, hidden, so the branches it reads can be found */}

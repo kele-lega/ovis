@@ -14,7 +14,7 @@ export function TailnetPcs({ onAdd }: { onAdd: (initial: MachineSetupInitial) =>
   const load = async () => {
     const current = ++generation.current;
     setLoading(true); setFailed(false); setResult(null);
-    try { const next = await machineRequest<TailnetPeers>("/tailnet"); if (generation.current === current) setResult(next); }
+    try { const next = await machineRequest<TailnetPeers>("/tailnet?ssh_bootstrap=1"); if (generation.current === current) setResult(next); }
     catch { if (generation.current === current) setFailed(true); }
     finally { if (generation.current === current) setLoading(false); }
   };

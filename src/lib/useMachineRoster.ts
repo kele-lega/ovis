@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
-import type { DevicePairedEvent, DeviceRemovedEvent, Machine, MachineEvent, RelayPairingRequest, RemotePairingRequest } from "../../shared/machines.ts";
+import type { DevicePairedEvent, DeviceRemovedEvent, Machine, MachineEvent, MachineSetupSummary, RelayPairingRequest, RemotePairingRequest } from "../../shared/machines.ts";
 import { ApiError, authenticate, fetchMachines, observePaneSessions, paneSessionEvents, paneSessionsMoving, verifySourceBoot } from "./api.ts";
 import { passingFolder, recentDirectories } from "./recent-directories.ts";
 import { keepMachineEvents } from "./machineEventStream.ts";
@@ -216,7 +216,8 @@ export function useRosterLoader({ locked, healthFailing, rosterIn, setMachines, 
   return { snapshotRequests, reorderCoordinator, load, scheduleRefetch, onRosterStream };
 }
 
-export function useRosterEvents({ onPaneMoved, machineSessions, locked, onRosterStream, receivePreferencesRef, snapshotRequests, onRoster, reorderCoordinator, setMachines, rosterIn, setMachineRosterLoaded, machinesRef, onPaneStatus, onPaneExited, followFocusRef, selectionRef, splitShownRef, splitRef, pendingLink, selectionHint, setSelectedPaneId, setNotificationViewTarget, setTerminalPeek, setAutoSelected, scheduleRefetch, preferencesResubscribedRef, preferencesDisconnectedRef, preferencesClosedRef, dropIn, chime, setPairedNotices, setRelayPairings, setRemotePairings, setRemovedNotices, getTakeNotificationTargetRef }: {
+export function useRosterEvents({ receiveMachineSetups, onPaneMoved, machineSessions, locked, onRosterStream, receivePreferencesRef, snapshotRequests, onRoster, reorderCoordinator, setMachines, rosterIn, setMachineRosterLoaded, machinesRef, onPaneStatus, onPaneExited, followFocusRef, selectionRef, splitShownRef, splitRef, pendingLink, selectionHint, setSelectedPaneId, setNotificationViewTarget, setTerminalPeek, setAutoSelected, scheduleRefetch, preferencesResubscribedRef, preferencesDisconnectedRef, preferencesClosedRef, dropIn, chime, setPairedNotices, setRelayPairings, setRemotePairings, setRemovedNotices, getTakeNotificationTargetRef }: {
+  receiveMachineSetups?: (setups: MachineSetupSummary[]) => void;
   machineSessions: MachineSessionRegistry;
   locked: boolean | null;
   onRosterStream: (update: RosterStreamUpdate) => void;
@@ -263,6 +264,7 @@ export function useRosterEvents({ onPaneMoved, machineSessions, locked, onRoster
     if (locked !== false) return;
     const onMessage = (payload: MachineEvent) => {
       const takeNotificationTargetRef = getTakeNotificationTargetRef();
+      if (payload.type === "machine-setups") { receiveMachineSetups?.(payload.setups); return; }
       if (payload.type === "preferences") { receivePreferencesRef.current(payload.preferences); return; }
       if (payload.type === "herdr-sidebar") { setAgentRowTokens(payload.agents); return; }
       if (payload.type === "seen") { receiveSeen(payload.finishes); return; }

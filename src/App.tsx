@@ -85,7 +85,8 @@ import { OpenFileContext } from "./lib/filePaths.ts";
 import { useAccessState, useLockedRef, usePairFromAddress } from "./lib/useAccess.ts";
 import { useLocalHealth } from "./lib/useLocalHealth.ts";
 import { useMachinesRef, useRecentFolderMemory, useRefetchTimer, useRosterError, useRosterEvents, useRosterLoader, useRosterState } from "./lib/useMachineRoster.ts";
-import { useMachineDialog } from "./lib/useMachineDialog.ts";
+import { useMachineSetups } from "./lib/useMachineSetups.ts";
+import { leaveSettingsForMachineSetup, useMachineDialog } from "./lib/useMachineDialog.ts";
 import { useNewSessionMachine, useNewSessionState, useSessionHistoryList } from "./lib/useNewSessionDialog.ts";
 import { useCommandPalette } from "./lib/useCommandPalette.ts";
 import { useRenameRequest } from "./lib/useRenameRequest.ts";
@@ -213,7 +214,7 @@ export function App() {
   const { selectedMachineId, setSelectedMachineId, selectedMachine, snapshot } = useSelectedMachine({ initialLink, machines });
   const { machinesRef } = useMachinesRef({ machines });
   const [updateRemote, setUpdateRemote] = useState(false);
-  const { machineDialog, setMachineDialog, addPcPreset, setAddPcPreset, addPcFocusReturn, closeMachineDialog } = useMachineDialog();
+  const { resumeSetupId, setResumeSetupId, machineDialog, setMachineDialog, addPcPreset, setAddPcPreset, addPcFocusReturn, closeMachineDialog } = useMachineDialog();
   const { newSessionMachineId, setNewSessionMachineId } = useNewSessionMachine();
   const { health, localFreshness, shownHealth, readLocalHealth } = useLocalHealth();
   const exposure = health?.lan_exposure ?? health?.direct_exposure;
@@ -289,7 +290,8 @@ export function App() {
   const { dropIn, chime, onRoster, onPaneStatus, onPaneExited } = useAlertSignals({ settings, selectionRef, drawerOpenRef, splitRef, splitShownRef, machinesRef, alertsRef, alertsOnRef, pushOnRef, statusRef, turnStartRef, lastTurnRef, alertSoundRef });
 
   // herdr moved a pane under a new ID, from anywhere (the server's pane-moved): followPaneMove below, called at the event
-  useRosterEvents({ onPaneMoved: (machineId, from, to) => followPaneMove(machineId, from, to), machineSessions, locked, onRosterStream, receivePreferencesRef, snapshotRequests, onRoster, reorderCoordinator, setMachines, rosterIn, setMachineRosterLoaded, machinesRef, onPaneStatus, onPaneExited, followFocusRef, selectionRef, splitShownRef, splitRef, pendingLink, selectionHint, setSelectedPaneId, setNotificationViewTarget, setTerminalPeek, setAutoSelected, scheduleRefetch, preferencesResubscribedRef, preferencesDisconnectedRef, preferencesClosedRef, dropIn, chime, setPairedNotices, setRelayPairings, setRemotePairings, setRemovedNotices, getTakeNotificationTargetRef: () => takeNotificationTargetRef });
+  const { machineSetups, receiveMachineSetups } = useMachineSetups(locked);
+  useRosterEvents({ receiveMachineSetups, onPaneMoved: (machineId, from, to) => followPaneMove(machineId, from, to), machineSessions, locked, onRosterStream, receivePreferencesRef, snapshotRequests, onRoster, reorderCoordinator, setMachines, rosterIn, setMachineRosterLoaded, machinesRef, onPaneStatus, onPaneExited, followFocusRef, selectionRef, splitShownRef, splitRef, pendingLink, selectionHint, setSelectedPaneId, setNotificationViewTarget, setTerminalPeek, setAutoSelected, scheduleRefetch, preferencesResubscribedRef, preferencesDisconnectedRef, preferencesClosedRef, dropIn, chime, setPairedNotices, setRelayPairings, setRemotePairings, setRemovedNotices, getTakeNotificationTargetRef: () => takeNotificationTargetRef });
 
   const handleServerMessage = useServerMessageHandler(setOutputStopped);
 
@@ -632,6 +634,8 @@ export function App() {
         setSettingsOpen(true);
       },
       openAddPc: (preset) => {
+        leaveSettingsForMachineSetup();
+        setResumeSetupId(undefined);
         // the new PC reports its progress in the sidebar: nothing should sit over it
         setSettingsOpen(false);
         setUpdateRemote(false);
@@ -640,6 +644,8 @@ export function App() {
         setMachineDialog("new");
       },
       connectPc: (machine) => {
+        leaveSettingsForMachineSetup();
+        setResumeSetupId(undefined);
         setSettingsOpen(false);
         setUpdateRemote(false);
         addPcFocusReturn.current = true;
@@ -975,7 +981,7 @@ export function App() {
           {/* a sidebar that cannot be drawn leaves the panes working */}
           <RenderBoundary resetKey={null} fallback={(retry) => <RegionCrash message={t("The sidebar can't be shown.")} retry={retry} />}>
             <CrashProbe region="sidebar" />
-            <ReorderContext.Provider value={reorderCoordinator}><MachineSidebar machines={sidebarMachines} allMachines={machines} pcLoad={pcLoadOn(settings, machines)} shown={wideScreen ? !sidebarCollapsed || sidebarPeeking : drawerOpen} watching={auth?.role === "watch"} appLayout={appLayoutOn} drawerOpen={drawerOpen} filterRequest={sidebarFilterRequest} selectedMachineId={selectedMachineId} selectedPaneId={selectedPaneId} activity={activity} actions={actions} onSelect={selectTarget} onUsageLogin={(paneId) => { selectTarget("local", paneId, "terminal"); void load(); }} onSetup={(machine, update = false) => { setUpdateRemote(update); setMachineDialog(machine); }} onNew={(id) => { setNewSessionMachineId(id); setNewTab(null); setNewSessionOpen(true); setDrawerOpen(false); }} /></ReorderContext.Provider>
+            <ReorderContext.Provider value={reorderCoordinator}><MachineSidebar setups={machineSetups} onReopenSetup={(id) => { setResumeSetupId(id); setUpdateRemote(false); setMachineDialog("new"); }} machines={sidebarMachines} allMachines={machines} pcLoad={pcLoadOn(settings, machines)} shown={wideScreen ? !sidebarCollapsed || sidebarPeeking : drawerOpen} watching={auth?.role === "watch"} appLayout={appLayoutOn} drawerOpen={drawerOpen} filterRequest={sidebarFilterRequest} selectedMachineId={selectedMachineId} selectedPaneId={selectedPaneId} activity={activity} actions={actions} onSelect={selectTarget} onUsageLogin={(paneId) => { selectTarget("local", paneId, "terminal"); void load(); }} onSetup={(machine, update = false) => { setUpdateRemote(update); setMachineDialog(machine); }} onNew={(id) => { setNewSessionMachineId(id); setNewTab(null); setNewSessionOpen(true); setDrawerOpen(false); }} /></ReorderContext.Provider>
           </RenderBoundary>
           <SidebarResizer width={sidebarWidth} onResize={setSidebarWidth} />
         </aside>
@@ -1240,7 +1246,7 @@ export function App() {
           void load();
         }}
       /></MachineContext.Provider>}
-      {machineDialog && <MachineDialog updateRemote={updateRemote} machine={machineDialog === "new" ? undefined : machineDialog} preset={machineDialog === "new" ? addPcPreset ?? undefined : undefined} onClose={closeMachineDialog} onConnected={(id) => { closeMachineDialog(); selectTarget(id, null); void load(); }} />}
+      {machineDialog && <MachineDialog key={resumeSetupId ?? (machineDialog === "new" ? "new" : machineDialog.id)} resumeJobId={resumeSetupId} updateRemote={updateRemote} machine={machineDialog === "new" ? undefined : machineDialog} preset={machineDialog === "new" ? addPcPreset ?? undefined : undefined} onClose={closeMachineDialog} onConnected={(id) => { closeMachineDialog(); selectTarget(id, null); void load(); }} />}
       <Droplet onOpen={(machineId, paneId) => {
         // an ended pane's card outlives the pane: the refetch has dropped it, and selecting it attaches nothing
         if (!machinesRef.current.find((m) => m.id === machineId)?.snapshot?.panes.some((p) => p.pane_id === paneId)) return;

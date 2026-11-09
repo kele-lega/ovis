@@ -193,7 +193,6 @@ export const DEVICES_JA: Record<string, string> = {
   "This PC takes connections on Tailscale. Only devices paired through the relay can sign in there; nothing new pairs.": "このPCはTailscaleで接続を受け付けます。ここでサインインできるのはリレーでペアリングしたデバイスだけで、新しいペアリングはできません。",
   "This PC takes connections on your home network and on Tailscale. Only devices paired through the relay can sign in there; nothing new pairs.": "このPCは自宅のネットワークとTailscaleで接続を受け付けます。ここでサインインできるのはリレーでペアリングしたデバイスだけで、新しいペアリングはできません。",
   "This PC takes connections at {host} on Tailscale. Only devices paired through the relay can sign in there; nothing new pairs.": "このPCはTailscaleの{host}で接続を受け付けます。ここでサインインできるのはリレーでペアリングしたデバイスだけで、新しいペアリングはできません。",
-  "Add {name}": "{name} を追加",
   "How to connect": "接続方法",
   "Looking for PCs…": "PC を探しています…",
   "Update Ovis on that PC to 0.5 first.": "先にその PC の Ovis を 0.5 に更新してください。",

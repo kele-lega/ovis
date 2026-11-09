@@ -52,6 +52,13 @@ describe("Manage PC's menu", () => {
     expect(waiting(ssh())).toEqual([]);
   });
 
+  it("keeps guided-key revocation explicit, separate from removal and absent on managed catalogs", () => {
+    expect(ids(ssh({ can_revoke_bootstrap: true }))).toEqual(["rename", "toggle", "setup", "update", "hide", "revoke-bootstrap", "remove"]);
+    expect(waiting(ssh({ can_revoke_bootstrap: true }), true)).toContain("revoke-bootstrap");
+    expect(ids(ssh({ can_revoke_bootstrap: true, herdr_profile_id: "profile" }))).not.toContain("revoke-bootstrap");
+    expect(ids(ssh({ can_revoke_bootstrap: true, kind: "hc" }))).not.toContain("revoke-bootstrap");
+  });
+
   it("offers no SSH setup or bridge update for a PC reached through the relay", () => {
     expect(ids(ssh({ kind: "relay", target: undefined }))).toEqual(["rename", "toggle", "hide", "remove"]);
   });

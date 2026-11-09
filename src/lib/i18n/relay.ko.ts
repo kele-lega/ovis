@@ -63,7 +63,6 @@ export const RELAY_KO: Record<string, string> = {
   "Ready": "연결됨",
   "Needs approval": "승인 필요",
   "Offline · {when}": "오프라인 · {when}",
-  "Offline": "오프라인",
   "The PC is off, or Ovis is not running on it.": "PC가 꺼져 있거나 Ovis가 실행 중이 아닙니다.",
   "The relay did not answer. Check this device's network.": "릴레이가 답하지 않습니다. 이 기기의 네트워크를 확인하세요.",
   "Update Ovis on it": "Ovis 업데이트 필요",
