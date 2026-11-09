@@ -7,7 +7,7 @@ import { parseWorkflow, root, type Job } from "./shell-workflow-rules.ts";
 // in GitHub's hosted queue, but a fork pull request's job must never reach that pool: the guard comes
 // first, so a fork gets ubuntu-24.04 whatever the repository variables say.
 const FORK_GUARD = "github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-24.04'";
-const LIGHT = `\${{ ${FORK_GUARD} || fromJSON(github.ref == 'refs/heads/main' && vars.CI_MAIN_SELF_HOSTED_LABELS || vars.CI_LIGHT_LABELS || vars.CI_SELF_HOSTED_LABELS || '["self-hosted","self-hosted-ovis"]') }}`;
+const LIGHT = `\${{ ${FORK_GUARD} || fromJSON(github.ref == 'refs/heads/main' && vars.CI_MAIN_SELF_HOSTED_LABELS || vars.CI_LIGHT_LABELS || vars.CI_SELF_HOSTED_LABELS || (github.repository == 'devswha/ovis' && '["self-hosted","self-hosted-ovis"]' || '"ubuntu-24.04"')) }}`;
 // ci.yml's heavy Linux jobs: scripts/ci-runner-route.sh keeps forks hosted (scripts/ci-runner-route.test.ts)
 const ROUTED = "${{ fromJSON(needs.changes.outputs.linux) }}";
 const HOSTED = /^(ubuntu|windows|macos)-[\w.-]+$/;

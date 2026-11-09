@@ -276,13 +276,14 @@ export function mayWrite(env: Record<string, string | undefined>, writer: string
 }
 
 function viteBuild(args: readonly string[]): number {
-  const result = spawnSync(process.execPath, ["--bun", "vite", "build", ...args], { stdio: "inherit" });
+  // Name the script, not Bun's package-bin runner: its node shebang must not bypass Bun APIs in vite.config.ts.
+  const result = spawnSync(process.execPath, [join(process.cwd(), "node_modules/vite/bin/vite.js"), "build", ...args], { stdio: "inherit" });
   return result.status ?? 1;
 }
 
 /** `vite build` without blocking this process, so the lock's heartbeat keeps running meanwhile. */
 async function viteBuildAsync(args: readonly string[]): Promise<number> {
-  return Bun.spawn([process.execPath, "--bun", "vite", "build", ...args], { stdio: ["inherit", "inherit", "inherit"] }).exited;
+  return Bun.spawn([process.execPath, join(process.cwd(), "node_modules/vite/bin/vite.js"), "build", ...args], { stdio: ["inherit", "inherit", "inherit"] }).exited;
 }
 
 if (import.meta.main) {

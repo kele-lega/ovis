@@ -743,6 +743,18 @@ The values are the ones in `src/styles.css`. Every token but `--fs-input` is `ca
   effort the reader picked in the dialog stays when the next agent has none set. Codex and the
   Claude Code app keep a default model and effort per agent the same way; Ovis never writes the
   agent's own config file for it.
+  This fork also retains `agentCommands`, an explicit full command per kind, following Zed's
+  [external-agent launch configuration](https://zed.dev/docs/ai/external-agents), adapted to
+  Ovis's existing fields rather than copied UI or code. Save accepts one nonblank line up to
+  2,000 UTF-16 code units without changing its bytes; Clear restores the normal launch. Invalid
+  drafts stay visible and unsaved. Plaintext commands are shared, carry a no-secrets warning and
+  live separately in `ovis:agent-commands` so an old tab's unrelated save cannot erase them.
+  A saved command replaces, rather than extends, model, effort, permission and first-prompt argv.
+  Creation requires that PC's live `launch_command` and Herdr `atomic_command_launch` support;
+  native Windows and herdr-core fail closed. Herdr spawns the command atomically with the pane;
+  Ovis never types it into an existing shell, retries an uncertain creation or replays it on
+  restore. A first message is queued only for a safely identified launch PID; otherwise it stays
+  a draft. Resume is unchanged and never reads saved commands.
   The viewer loads a Markdown file's first 256 KB through one bounded streaming reader, with abort
   on close or navigation and a 5 s deadline; any other text that fits 256 KB reads whole under the
   same budget, and a larger one reads up to 8 MB and 200 000 lines with a 30 s deadline
@@ -1808,7 +1820,9 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   failures disable the chips. New tab keeps its workspace folder and shows no recent chips.
 - Submit calls `POST /api/workspace/create`; the server performs `workspace.create` and, when an
   agent was chosen, `agent.start` in its root pane. Pending and partial agent-start failure are
-  explicit before the created pane opens.
+  explicit before the created pane opens. With a saved full command, the atomic
+  `workspace.create_with_command` replaces create-then-start; the equivalent tab/worktree
+  methods follow the same rule. Unsupported targets refuse before making a pane.
 - As **New tab** (from a row's `⋯` menu, the tab menu's New tab with agent… or the palette),
   the same dialog is titled `New tab · <workspace>`, shows the workspace's folder as a fact in a
   dashed box (`.new-session-folder`: a worktree's checkout, else the folder of the pane in front)

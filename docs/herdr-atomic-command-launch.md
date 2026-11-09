@@ -3,7 +3,10 @@
 Custom commands need both this Ovis bridge and a running Herdr with an explicit
 `ping.capabilities.atomic_command_launch: true`. An Ovis update alone is insufficient.
 The normal launch/resume paths remain compatible with older daemons. Native Windows
-custom command creation is disabled; it never falls back to typing into a terminal.
+and the upstream `herdr-core` runtime do not support this custom-command contract and
+fail closed; Ovis never falls back to typing into a terminal. Having a `terminal.run`
+argv API does not establish atomic worktree creation, no-replay or completed-pane retention.
+The runtime is not switched to enable this feature.
 
 ## Source delivery
 

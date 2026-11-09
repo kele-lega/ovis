@@ -13,7 +13,9 @@
 # release.yml also accept) keeps every job hosted while that PC is offline. A push to main takes the
 # repository variable CI_MAIN_SELF_HOSTED_LABELS over CI_SELF_HOSTED_LABELS when it is set, so main's
 # runs go to runners pull requests never use (run.sh --reserved); "ubuntu-24.04" there keeps only
-# main hosted, and deleting it puts main back on the shared runners. This script runs from the
+# main hosted, and deleting it puts main back on the shared runners. Only devswha/ovis assumes that
+# pool exists: other repositories stay hosted unless their administrator configures labels.
+# This script runs from the
 # checked-out revision, which a fork pull request controls; the runner itself refuses fork code
 # (scripts/self-hosted-runner/job-started.sh).
 set -euo pipefail
@@ -104,6 +106,9 @@ elif [[ "$event" == push && "${REF:-}" == refs/heads/main && -n "${main_configur
   fi
 elif [[ -n "${configured//[[:space:]]/}" ]]; then
   choose_labels "repository variable CI_SELF_HOSTED_LABELS" "$configured"
+elif [[ "${REPOSITORY:-}" != devswha/ovis ]]; then
+  echo "Runner: ubuntu-24.04 (repository has no implicit maintainer runner pool)" >&2
+  echo "linux=$hosted"
 elif [[ "$event" == push ]]; then
   choose_labels "default for $event (CI_SELF_HOSTED_LABELS unset)" "$default_labels"
 elif [[ "$event" == pull_request ]]; then

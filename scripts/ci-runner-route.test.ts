@@ -71,6 +71,15 @@ function routed(env: Record<string, string>): unknown {
 }
 
 describe.skipIf(process.platform === "win32")("CI runner route", () => {
+  it("keeps another repository hosted unless its administrator configures a runner pool", () => {
+    const state = actions({});
+    for (const event of ["push", "pull_request", "workflow_dispatch"]) {
+      expect(routed({ EVENT_NAME: event, REPOSITORY: "fixture/ovis", HEAD_REPO: "fixture/ovis", FAKE_GH: state })).toBe("ubuntu-24.04");
+    }
+    expect(existsSync(join(state, "calls"))).toBe(false);
+    expect(routed({ EVENT_NAME: "pull_request", REPOSITORY: "fixture/ovis", HEAD_REPO: "fixture/ovis", CONFIGURED_LABELS: labels })).toEqual(JSON.parse(labels));
+  });
+
   it("routes a push to the maintainer PC's runners without the variable", () => {
     expect(routed({ EVENT_NAME: "push" })).toEqual(["self-hosted", "self-hosted-ovis"]);
   });

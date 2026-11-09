@@ -365,9 +365,10 @@ describe("bun scripts/build-cache.ts", () => {
   /** A checkout whose `vite` writes dist/ from main.ts and counts its runs. */
   function project(): { root: string; runs: () => number } {
     const root = checkout();
-    const bin = join(root, "node_modules/.bin");
+    const bin = join(root, "node_modules/vite/bin");
     mkdirSync(bin, { recursive: true });
-    writeFileSync(join(bin, "vite"), `#!/usr/bin/env node
+    writeFileSync(join(bin, "vite.js"), `#!/usr/bin/env node
+if (typeof Bun === "undefined") throw new Error("Vite must run inside Bun, not its node shebang");
 const fs = require("node:fs");
 fs.appendFileSync("node_modules/runs", "x");
 fs.rmSync("dist", { recursive: true, force: true });
@@ -375,7 +376,7 @@ fs.mkdirSync("dist");
 fs.writeFileSync("dist/index.html", fs.readFileSync("main.ts", "utf8") + (process.env.VITE_FLAG ?? ""));
 if (process.env.EDIT_DURING_BUILD) fs.writeFileSync("main.ts", process.env.EDIT_DURING_BUILD);
 `);
-    chmodSync(join(bin, "vite"), 0o755);
+    chmodSync(join(bin, "vite.js"), 0o755);
     return { root, runs: () => existsSync(join(root, "node_modules/runs")) ? readFileSync(join(root, "node_modules/runs"), "utf8").length : 0 };
   }
   const buildEnv = (cache: string | null, extra: Record<string, string> = {}): Record<string, string | undefined> => {

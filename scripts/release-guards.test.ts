@@ -185,8 +185,8 @@ describe("check", () => {
     };
     const guard = workflow.jobs.fast.steps.find((step) => step.name === "Release guards")!;
     expect(guard.env!.BASE_SHA).toContain("github.event.repository.default_branch");
-    expect(guard.run).toContain("bun scripts/release-guards.ts --base FETCH_HEAD");
-    const fetchScript = guard.run!.split("\n").filter((line) => line.trim()).slice(0, -1).join("\n");
+    expect(guard.run).toContain('bun scripts/release-guards.ts --base "$guard_base"');
+    const fetchScript = guard.run!.split("\n").filter((line) => line.trim()).slice(0, 2).join("\n");
     const remote = released({ "server/index.ts": "b" });
     run(remote, "tag", "-d", "v1.0.0", "remote-v1");
     const local = mkdtempSync(join(tmpdir(), "ovis-guard-fetch-"));

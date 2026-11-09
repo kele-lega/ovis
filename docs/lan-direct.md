@@ -3,6 +3,9 @@
 The unified Ovis page and its machine roster stay on the connection server (A). Selected remote
 terminals and programmatic session APIs can connect directly to the same bridge on B. Herdr
 retains ownership of its existing session, PTYs and history. No second Herdr session is created.
+This browser path applies to an existing **SSH-managed** PC only. It is separate from upstream's
+native-phone LAN/Tailscale transport and its paired relay-PC connections; neither is replaced or
+reinterpreted as an SSH bridge. A relay-PC forwarding token is not a credential for B.
 
 ## Quick configuration
 
@@ -90,7 +93,9 @@ existing CSP and proxy paths.
   travels in the offered `ovis.ticket.*` subprotocol; B selects only `ovis.v1`. Nothing is placed in
   a URL or browser storage. Browser HTTP credentials stay in memory and do not use cross-site cookies.
 - B validates Origin, signature, audience, expiry and replay state before admission. Its dedicated
-  ingress only serves the finite session API allowlist. Watching devices remain read-only even if
+  ingress only serves the finite session API allowlist. Snapshots retain B's browser redaction and
+  the bounded redaction policy supplied by A over its authenticated trust channel, so a hidden
+  token does not become visible merely by changing transports. Watching devices remain read-only even if
   they send an interact role frame. Administrative APIs and trust registration are not exposed there.
 - A renews each active bridge trust lease every 25 seconds; B closes connections if the lease is not
   renewed within 90 seconds. Device revocation, logout and machine disconnect revoke direct access.
@@ -100,6 +105,11 @@ existing CSP and proxy paths.
   If a control-path revocation cannot reach B, A stops renewing that lease and expiry fails closed.
   Trust registration accepts only an authenticated bridge/shared-token Bearer; shared-token guesses
   use the same bounded attempt budget as normal API requests, never a browser cookie.
+- Terminal receipt resumption uses the same per-machine, per-principal, per-browser scoping as
+  the authenticated SSH relay. A signs that derived identity into the one-use WS grant; B takes
+  the receipt identity from the verified grant, never an unscoped browser attach frame. Watch
+  access cannot claim an interacting browser's input receipts. This preserves upstream's
+  receipt/restore behaviour without replaying uncertain input.
 - Direct HTTP provides explicit-origin CORS including authorization preflights and ETag/range headers.
   Programmatic chat, file and Git diff requests use the central machine-scoped fetch transport.
   Images, videos, PDF frames and download links that cannot carry bearer headers continue through

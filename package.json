@@ -10,9 +10,9 @@
     "url": "git+https://github.com/devswha/ovis.git"
   },
   "scripts": {
-    "dev": "bun --bun vite",
+    "dev": "bun ./node_modules/vite/bin/vite.js",
     "build": "bun scripts/build-cache.ts",
-    "build:shell": "bun --bun vite build --mode shell",
+    "build:shell": "bun ./node_modules/vite/bin/vite.js build --mode shell",
     "server": "bun run server/index.ts",
     "start": "bun run build && bun run server/managed.ts",
     "typecheck": "bun scripts/typecheck.ts",

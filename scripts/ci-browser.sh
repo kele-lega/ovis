@@ -229,6 +229,8 @@ run_script scripts/context-menu-inputs-demo-regression.ts
 run_script scripts/render-crash-demo-regression.ts
 run_script scripts/phone-split-grid-demo-regression.ts
 run_script scripts/recent-folders-regression.ts
+run_script scripts/custom-launch-demo-regression.ts
+run_script scripts/tailnet-pcs-demo-regression.ts
 run_script scripts/phone-worktree-sheet-regression.ts
 run_script scripts/preferences-sync-regression.ts
 run_script scripts/machine-dialog-regression.ts
