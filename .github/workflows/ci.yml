@@ -259,7 +259,7 @@ jobs:
       # A release (package.json's version not tagged yet) must raise REMOTE_BUNDLE_VERSION when the
       # bundle's inputs changed, record the telemetry Worker deploy and carry its patch notes. Only the
       # change that bumps the version against BASE_SHA counts, so PRs merged before the Release run
-      # pass. The checkout is shallow, so the tags and the base it compares with are fetched first.
+      # pass. Fetch the tags and comparison base explicitly; full history also proves an imported release's ancestry.
       - name: Release guards
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || format('refs/heads/{0}', github.event.repository.default_branch) }}

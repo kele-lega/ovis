@@ -123,7 +123,7 @@ it("adds a PC of the same Tailscale login through the relay with one tap, after 
   const { machine } = await added.json() as { machine: Machine };
   expect(machine).toMatchObject({ kind: "relay", name: "pc-b", relay: { server_id: b.context.services.relay.serverId() } });
   // added, it is no longer offered
-  expect(await (await ask("GET")).json()).toEqual({ pcs: [] });
+  expect((await (await ask("GET")).json() as Found).pcs).toEqual([]);
 });
 
 it("adds nothing when the relay finds another PC than the one that gave the code", async () => {
@@ -176,13 +176,13 @@ it("stops reading a PC's answer past its size bound", async () => {
   const big = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(JSON.stringify({ ok: true, auth: { authenticated: true, via: "tailscale", role: "drive" }, pad: "x".repeat(200_000) })) });
   cleanup.push(() => big.stop(true));
   const { ask } = await pcA([{ name: "pc-b", user: "9007199254740993" }], { "pc-b.tail.ts.net": `http://127.0.0.1:${big.port}` }, (url) => new WebSocket(url));
-  expect(await (await ask("GET")).json()).toEqual({ pcs: [] });
+  expect((await (await ask("GET")).json() as Found).pcs).toEqual([]);
 });
 
 it("does not list a PC that does not let this PC's login drive it", async () => {
   const { serveUrl, local } = await pcB("them@example.com");
   const { ask } = await pcA([{ name: "pc-b", user: "9007199254740993" }], { "pc-b.tail.ts.net": serveUrl }, local);
-  expect(await (await ask("GET")).json()).toEqual({ pcs: [] });
+  expect((await (await ask("GET")).json() as Found).pcs).toEqual([]);
   expect((await ask("POST", { url: serveUrl })).status).toBe(404);
 });
 

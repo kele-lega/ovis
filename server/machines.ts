@@ -30,7 +30,7 @@ import { TailnetPcError, TailnetPcs, type TailnetPcsOptions } from "./tailnet-pc
 import { sshCandidates, type SshCandidatesOptions } from "./ssh-candidates.ts";
 import { followOwnUpdate, offerFromStatus, readOwnStatus, cancelledWords, cancelOwnUpdate, installIdOf, OwnUpdateCancelled } from "./pc-update.ts";
 import { appRelease, INSTALLER, installPlanFor, PcInstaller, samePc, type InstallConnect, type InstallPlan } from "./pc-install.ts";
-import { warmSshAddresses } from "./ssh-address.ts";
+import { pinLiteralSshTarget, warmSshAddresses } from "./ssh-address.ts";
 import { readMoveOffer } from "./remote-move.ts";
 import { BootstrapError, revokeBootstrap, SshBootstrap, type BootstrapDependencies, type BootstrapLease } from "./ssh-bootstrap.ts";
 import type { BootstrapAttempt } from "../shared/bootstrap.ts";
@@ -518,6 +518,7 @@ export class MachineManager {
       const metadata = this.bootstrap.metadata(item.id, machine.target);
       if (!metadata) throw new Error("Missing bootstrap SSH metadata; registrations and credentials were preserved");
       machine.can_revoke_bootstrap = !metadata.revoked;
+      pinLiteralSshTarget(machine.target!);
       this.bootstrapIdentities.add(item.id);
       this.machines.set(item.id, this.runtime(machine));
     }
@@ -1008,7 +1009,11 @@ export class MachineManager {
     const request = (typeof body === "object" && body !== null ? body : {}) as { destination?: unknown; port?: unknown; machine_id?: unknown };
     const targets: SshTarget[] = [];
     // only an address the setup would take: never anything ssh could read as an option
-    if (typeof request.destination === "string") { try { targets.push(validateTarget({ destination: request.destination, ...(typeof request.port === "number" ? { port: request.port } : {}) })); } catch { /* refused by the setup itself */ } }
+    const guided = typeof request.machine_id === "string" && this.bootstrapIdentities.has(request.machine_id);
+    if (typeof request.destination === "string") { try {
+      const target = validateTarget({ destination: request.destination, ...(typeof request.port === "number" ? { port: request.port } : {}) });
+      targets.push(guided ? pinLiteralSshTarget(target) : target);
+    } catch { /* refused by the setup itself */ } }
     const saved = typeof request.machine_id === "string" ? this.machines.get(request.machine_id)?.machine.target : undefined;
     if (saved) targets.push(saved);
     for (const job of this.jobs.values()) if (!TERMINAL.has(job.public.phase) || job.closing) targets.push(job.public.target);
@@ -1278,6 +1283,7 @@ export class MachineManager {
   setup(request: SetupRequest, options: { auto?: boolean; expectedRevision?: string; keysOnly?: boolean; fromInstall?: boolean; bootstrap?: BootstrapLease } = {}): SetupJob {
     if (this.stopped) throw new Error("Server stopping");
     let target = validateTarget(request);
+    if (options.bootstrap || request.machine_id && this.bootstrapIdentities.has(request.machine_id)) pinLiteralSshTarget(target);
     // an install over SSH stops and starts that PC's Ovis: nothing else connects there until it hands over
     if (!options.fromInstall && (this.installer.runningAt(target) || request.machine_id && this.installer.runningFor(request.machine_id))) throw new Error("Ovis is being installed on this PC; wait for it to finish, or cancel it.")
     const existing = request.machine_id ? this.machines.get(request.machine_id) : undefined;

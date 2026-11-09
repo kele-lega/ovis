@@ -6,9 +6,11 @@ The **SSH** tab lists the PCs it can find, each with **Add**, which opens the se
 
 ### Tailscale discovery
 
-Settings → Remote PCs → **Tailscale network** lists other Linux, macOS and Windows PCs owned by
-this connection server's Tailscale user. It reads `tailscale status --json` when the page opens
-and when you choose Refresh, not the browser device's network. Phones, other users' devices,
+In **Settings → Devices and PCs → Add a connection → SSH**, expand **First-time SSH setup**
+to list other Linux, macOS and Windows PCs owned by this connection server's Tailscale user.
+This folded section is separate from the official SSH candidate list above. It reads
+`tailscale status --json` only when expanded and when you choose Refresh, not the browser
+device's network. Phones, other users' devices,
 shared nodes and tagged nodes are omitted. A tagged connection server cannot infer a personal
 owner; use Add PC manually there. Watch-only devices cannot read this list.
 
@@ -101,7 +103,9 @@ keys, password authentication or broader firewall rules.
 
 Save the printed SSH host fingerprints, tick the acknowledgement and choose **I ran it — continue**.
 Ovis uses only this dedicated key and bypasses ambient SSH configuration/agent identities for
-guided registrations, including after restart. The existing manual connection flow still honors
+guided registrations, including after restart and during the official installer's recovery.
+Metadata-only busy/address checks also use the guided literal target, never ambient `ssh -G`
+(which can execute a local `Match exec`). The existing manual connection flow still honors
 SSH configuration. Compare the fingerprint manually, then separately approve the proposed runtime
 and bridge installation. No full Ovis web service, agent CLI or agent login is installed by the
 bootstrap script. Herdr sessions are never stopped.
@@ -138,7 +142,7 @@ SSH bootstrap continues to use the connection-server relay and never invokes a c
 launcher. Browser-direct transport is a separate opt-in configuration; see [LAN-direct
 transport](lan-direct.md). Discovery and bootstrap do not enable it automatically.
 
-**Settings → Chat → New agents** activates saved `settings.agentCommands` values as shared
+**Settings → Agents → Full commands** activates saved `settings.agentCommands` values as shared
 preferences. The separate browser `ovis:agent-commands` record protects them from older tabs
 rewriting unrelated settings. Commands run only for an explicit new-agent creation request.
 Both the selected PC's Ovis bridge and its live Herdr daemon must support atomic command
@@ -146,11 +150,14 @@ creation. Missing capability, an older bridge or native Windows is refused befor
 a pane or forwarding a command-bearing request. Standard preset launches remain available
 after clearing that agent's command. See [Custom agent launch commands](guide.md#custom-agent-launch-commands).
 
-Bootstrap authorization needs no new bridge protocol. Existing checksum-verified runtime37
-bundles can still serve standard sessions, but their version number does not establish custom
-command support. Capability is checked against the selected bridge and its running daemon;
+Bootstrap authorization needs no new bridge protocol. The current upstream runtime bundle version
+remains 43; this synchronization does not publish or install a replacement. Older checksum-verified
+bundles, including runtime37, may serve standard sessions with their matching Ovis release, but
+neither version number establishes custom-command support or bypasses the normal bundle-version
+check. Capability is checked against the selected Ovis implementation and its running daemon;
 installing this Ovis source does not update or restart Herdr. A compatible daemon must be
-installed separately before custom commands become available.
+installed separately before custom commands become available. Native Windows and `herdr-core`
+custom commands fail closed; standard launches keep their selected runtime.
 
 **Machines already saved in herdr appear automatically.** The connection server reads its account's
 `herdr machine list --json` at startup and every five seconds after the previous read finishes. Failed reads back off up to five minutes and
@@ -436,15 +443,24 @@ Browser → connection server → OpenSSH local forward → remote loopback brid
 
 The bridge reuses this backend, so conversations, file searches, directory validation and pasted images run on the selected PC. Only a loopback bridge port is opened on that PC. OpenSSH forwards it over the authenticated connection; see [ssh(1)](https://man.openbsd.org/ssh.1) and [ssh_config(5)](https://man.openbsd.org/ssh_config.5).
 
-The current server keeps one status-only WebSocket per remote PC without attaching to a terminal. SSE carries the combined roster and status events to the browser. Selected terminals use a separate WebSocket bound to one machine for its entire lifetime. Roles and output ACKs pass through unchanged: the browser acknowledges only after xterm parses output. The relay also enforces a 1 MiB transport budget and a 2-second stalled-consumer close (`4008`).
+The current server keeps one status-only WebSocket per remote PC without attaching to a terminal.
+New browsers take the combined roster, setup progress and status events over the local WebSocket's
+`machine-events` subscription; SSE remains the fallback for older servers or an unavailable
+subscription ([transport and rollback](development.md#machine-event-transport-and-rollback)).
+Selected terminals use a separate WebSocket bound to one machine for its entire lifetime. Roles
+and output ACKs pass through unchanged: the browser acknowledges only after xterm parses output.
+The relay also enforces a 1 MiB transport budget and a 2-second stalled-consumer close (`4008`).
 
 | Route | Contract |
 |---|---|
 | `GET /api/health?scope=bridge` | App/auth liveness independent of local herdr |
 | `GET /api/bridge` | Authenticated protocol, runtime version, PID and socket identity |
-| `GET /api/machines` | PC state plus cached snapshots; each snapshot keeps its server's `order_epoch`/`read_seq`, and `source_boot_id` is the boot id the manager last proved for that PC (its own for the local PC) |
+| `GET /api/machines` | PC state plus cached snapshots and non-secret first-install `setups` summaries; each snapshot keeps its server's `order_epoch`/`read_seq`, and `source_boot_id` is the boot id the manager last proved for that PC (its own for the local PC) |
 | `GET /api/machines?verify_source_boot=:id` | The roster plus `verified_source_boot: { machine_id, boot_id }`, the boot id of the server behind that PC asked for during this request (a remote one by the manager's authenticated `GET /api/health` over its connection, never a cached answer). 400 for an empty or repeated query, 404 for an unknown PC, 503 `source_unverified` when no fresh proof came, and 503 with `Retry-After: 1` when that PC's last health call started under a second ago: the browser asks again at its next poll, reconnect or roster from another server lifetime. The manager runs at most one such call per PC and starts them at least 1000 ms apart; that bound, not the browser's coalescing or the 15 s deadline, is what limits the load on a remote PC. It adds no access beyond the authenticated reads the proxy already makes |
-| `GET /api/machines/events` | SSE roster and machine-scoped status events |
+| `GET /api/machines/events` | SSE fallback for the local WebSocket's `machine-events`: roster, setup summaries and machine-scoped status events |
+| `GET /api/machines/setups` | Non-secret first-install progress summaries, including completed/failed cards until dismissed |
+| `GET /api/machines/tailnet` | Additive `{ state, peers, pcs }`: literal-IP SSH discovery and upstream authenticated Ovis discovery; either provider may fail without erasing the other's result |
+| `GET /api/machines/tailnet?ssh_bootstrap=1` | Only `{ state, peers }`, with no Ovis port or relay probes, loaded lazily by First-time SSH setup |
 | `POST /api/machines/bootstrap` | Generate public command material for an online same-owner discovered peer |
 | `GET/DELETE /api/machines/bootstrap/:id` | Inspect or discard a pending authorization attempt |
 | `POST /api/machines/bootstrap/:id/connect` | Begin ordinary fingerprint/install-approved setup with the dedicated key |
@@ -463,6 +479,10 @@ The current server keeps one status-only WebSocket per remote PC without attachi
 
 Bootstrap routes, including pending-attempt GET, require drive access, same origin and
 `X-Herdr-Machine: 1`; responses and access refusals use `Cache-Control: no-store`.
+Bootstrap writes additionally require owner access and `X-Herdr-Update: 1`, with no query,
+like the upstream PC-management routes. Setup summaries contain no SSH secrets, challenges,
+public/private keys or terminal output and remain readable to an authenticated watching device;
+watching never permits answering, installation, revocation or discovery.
 
 Legacy HTTP paths, `/ws` without a machine, and old stored preferences/notification links mean **local**. Machine mutations require `X-Herdr-Machine: 1`, the existing token gate and same-origin browser requests. The proxy passes a bridge credential read through SSH; browser cookies, bearer tokens, forwarded headers and remote cookies are not forwarded. Authentication, push devices, VAPID keys and app updates belong to the current connection server.
 

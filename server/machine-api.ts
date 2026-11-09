@@ -14,6 +14,10 @@ import { crossSiteFileRead } from "./file-view.ts";
 import { snapshotWithoutHiddenTokens, withoutHiddenTokens } from "./herdr-sidebar.ts";
 import { parseJson, readCapped, REMOTE_LIMITS, RemoteResponseInvalid, RemoteResponseTooLarge } from "./remote-json.ts";
 import { answerCode, moveAll, moveAllPlans, PC_MOVE_PATH, PC_UPDATE_REQUIRED, tooOldToMove } from "./remote-move.ts";
+import { agentFault, type AgentPayload } from "./agent-launch.ts";
+import { remoteCommandLaunchSupported } from "./machine-command-launch.ts";
+import { handleMachineBootstrapRequest } from "./machine-bootstrap-api.ts";
+import { readTailnetPeers } from "./tailnet-peers.ts";
 
 const fail = (code: string, message: string, status: number) => jsonResponse({ error: { code, message } }, status);
 /**
@@ -102,7 +106,7 @@ export const machineEventsQueuedBytes = (): number => {
  * git and then an agent's start, and a resume on the agent's start and then the check of its store.
  */
 // runtime/move/install waits 200 s here: that PC holds the request up to 180 s (dispatch.ts), so an install that ends late is still told
-export const slowMachinePath = (path: string): boolean => path === "worktree/create" || path === "sessions/resume" || path === "runtime/move/install";
+export const slowMachinePath = (path: string): boolean => path === "worktree/create" || path === "worktree/open" || path === "sessions/resume" || path === "runtime/move/install";
 
 /**
  * A path no route is spelled as: an empty segment (`//`, or a trailing `/`) or an encoded separator.
@@ -147,6 +151,8 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
   /** this PC's owner (access.ts ownerAccess): only they may start or stop updates of its PCs */
   owner = false): Promise<Response> {
   const url = new URL(request.url);
+  const bootstrap = await handleMachineBootstrapRequest(request, manager, readOnly, owner);
+  if (bootstrap) return bootstrap;
   // A PC's file opens as this PC's /api/fs/file does, from any navigation: reading it changes
   // nothing, and Chrome on Android shows a PDF in the viewer's frame as an "Open" button whose
   // navigation is cross-site. Every other PC route still answers only this app.
@@ -168,8 +174,8 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
       setRequestRoute("/api/machines");
       const asked = url.searchParams.getAll("verify_source_boot");
       // as the machine events tell it: without the token values herdr's rows hide (withoutHiddenTokens)
-      const shown = () => withoutHiddenTokens(herdrSidebar?.get() ?? null, manager.list());
-      if (asked.length === 0) return jsonResponse({ machines: shown() } satisfies MachineRoster);
+      const shown = () => ({ machines: withoutHiddenTokens(herdrSidebar?.get() ?? null, manager.list()), setups: manager.setupSummaries() });
+      if (asked.length === 0) return jsonResponse(shown() satisfies MachineRoster);
       if (asked.length > 1 || asked[0] === "") return fail("invalid_query", "verify_source_boot names one PC", 400);
       const machineId = asked[0]!;
       const proof = await manager.verifySourceBoot(machineId, request.signal);
@@ -180,7 +186,7 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
         if (proof.refused === "interval") response.headers.set("retry-after", "1");
         return response;
       }
-      return jsonResponse({ machines: shown(), verified_source_boot: { machine_id: machineId, boot_id: proof.boot_id } } satisfies MachineRoster, 200, { "cache-control": "no-store" });
+      return jsonResponse({ ...shown(), verified_source_boot: { machine_id: machineId, boot_id: proof.boot_id } } satisfies MachineRoster, 200, { "cache-control": "no-store" });
     }
     if (parts[0] === "events" && parts.length === 1 && request.method === "GET") {
       setRequestRoute("/api/machines/events");
@@ -311,7 +317,15 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
       setRequestRoute("/api/machines/tailnet");
       // adding a PC is a driving device's; a watching one is not told which PCs are there either
       if (readOnly) return fail("read_only", "this device can only watch", 403);
-      if (request.method === "GET") return jsonResponse({ pcs: await manager.listTailnet() }, 200, { "cache-control": "no-store" });
+      if (request.method === "GET") {
+        // The original literal-IP SSH list and upstream authenticated Ovis discovery coexist.
+        // One failing provider must not erase the other's usable list or echo its diagnostics.
+        const [ssh, pcs] = await Promise.all([
+          readTailnetPeers(manager.list()).catch(() => ({ state: "unavailable" as const, peers: [] })),
+          manager.listTailnet().catch(() => []),
+        ]);
+        return jsonResponse({ ...ssh, pcs }, 200, { "cache-control": "no-store" });
+      }
       if (request.method !== "POST") return fail("method_not_allowed", "Use GET or POST", 405);
       const body: unknown = await request.json().catch(() => null);
       if (!isJsonObject(body)) return fail("invalid_body", "Expected the address of a PC found on Tailscale", 400);
@@ -445,6 +459,28 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
       // a connection that may only watch is refused here as well as at the access check, by the same rule
       // (index.ts `mutating`): it writes nothing on another PC
       if (readOnly && !["GET", "HEAD", "OPTIONS"].includes(request.method)) return fail("read_only", "this device can only watch", 403);
+      let proxyBody: BodyInit | null = request.body;
+      let commandCreate = false;
+      if (request.method === "POST" && /^(?:workspace|tab|worktree)\/(?:create|open)$/.test(path)) {
+        // Inspect without reserializing: full command text and the original body bytes must survive.
+        try {
+          const bytes = await readCapped(new Response(request.body, { headers: request.headers }), REMOTE_LIMITS.proxy);
+          const body = parseJson<unknown>(bytes);
+          if (!isJsonObject(body)) return fail("invalid_body", "Expected creation details", 400);
+          const agent = body.agent;
+          commandCreate = isJsonObject(agent) && Object.hasOwn(agent, "command");
+          if (commandCreate) {
+            // A's OS is not B's: validate syntax here; the selected endpoint proves runtime support.
+            const fault = agentFault(agent as AgentPayload, "linux");
+            if (fault) return fail("invalid_agent", fault, 400);
+          }
+          proxyBody = bytes;
+        } catch (error) {
+          return error instanceof RemoteResponseTooLarge
+            ? fail("request_too_large", "Creation details are too large", 413)
+            : fail("invalid_body", "Expected creation details", 400);
+        }
+      }
       const endpoint = manager.endpoint(id);
       if (!endpoint) {
         // a chat opened while the PC waits to reconnect asks it to try now, not after its delay
@@ -486,7 +522,11 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
       // a move's PC reads its roster again once the move is confirmed, so its receipt is soon shown
       const moved = path === "workspace/move" && request.method === "POST" ? manager.refreshAfterMove(id) : null;
       try {
-        const response = await fetch(target, { method: request.method, headers, body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body, redirect: "error", signal: AbortSignal.any([request.signal, abort.signal, AbortSignal.timeout(path === "runtime/move/install" ? 200_000 : slowMachinePath(path) ? 165_000 : 75_000)]) });
+        const signal = AbortSignal.any([request.signal, abort.signal, AbortSignal.timeout(path === "runtime/move/install" ? 200_000 : slowMachinePath(path) ? 165_000 : 75_000)]);
+        if (commandCreate && !await remoteCommandLaunchSupported(endpoint, manager.list().find((machine) => machine.id === id)?.kind, signal)) {
+          return fail("command_launch_unsupported", "This PC does not currently support atomic custom commands", 409);
+        }
+        const response = await fetch(target, { method: request.method, headers, body: ["GET", "HEAD"].includes(request.method) ? undefined : proxyBody, redirect: "error", signal });
         if (moved && response.ok) moved();
         // a start, cancel or stop shows on the PC's badge soon, not at its next slow read
         if (movePath && request.method !== "GET" && response.ok) manager.moveOfferSoon(id);

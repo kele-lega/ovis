@@ -3728,6 +3728,23 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   account, a code from another PC and Tailscale PCs added through the relay are gone from it. A phone
   opens on Phones and devices, a PC's window on SSH; a tab once opened stays mounted, so its code
   is not minted again. The dialog closes by itself once My devices sees the device a code let in.
+- First-time SSH setup stays inside that **SSH** tab as one native `details` disclosure, following
+  Ovis's existing herdr **Add a machine** connection sheet and the progressive disclosure used by
+  Zed's agent settings rather than adding a second Settings destination. It mounts discovery only
+  when opened. The normal saved-herdr/config/Tailscale candidate rows and manual address remain
+  unchanged. The folded list uses literal Tailscale IPs; the next sheet asks for the remote local
+  username, never a guessed server account. Prerequisites and the optional public bootstrap command
+  stay folded until requested, with separate fingerprint trust and install approvals. Nothing
+  connects just because the list or command is opened. Windows keeps the mirrored-terminal warning.
+- An approved first install can **Continue in background**, as an existing bridge update can.
+  Its sidebar progress card reopens the same job, without a second create/connect request. Setup
+  summaries travel with the authenticated local machine-event document (WebSocket, SSE fallback)
+  and the roster, so a fresh tab can recover the card. Closing before approval still cancels;
+  passwords and passphrases stay only in the DOM input and are cleared on submit or a changed
+  challenge. A completed setup offers explicit next steps, not an automatic agent launch. A phone
+  leaves Settings before opening the setup sheet so its Back traversal cannot immediately close
+  the new sheet. Bootstrap revoke and local forgetting remain separate confirmed actions; neither
+  can implicitly authorize the other.
 - The Ovis relay's own group in More settings: its state as the row's sentence with the switch,
   then **Reset relay identity** (confirmed in the shared `ConfirmDialog`; none for a serve-only
   install, which refuses it). Not shown in the hosted shell or to a read-only device.

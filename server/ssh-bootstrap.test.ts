@@ -10,6 +10,7 @@ import { handleMachineRequest } from "./machine-api.ts";
 import type { PushService } from "./push.ts";
 import { CompletionTracker } from "./completion.ts";
 import { SshConnection } from "./ssh.ts";
+import { forgetSshAddresses, literalAddress, sshAddress, sshAddresses } from "./ssh-address.ts";
 
 const cleanup: (() => void)[] = [];
 afterEach(() => { while (cleanup.length) cleanup.pop()!(); });
@@ -114,6 +115,30 @@ describe("normal setup integration with a reserved bootstrap identity", () => {
     const observe = spyOn(internals, "observe").mockResolvedValue(); cleanup.push(() => observe.mockRestore());
     return { dir, manager, internals, start, prepare, observe };
   }
+  it("uses literal metadata identity for guided setup, roster reload and official installer deduplication", async () => {
+    const f = fixture();
+    forgetSshAddresses();
+    const resolve = spyOn(sshAddresses, "resolve").mockResolvedValue("mallory@elsewhere.invalid:22");
+    cleanup.push(() => { resolve.mockRestore(); forgetSshAddresses(); });
+    const attempt = await f.manager.createBootstrap(request);
+    const job = f.manager.connectBootstrap(attempt.id);
+    await f.internals.jobs.get(job.id)!.finished;
+    const machine = f.manager.list().find((item) => item.id === attempt.machine_id)!;
+    expect(sshAddress(job.target)).toBe(literalAddress(attempt.target));
+    expect(sshAddress(machine.target!)).toBe(literalAddress(attempt.target));
+    await f.manager.resolveFor({ ...attempt.target, machine_id: attempt.machine_id });
+    expect(resolve).not.toHaveBeenCalled();
+    const saved = JSON.parse(readFileSync(join(f.dir, "bootstrap-machines.json"), "utf8"));
+    saved.machines[0].enabled = false;
+    writeFileSync(join(f.dir, "bootstrap-machines.json"), JSON.stringify(saved));
+    f.manager.stop();
+    const reloaded = new MachineManager(f.dir, {} as PushService, new CompletionTracker(null), async () => { throw new Error("fixture offline"); }, { bootstrap: dependencies() });
+    cleanup.push(() => reloaded.stop());
+    const target = reloaded.list().find((item) => item.id === attempt.machine_id)!.target!;
+    expect(sshAddress(target)).toBe(literalAddress(target));
+    await reloaded.resolveFor({ ...target, machine_id: attempt.machine_id });
+    expect(resolve).not.toHaveBeenCalled();
+  });
   it("pins official installer and recovery connections to the bootstrap identity without fallback", async () => {
     const f = fixture(); const attempt = await f.manager.createBootstrap(request);
     const job = f.manager.connectBootstrap(attempt.id); await f.internals.jobs.get(job.id)!.finished;

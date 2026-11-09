@@ -208,6 +208,53 @@ describe("check", () => {
     expect(missing.status).not.toBe(0);
   });
 
+  it("imports only an ancestral already-released upstream version when the fork has no app tags", () => {
+    const workflow = Bun.YAML.parse(readFileSync(join(import.meta.dir, "../.github/workflows/ci.yml"), "utf8")) as {
+      jobs: { fast: { steps: Array<{ uses?: string; with?: Record<string, unknown>; name?: string; run?: string }> } };
+    };
+    const steps = workflow.jobs.fast.steps;
+    expect(steps.find((step) => step.uses?.startsWith("actions/checkout@"))?.with?.["fetch-depth"]).toBe(0);
+    const guard = steps.find((step) => step.name === "Release guards")!;
+    const lines = guard.run!.split("\n");
+    const start = lines.findIndex((line) => line.includes('if [ -z "$(git tag'));
+    const end = lines.findIndex((line, index) => index > start && line.trim() === "fi");
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const script = lines.slice(start, end + 1).join("\n");
+    const upstream = released({ "src/App.tsx": "upstream" });
+    const makeFork = () => {
+      const fork = mkdtempSync(join(tmpdir(), "ovis-guard-import-"));
+      made.push(fork);
+      run(fork, "clone", "-q", "--no-tags", upstream, ".");
+      run(fork, "config", "url." + upstream + ".insteadOf", "https://github.com/devswha/ovis.git");
+      return fork;
+    };
+    const execute = (cwd: string) => spawnSync("bash", ["-e", "-c", script], {
+      cwd, encoding: "utf8", timeout: 5_000, env: process.env,
+    });
+    const ancestral = makeFork();
+    expect(execute(ancestral).status).toBe(0);
+    run(ancestral, "merge-base", "--is-ancestor", "v1.0.0^{commit}", "HEAD");
+    expect(check(ancestral, false)).toEqual({ version: null, problems: [] });
+    // A fork's own version bump is not an upstream release and may not bypass the release guards.
+    const unreleased = makeFork();
+    writeFileSync(join(unreleased, "package.json"), JSON.stringify({ version: "1.1.0" }));
+    expect(execute(unreleased).status).not.toBe(0);
+    // Nor may a tag of the same version name an unrelated tree.
+    const original = spawnSync("git", ["-C", upstream, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    run(upstream, "checkout", "-q", "--orphan", "unrelated");
+    run(upstream, "add", "-A");
+    run(upstream, "commit", "-qm", "unrelated release");
+    run(upstream, "tag", "-f", "v1.0.0");
+    run(upstream, "checkout", "-q", "--detach", original);
+    const nonAncestor = makeFork();
+    expect(execute(nonAncestor).status).not.toBe(0);
+    // Validate before interpolation into a remote refspec, even for malformed metadata.
+    const invalid = makeFork();
+    writeFileSync(join(invalid, "package.json"), JSON.stringify({ version: "1.0.0:refs/heads/other" }));
+    expect(execute(invalid).status).not.toBe(0);
+  });
+
   it("passes a release PR that changed only the client", () => {
     const dir = released({ "src/App.tsx": "b" });
     releasePr(dir);

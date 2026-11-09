@@ -10,6 +10,10 @@ const KEPT_MOST = 512;
 const FAILED_MS = 10_000;
 /** each target's resolved address, or null where ssh -G failed or ran out of time */
 const kept = new Map<string, { address: string | null; at: number }>();
+/** Internal authority, never accepted from a request or serialized into a target's public shape. */
+const literalTargets = new WeakSet<SshTarget>();
+/** Guided SSH ignores configuration for metadata too: `ssh -G` can execute a local `Match exec`. */
+export function pinLiteralSshTarget(target: SshTarget): SshTarget { literalTargets.add(target); return target; }
 
 /**
  * The PC an SSH target reaches, as OpenSSH resolves it (`ssh -G`, which reads the config and connects to nothing):
@@ -17,6 +21,7 @@ const kept = new Map<string, { address: string | null; at: number }>();
  * tell, the target's own words stand: its user (or this account's) at its host, on its port or 22.
  */
 export function sshAddress(target: SshTarget): string | null | undefined {
+  if (literalTargets.has(target)) return literalAddress(target);
   const hit = kept.get(keyOf(target));
   // never on the request path: resolved (again) in the background, and what is kept meanwhile stands
   if (!fresh(hit)) void warmSshAddresses([target]);
@@ -58,6 +63,7 @@ let generation = 0;
 /** Resolves these targets in the background (once each at a time), so the checks that need them find them kept. */
 export async function warmSshAddresses(targets: SshTarget[]): Promise<void> {
   await Promise.all(targets.map((target) => {
+    if (literalTargets.has(target)) return;
     const key = keyOf(target);
     if (fresh(kept.get(key))) return;
     const running = pending.get(key);
@@ -83,6 +89,7 @@ export const sshAddresses: { resolve(target: SshTarget, config?: string): Promis
 };
 /** ssh -G itself, killed outright (SIGKILL) at the limit, its output read no longer than that */
 export async function resolveWithSsh(target: SshTarget, config?: string): Promise<string | null> {
+  if (literalTargets.has(target)) return literalAddress(target);
   {
     try {
       const run = Bun.spawn(sshArgs(target, config), { stdin: "ignore", stdout: "pipe", stderr: "ignore", windowsHide: true });

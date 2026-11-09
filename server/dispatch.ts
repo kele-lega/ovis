@@ -35,7 +35,7 @@ import { forgetPageMedia } from "./file-view.ts";
 import { readCappedText, textEditAllowed } from "./file-edit.ts";
 import { handleFileRequest } from "./file-routes.ts";
 import { BACKGROUND_AGENT_PATH, handleBackgroundAgentRequest } from "./background-agent.ts";
-import { paneGet, ping, herdrSocketPath } from "./herdr/client.ts";
+import { paneGet, ping, herdrSocketPath, atomicCommandLaunchSupported } from "./herdr/client.ts";
 import { RUNTIME_MOVE_PATH, RUNTIME_MOVE_ROUTE } from "./runtime-move.ts";
 import { MOVE_LOCK_UNSAFE, moveLockPath } from "./runtime-move-lock.ts";
 import type { StopRefusal } from "./runtime-move-service.ts";
@@ -672,7 +672,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
       const info = await ping();
       // a forced answer (tests) and a runtime without the PTY sidecar are told the way a Windows herdr's own would be
       const herdr = attachableIdentity(info, sidecar);
-      return jsonResponse({ ok: true, herdr, auth, ...relay, ...exposure, ...(security ? { security } : {}), ...(herdr_core ? { herdr_core } : {}), ...(herdr_runtime ? { herdr_runtime } : {}),
+      return jsonResponse({ ok: true, herdr, launch_command: atomicCommandLaunchSupported(info), auth, ...relay, ...exposure, ...(security ? { security } : {}), ...(herdr_core ? { herdr_core } : {}), ...(herdr_runtime ? { herdr_runtime } : {}),
         web_ui: { boot_id: bootId, revision: process.env["OVIS_REVISION"] ?? null, ...(serverId ? { server_id: serverId } : {}) } }, 200, securityHeaders);
     } catch (error) {
       const failed = errorResponse(error);
