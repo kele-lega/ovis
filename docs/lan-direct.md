@@ -128,5 +128,6 @@ existing CSP and proxy paths.
   retry through A; a write attempted on B is never automatically replayed on A because it may
   already have executed. Disconnected terminal input stays a draft for explicit sending.
 
-The sidebar roster/status SSE and account/device management stay on A. This change follows the
-existing Ovis machine/session ownership rather than introducing another UI or session system.
+The sidebar roster/status machine-events WebSocket (with SSE fallback) and account/device
+management stay on A. This change follows the existing Ovis machine/session ownership rather than
+introducing another UI or session system.

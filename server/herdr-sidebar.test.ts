@@ -392,6 +392,7 @@ describe("the machine events", () => {
     const report = (tokens: Record<string, string>) => { machine.snapshot = machineWith([{ pane_id: "w1:p1", agent: "claude", tokens }]).snapshot; };
     const manager = {
       list: () => [machine],
+      setupSummaries: () => [],
       subscribe: (listener: (event: MachineEvent) => void) => { emit = listener; listener({ type: "machines", machines: [machine] }); return () => undefined; },
     } as unknown as MachineManager;
     // the browser: the rows and the roster it was told last, by whichever path

@@ -1165,7 +1165,9 @@ describe("workspace order evidence through the manager", () => {
     setHealth(() => Response.json({ ok: true, web_ui: { boot_id: "R", revision: null } }));
     const ask = (query: string) => handleMachineRequest(new Request(`http://127.0.0.1/api/machines${query}`), manager);
     const plain = await ask("");
-    expect(Object.keys(await plain.json())).toEqual(["machines"]);
+    const roster = await plain.json();
+    expect(Object.keys(roster)).toEqual(["machines", "setups"]);
+    expect(roster.setups).toEqual([]);
     expect((await ask("?verify_source_boot=")).status).toBe(400);
     expect((await ask("?verify_source_boot=remote&verify_source_boot=local")).status).toBe(400);
     expect((await ask("?verify_source_boot=nobody")).status).toBe(404);
