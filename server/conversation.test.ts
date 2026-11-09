@@ -4417,8 +4417,20 @@ describe.skipIf(process.platform !== "linux")("a Claude herdr-core does not name
    * A tab running `hc attach <word>` (t3), its hc client a real process with `clientEnv`; herdr-core's
    * answers for it and for the terminal hc resolves the word to.
    */
-  function viewer(word: string, resolved: string, claudePid: number, clientEnv: Record<string, string> = OWN) {
+  async function viewer(word: string, resolved: string, claudePid: number, clientEnv: Record<string, string> = OWN) {
     const client = Bun.spawn(["sleep", "30"], { env: { PATH: process.env["PATH"] ?? "", ...clientEnv } });
+    // A spawn returning does not prove exec completed: /proc may still show an empty environment.
+    // Wait for the fixture's real environment, never relax the production core-identity check.
+    try {
+      const deadline = Date.now() + 2_000;
+      for (;;) {
+        const entries = readFileSync(`/proc/${client.pid}/environ`, "utf8").split("\0");
+        if (Object.entries(clientEnv).every(([name, value]) => entries.includes(`${name}=${value}`))) break;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error("the hc viewer did not start with its requested environment");
+        await Bun.sleep(Math.min(10, remaining));
+      }
+    } catch (error) { client.kill("SIGKILL"); throw error; }
     const rpc = (async (method: string, params: { pane_id?: string }) => {
       if (method === "agent.get") return { agent: {} };
       if (params.pane_id === "t3") return { process_info: { pane_id: "t3", shell_pid: 1, foreground_processes: [{ pid: client.pid, name: "hc", argv: ["/usr/local/bin/hc", "attach", word] }] } };
@@ -4431,7 +4443,9 @@ describe.skipIf(process.platform !== "linux")("a Claude herdr-core does not name
   async function viewed(word: string, resolved: string, clientEnv?: Record<string, string>) {
     const job = await claudeStandIns(1);
     const store = claudeHome(job.pids[0]!, job.start(job.pids[0]!));
-    const tab = viewer(word, resolved, job.pids[0]!, clientEnv);
+    const tab = await viewer(word, resolved, job.pids[0]!, clientEnv).catch((error: unknown) => {
+      job.stop(); store.restore(); throw error;
+    });
     const rpc = spyOn(herdr, "herdrRpc").mockImplementation(tab.rpc);
     const serving = spyOn(runtime, "servingCore").mockReturnValue(true);
     const core = spyOn(runtime, "coreSocketPath").mockReturnValue("/run/user/1000/herdr-core/default.sock");
