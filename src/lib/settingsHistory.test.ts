@@ -375,6 +375,8 @@ describe("dialog handoff after Settings", () => {
     expect(opened).toBe(0);
     expect(browser.requests).toEqual([1]);
     await browser.land();
+    expect(opened).toBe(0);
+    browser.advance(0);
     expect(opened).toBe(1);
     expect(browser.index).toBe(1);
     expect(browser.history.state).toMatchObject({ "ovis:file-preview": preview, "ovis:web-panel": webPanel });
@@ -394,6 +396,8 @@ describe("dialog handoff after Settings", () => {
     await browser.land();
     expect(opened).toBe(0);
     await browser.land();
+    expect(opened).toBe(0);
+    browser.advance(0);
     expect(opened).toBe(1);
     expect(browser.index).toBe(0);
   });
@@ -408,6 +412,8 @@ describe("dialog handoff after Settings", () => {
     browser.afterSettingsExit(() => { opened++; });
     browser.recordSettings([]);
     await browser.land();
+    expect(opened).toBe(0);
+    browser.advance(0);
     expect(opened).toBe(1);
     expect(browser.history.state).toEqual(preview);
   });
@@ -425,6 +431,8 @@ describe("dialog handoff after Settings", () => {
       browser.recordSettings([]);
       expect(browser.requests).toEqual([1]);
       await browser.land();
+      expect(opened).toBe(0);
+      browser.advance(0);
       expect(opened).toBe(1);
       expect(browser.history.state).toMatchObject(preview);
       expect(browser.index).toBe(1);
@@ -439,6 +447,18 @@ describe("dialog handoff after Settings", () => {
     browser.recordSettings([]);
     cancel();
     await browser.land();
+    expect(opened).toBe(0);
+  });
+
+  it("cancels between the exit landing and the scheduled dialog task", async () => {
+    const browser = await delayedHistory();
+    browser.recordSettings(browser.settingsLevels(false, "devices", false));
+    let opened = 0;
+    const cancel = browser.afterSettingsExit(() => { opened++; });
+    browser.recordSettings([]);
+    await browser.land();
+    cancel();
+    browser.advance(0);
     expect(opened).toBe(0);
   });
 

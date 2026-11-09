@@ -237,6 +237,7 @@ export function afterSettingsExit(run: () => void): () => void {
   const anchor = fieldOf(from, ANCHOR_KEY);
   const revision = navigationRevision;
   let cancelled = false;
+  let handoff: ReturnType<typeof setTimeout> | undefined;
   const atBase = (): boolean => {
     const state = window.history.state;
     return settingsEntry(state) === null && (lost
@@ -249,14 +250,15 @@ export function afterSettingsExit(run: () => void): () => void {
     if (entry !== null) return; // an earlier width traversal may still precede the closing one
     if (!atBase()) { cancel(); return; }
     stop();
-    // Let every popstate listener finish before a newly mounted phone sheet claims its entry.
-    queueMicrotask(() => {
+    // A new task runs after native popstate dispatch, including listeners' microtasks. This is
+    // scheduling only: success still requires the actual exit and its original base, never a delay.
+    handoff = setTimeout(() => {
       if (cancelled || navigationRevision !== revision || wanted.length !== 0 || !atBase()) return;
       cancelled = true;
       run();
-    });
+    }, 0);
   });
-  const cancel = (): void => { cancelled = true; stop(); };
+  const cancel = (): void => { cancelled = true; clearTimeout(handoff); stop(); };
   return cancel;
 }
 
