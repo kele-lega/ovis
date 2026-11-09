@@ -226,12 +226,18 @@ describe("check", () => {
     const makeFork = () => {
       const fork = mkdtempSync(join(tmpdir(), "ovis-guard-import-"));
       made.push(fork);
-      run(fork, "clone", "-q", "--no-tags", upstream, ".");
-      run(fork, "config", "url." + upstream + ".insteadOf", "https://github.com/devswha/ovis.git");
-      return fork;
+      const remote = join(fork, "origin.git");
+      const checkout = join(fork, "checkout");
+      run(fork, "clone", "-q", "--bare", "--no-tags", upstream, remote);
+      run(fork, "clone", "-q", "--no-tags", remote, checkout);
+      run(checkout, "config", "url." + upstream + ".insteadOf", "https://github.com/devswha/ovis.git");
+      return checkout;
     };
-    const execute = (cwd: string) => spawnSync("bash", ["-e", "-c", script], {
-      cwd, encoding: "utf8", timeout: 5_000, env: process.env,
+    // Run the preceding base fetch too: making BASE_SHA shallow can sever the imported tag's
+    // ancestry in the first independent release, even though checkout originally had full history.
+    const fetchBase = lines.slice(0, 2).join("\n");
+    const execute = (cwd: string) => spawnSync("bash", ["-e", "-c", `${fetchBase}\n${script}`], {
+      cwd, encoding: "utf8", timeout: 5_000, env: { ...process.env, BASE_SHA: "HEAD" },
     });
     const ancestral = makeFork();
     expect(execute(ancestral).status).toBe(0);
