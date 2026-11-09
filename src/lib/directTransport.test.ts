@@ -285,6 +285,24 @@ describe("memory-only per-PC direct transport", () => {
     } finally { jest.useRealTimers(); }
   });
 
+  it("never gives a blackholed direct write a read deadline or replays it through A", async () => {
+    jest.useFakeTimers();
+    const late = deferred<Response>(), caller = new AbortController();
+    const { transport, calls } = harness(({ url }) => url.endsWith("direct-access") ? Response.json(credential("a")) : late.promise);
+    try {
+      let settled = false;
+      const write = transport.directFetch("/api/machines/a/pane/input", { method: "POST", body: "explicit-once", signal: caller.signal });
+      void write.then(() => { settled = true; }, () => { settled = true; });
+      await settle(); jest.advanceTimersByTime(60_000); await settle();
+      expect(settled).toBe(false);
+      expect(calls.find((call) => call.url === "https://a.example/api/pane/input")?.init?.signal?.aborted).toBe(false);
+      caller.abort();
+      await expect(write).rejects.toMatchObject({ name: "AbortError" });
+      expect(calls.filter((call) => call.url === "https://a.example/api/pane/input")).toHaveLength(1);
+      expect(calls.some((call) => call.url === "/api/machines/a/pane/input")).toBe(false);
+    } finally { transport.clear(); jest.useRealTimers(); late.resolve(new Response("late")); }
+  });
+
   it("does not fall back from a blackholed direct read after cancellation or sign-out", async () => {
     for (const cancel of ["caller", "clear"]) {
       const late = deferred<Response>(), caller = new AbortController();

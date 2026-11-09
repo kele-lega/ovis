@@ -887,10 +887,22 @@ async function linkCommand(): Promise<number> {
   if (active !== join(resolve(ROOT), "scripts", "plugin.ts") && resolve(active) !== resolve(import.meta.filename)) {
     // Ctrl+C reaches the release's link too, which takes its code back; this one waits for it
     process.on("SIGINT", () => undefined);
-    const child = Bun.spawn([process.execPath, active, "link", ...process.argv.slice(3)], { cwd: ROOT, windowsHide: true, env, stdin: "inherit", stdout: "inherit", stderr: "inherit" });
-    // a SIGTERM or SIGHUP sent to this process alone is passed on, so the release takes its code back too
-    for (const signal of ["SIGTERM", "SIGHUP"] as const) process.on(signal, () => child.kill(signal));
-    return await child.exited;
+    // The release can print its code before spawn returns. Catch signals before starting it,
+    // so a stop immediately after that output cannot orphan the release and its pairing code.
+    let child: ReturnType<typeof Bun.spawn> | undefined;
+    const pending = new Set<"SIGTERM" | "SIGHUP">();
+    const forward = (signal: "SIGTERM" | "SIGHUP") => { if (child) child.kill(signal); else pending.add(signal); };
+    const term = () => forward("SIGTERM"), hup = () => forward("SIGHUP");
+    process.on("SIGTERM", term);
+    process.on("SIGHUP", hup);
+    try {
+      child = Bun.spawn([process.execPath, active, "link", ...process.argv.slice(3)], { cwd: ROOT, windowsHide: true, env, stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+      for (const signal of pending) child.kill(signal);
+      return await child.exited;
+    } finally {
+      process.off("SIGTERM", term);
+      process.off("SIGHUP", hup);
+    }
   }
   if (!(await health())) {
     process.stderr.write(`Ovis is not running at ${origin}; start it first\n`);

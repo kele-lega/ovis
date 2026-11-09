@@ -545,40 +545,42 @@ describe("ovis link, on the PC itself", () => {
     });
   }
 
-  it.skipIf(process.platform === "win32")("passes a SIGTERM on to the copy of link the app updated to, so it can take its code back", async () => {
-    const scratchDir = mkdtempSync(join(tmpdir(), "ovis-link-release-term-"));
-    scratch.push(scratchDir);
-    const root = join(import.meta.dir, "..");
-    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(null, { status: 404 }) });
-    try {
-      const updates = updateStateDir(root, server.port!, join(scratchDir, "app-state"));
-      const release = join(updates, "release-test");
-      mkdirSync(join(release, "scripts"), { recursive: true });
-      writeFileSync(join(release, "scripts", "plugin.ts"), 'process.on("SIGTERM", () => { console.log("release took its code back"); process.exit(0); }); console.log("release ready"); setTimeout(() => process.exit(3), 10_000);');
-      const revision = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: root, windowsHide: true }).stdout.toString().trim();
-      writeFileSync(join(updates, "current.json"), JSON.stringify({ source_revision: revision, directory: release }));
-      mkdirSync(join(scratchDir, "config"));
-      writeFileSync(join(scratchDir, "config", ".env"), `PORT=${server.port}\n`);
-      const child = Bun.spawn([process.execPath, "scripts/plugin.ts", "link", "--code"], { cwd: root, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: {
-        ...process.env, HOST: "127.0.0.1", HERDR_PLUGIN_ROOT: root, HERDR_PLUGIN_CONFIG_DIR: join(scratchDir, "config"),
-        HERDR_PLUGIN_STATE_DIR: join(scratchDir, "plugin-state"), OVIS_STATE_DIR: join(scratchDir, "app-state"),
-      } });
-      const decoder = new TextDecoder();
-      let stdout = "";
-      const reader = child.stdout.getReader();
-      while (!stdout.includes("release ready")) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        stdout += decoder.decode(chunk.value, { stream: true });
-      }
-      child.kill("SIGTERM");
-      for (;;) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        stdout += decoder.decode(chunk.value, { stream: true });
-      }
-      expect(stdout).toContain("release took its code back");
-      expect(await child.exited).toBe(0);
-    } finally { server.stop(true); }
-  });
+  for (const signal of ["SIGTERM", "SIGHUP"] as const) {
+    it.skipIf(process.platform === "win32")(`passes ${signal} on to the copy of link the app updated to, so it can take its code back`, async () => {
+      const scratchDir = mkdtempSync(join(tmpdir(), "ovis-link-release-term-"));
+      scratch.push(scratchDir);
+      const root = join(import.meta.dir, "..");
+      const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(null, { status: 404 }) });
+      try {
+        const updates = updateStateDir(root, server.port!, join(scratchDir, "app-state"));
+        const release = join(updates, "release-test");
+        mkdirSync(join(release, "scripts"), { recursive: true });
+        writeFileSync(join(release, "scripts", "plugin.ts"), `process.on(${JSON.stringify(signal)}, () => { console.log("release took its code back"); process.exit(0); }); console.log("release ready"); setTimeout(() => process.exit(3), 10_000);`);
+        const revision = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: root, windowsHide: true }).stdout.toString().trim();
+        writeFileSync(join(updates, "current.json"), JSON.stringify({ source_revision: revision, directory: release }));
+        mkdirSync(join(scratchDir, "config"));
+        writeFileSync(join(scratchDir, "config", ".env"), `PORT=${server.port}\n`);
+        const child = Bun.spawn([process.execPath, "scripts/plugin.ts", "link", "--code"], { cwd: root, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: {
+          ...process.env, HOST: "127.0.0.1", HERDR_PLUGIN_ROOT: root, HERDR_PLUGIN_CONFIG_DIR: join(scratchDir, "config"),
+          HERDR_PLUGIN_STATE_DIR: join(scratchDir, "plugin-state"), OVIS_STATE_DIR: join(scratchDir, "app-state"),
+        } });
+        const decoder = new TextDecoder();
+        let stdout = "";
+        const reader = child.stdout.getReader();
+        while (!stdout.includes("release ready")) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          stdout += decoder.decode(chunk.value, { stream: true });
+        }
+        child.kill(signal);
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          stdout += decoder.decode(chunk.value, { stream: true });
+        }
+        expect(stdout).toContain("release took its code back");
+        expect(await child.exited).toBe(0);
+      } finally { server.stop(true); }
+    });
+  }
 });
