@@ -30,6 +30,7 @@ import { checkFollowHerdrFocus } from "./follow-focus-regression.ts";
 import { checkRelayPanel } from "./relay-panel-regression.ts";
 import { systemUsageContext, UsageService } from "../server/usage.ts";
 import { openSettingsFolds, openSettingsPage } from "./settings-page.ts";
+import { homeRelative } from "../src/lib/paletteFolders.ts";
 import { assertCspClean, watchCsp } from "./csp-violations.ts";
 import type { CspWatch } from "./csp-violations.ts";
 import { browserEvidencePage, browserEvidenceTracing, startBrowserEvidence } from "./browser-evidence.ts";
@@ -1531,7 +1532,7 @@ try {
   await dialog.getByLabel(/^Name/).fill("ovis-test-browser-created");
   await dialog.getByRole("button", { name: "Start", exact: true }).click();
   await until(() => createRequests === 1, "creation started");
-  assert.equal(createCwd, join(root, "a", "made-here"), "Start uses the folder Browse is showing");
+  assert.equal(createCwd, homeRelative(join(root, "a", "made-here"), homedir()), "Start uses the folder Browse is showing, keeping its home-relative form");
   await page.keyboard.press("Escape");
   assert.equal(await dialog.isVisible(), true, "in-flight creation cannot be dismissed");
   assert.equal(await dialog.getByRole("button", { name: "Close dialog" }).isDisabled(), true);

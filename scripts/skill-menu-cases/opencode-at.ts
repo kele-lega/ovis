@@ -23,7 +23,8 @@ export const expect = async ({ page, width, scheme, box, menu, scenario, clear, 
   await scenario(`@ lists the skills at ${tag}`, `at-${tag}.png`, async (capture) => {
     await box.fill("@");
     await menu.locator(".menu-item").first().waitFor();
-    assert.deepEqual(await rowLabels(), ["@docs-release", "@pdf-tools"]);
+    // Files may already have arrived: check the skill group rather than racing that read.
+    assert.deepEqual(await menu.locator(".composer-menu-group").filter({ has: page.getByText("Skills", { exact: true }) }).locator(".menu-item-main").allTextContents(), ["@docs-release", "@pdf-tools"]);
     assert.equal(await page.getByRole("listbox", { name: "Skills and files", exact: true }).count(), 1);
     // the pane's files follow, under their own heading
     await menu.locator(".menu-item").nth(2).waitFor();

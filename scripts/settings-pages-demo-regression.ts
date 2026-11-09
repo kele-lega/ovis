@@ -14,6 +14,7 @@ import { ZH } from "../src/lib/i18n.zh.ts";
 import { DEFAULT_SETTINGS, terminalTheme } from "../src/lib/settings.ts";
 import { rowFor, THEME_IDS, type ThemeId } from "../src/lib/themes.ts";
 import baseline from "../src/lib/themes.legacy-baseline.json";
+import { SUPPORTED_AGENT_KINDS } from "../shared/supported-agents.ts";
 import { comboKey, LEGACY_COMBOS } from "./theme-baseline.ts";
 
 // Settings on the unmodified app over the demo's fixture transport: every page fits a phone, and
@@ -1190,8 +1191,11 @@ try {
               assert.equal(await body.locator("[role='alert']").count(), 0, "the Agents page shows no error");
               assert.deepEqual(await body.locator(".agents-item").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-agent"))), ["claude", "codex", "omp", "pi", "hermes"]);
               assert.deepEqual(await body.locator("[data-section='other-accounts'] .usage-provider-heading > span:not(.usage-account-count):not(.agent-mark)").allTextContents(), ["Cursor", "OpenCode"]);
-              // herdr-app's rows: no group captions on this page
-              assert.deepEqual(await body.locator("h3").allTextContents(), []);
+              // The official catalog rows have no captions; the preserved full-command editor has one.
+              const fullCommands = body.locator("[data-section='launch-modes']");
+              assert.deepEqual(await body.locator("h3").allTextContents(), [label("Full commands")]);
+              assert.equal(await fullCommands.getByRole("heading", { name: label("Full commands"), exact: true }).count(), 1);
+              assert.equal(await fullCommands.locator(".launch-command-field").count(), SUPPORTED_AGENT_KINDS.size);
               // an agent's own settings are in its row: Claude Code's permission mode for New tab
               await body.locator(".agents-item[data-agent='claude'] .agents-toggle").click();
               await body.locator(".agents-item[data-agent='claude']").getByLabel(label("Permission mode"), { exact: true }).waitFor();

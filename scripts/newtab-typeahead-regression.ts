@@ -26,6 +26,8 @@ interface Case {
   sent?: string;
   /** herdr's answer waits until the keys are typed */
   holdCreate?: boolean;
+  /** an untouched touch tab takes no keyboard focus and sends nothing */
+  idle?: boolean;
   /** the keys typed on once the new tab takes input: the tab came while the user was still typing */
   typeOn?: (page: Page) => Promise<void>;
 }
@@ -105,6 +107,10 @@ async function typeAhead(browser: Browser, origin: string, item: Case): Promise<
     await page.locator(".conn-live").waitFor();
     await until(() => ready.has(first), "the first terminal accepts input");
     await choose(page, first, item, sent);
+    if (item.holdCreate) {
+      await until(() => held !== null, "the page asked herdr for the tab");
+      assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("type-ahead")), true, "keys typed before creation have their own focused field");
+    }
     await item.type(page);
     if (item.holdCreate) {
       await until(() => held !== null, "the page asked herdr for the tab");
@@ -115,7 +121,11 @@ async function typeAhead(browser: Browser, origin: string, item: Case): Promise<
     await until(() => ready.has(second!), "the new terminal accepts input");
     if (item.typeOn) await item.typeOn(page);
     const lines = async () => (await paneRead({ paneId: second!, source: "recent", lines: 30, stripAnsi: true })).text.split("\n").map((line) => line.trim());
-    if (item.ran !== null) {
+    if (item.idle) {
+      assert.equal(textOf(sent, second!), "", "an untouched touch tab sends no keys");
+      await until(async () => await page.locator(".type-ahead").count() === 0, "the untouched type-ahead field is removed");
+      assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("xterm-helper-textarea")), false, "an untouched touch tab does not summon the keyboard");
+    } else if (item.ran !== null) {
       const ran = item.ran;
       await until(async () => (await lines()).includes(ran), `${item.name}: the new tab ran the command typed ahead`);
       if (item.sent !== undefined) assert.equal(textOf(sent, second!), item.sent, `${item.name}: every key reaches the new tab, in order`);
@@ -146,7 +156,9 @@ const typed = (text: string, delay = 0) => async (page: Page): Promise<void> => 
 const CASES: Case[] = [
   { name: "plus", way: "plus", viewport: desktop, type: typed("echo ahead-plus"), ran: "ahead-plus", sent: "echo ahead-plus\r" },
   { name: "sheet", way: "sheet", viewport: phone, type: typed("echo ahead-sheet"), ran: "ahead-sheet", sent: "echo ahead-sheet\r" },
-  { name: "touch", way: "sheet", viewport: phone, touch: true, type: typed("echo ahead-touch"), ran: "ahead-touch", sent: "echo ahead-touch\r" },
+  // Hold creation so this checks typing before the tab arrives, not an already-open phone terminal.
+  { name: "touch", way: "sheet", viewport: phone, touch: true, holdCreate: true, type: typed("echo ahead-touch"), ran: "ahead-touch", sent: "echo ahead-touch\r" },
+  { name: "touch-idle", way: "sheet", viewport: phone, touch: true, holdCreate: true, idle: true, type: async () => {}, ran: null },
   // a keyboard on a touch screen: the keys typed after the new tab came go on to it, not lost
   {
     name: "touch-midway", way: "sheet", viewport: phone, touch: true, holdCreate: true, ran: "ahead-midway", sent: "echo ahead-midway\r",
