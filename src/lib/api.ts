@@ -895,6 +895,7 @@ async function readPaneConversation(paneId: string, machineId: string, page: Con
 
 export interface HealthInfo {
   ok: boolean;
+  launch_command?: boolean;
   herdr: HerdrIdentity;
   web_ui?: { boot_id: string | null; revision: string | null };
   /** Absent only on a server that predates the token gate. */
@@ -1157,11 +1158,12 @@ export async function clearPane(paneId: string, machineId = "local"): Promise<vo
   await sendJson(machinePath(machineId, "pane/clear"), "POST", { pane_id: paneId });
 }
 
-/** GET /api/agents: of the agent kinds herdr can start, the ones this app supports and that PC has installed, for the new-session dialog. */
-export async function fetchAgentKinds(machineId = "local"): Promise<AgentKind[]> {
-  // filtered here, not on the server: a remote PC's older bridge still answers every manifest,
-  // and says nothing of what is installed, so its supported kinds are all offered
-  return (await getJson<{ agents: AgentKind[] }>(machinePath(machineId, "agents"))).agents.filter((agent) => SUPPORTED_AGENT_KINDS.has(agent.kind) && agent.installed !== false);
+/** GET /api/agents: supported kinds, including kinds whose saved command supplies its own executable. */
+export async function fetchAgentKinds(machineId = "local", onCapabilities?: (capabilities: { launch_command?: boolean }) => void, configuredKinds: readonly string[] = []): Promise<AgentKind[]> {
+  // Read capability from this exact PC and catalog answer, never from the UI's version.
+  const response = await getJson<{ agents: AgentKind[]; launch_command?: boolean }>(machinePath(machineId, "agents"));
+  onCapabilities?.({ launch_command: response.launch_command === true });
+  return response.agents.filter((agent) => SUPPORTED_AGENT_KINDS.has(agent.kind) && (agent.installed !== false || configuredKinds.includes(agent.kind)));
 }
 
 /** GET /api/agent-catalog: every agent Ovis can install, with that PC's commands and what it has installed. */

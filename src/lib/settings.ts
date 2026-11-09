@@ -71,7 +71,7 @@ import type { StatusIndicators } from "./status.ts";
 import { sanitizeGroupNames, sanitizeGroupOf } from "./namedAgentGroups.ts";
 import { WEB_LINK_TARGETS, type WebLinkTarget } from "./webPanel.ts";
 import { FILE_OPEN_TARGETS, type FilePresentation } from "./filePresentation.ts";
-import { CLAUDE_EFFORTS, CLAUDE_LAUNCH_MODES, CODEX_EFFORTS, CODEX_LAUNCH_MODES, launchChoiceFault, type ClaudeLaunchMode, type CodexLaunchMode } from "./agentLaunchMode.ts";
+import { CLAUDE_EFFORTS, CLAUDE_LAUNCH_MODES, CODEX_EFFORTS, CODEX_LAUNCH_MODES, launchChoiceFault, sanitizeAgentCommands, type ClaudeLaunchMode, type CodexLaunchMode } from "./agentLaunchMode.ts";
 
 export interface Settings {
   terminalInputMode: "auto" | "line" | "direct";
@@ -279,6 +279,8 @@ export interface Settings {
   claudeLaunchMode: ClaudeLaunchMode;
   /** the same for Codex: a sandbox and approval preset */
   codexLaunchMode: CodexLaunchMode;
+  /** Exact full commands for creation only. Plaintext, shared across devices, never telemetry. */
+  agentCommands: Record<string, string>;
   /** the model (`--model`) a Claude Code started from those dialogs is filled in with; "" is its own (lib/agentLaunchMode.ts launchDefaults) */
   claudeLaunchModel: string;
   /** the same for its effort level (`--effort`) */
@@ -300,7 +302,7 @@ export type DiffStyle = (typeof DIFF_STYLES)[number];
 type TelemetrySourceSettings = Omit<Settings,
   "keyBarExtras" | "keyBarItems" | "keyBarExpanded" | "shortcutOverrides" | "herdrPrefixKeys" | "terminalFontFamily" | "chatFontFamily" | "uiFontFamily"
   | "quickReplies" | "agentLocks" | "lockedAgents" | "opencodeParentEnds" | "ompHeldFiles" | "restoreReplacedServer" | "agentNamedGroups" | "agentGroupNames" | "agentGroupOf" | "usageOrder" | "usageHidden" | "fileOpen" | "filesPanel" | "webLinks" | "reuseExternalLinkTab" | "claudeLaunchMode" | "codexLaunchMode"
-  | "claudeLaunchModel" | "claudeLaunchEffort" | "codexLaunchModel" | "codexLaunchEffort"
+  | "claudeLaunchModel" | "claudeLaunchEffort" | "codexLaunchModel" | "codexLaunchEffort" | "agentCommands"
   | "followHerdrFocus" | "sidebarPeek" | "sidebarBackgroundWorkspaces" | "codexDrag" | "composerArtifacts" | "composerPasteSend" | "composerBtw" | "terminalMirrorWrap" | "sidebarFilter" | "sidebarContext" | "sidebarAgentTree" | "foldHelpers" | "pcLoad"
   | "expandThinking" | "foldWork" | "autoTabNames" | "voiceEngine" | "agentGroups" | "agentGroupSort" | "terminalImages" | "terminalAttachButton"
   | "terminalKeyboardOnRequest" | "terminalFoldKeyBar" | "fileFontSize" | "fileFontBase" | "editTextFiles" | "reopenFileOnReturn">;
@@ -426,7 +428,7 @@ export const SETTING_SCOPE = {
   // Viewer layout follows this screen, as chatWidth does.
   wrapCode: "device", editTextFiles: "device", reopenFileOnReturn: "device", diffStyle: "device", fileOpen: "device", filesPanel: "device", webLinks: "device", reuseExternalLinkTab: "device",
   // a new agent starts the same way whichever device opened it
-  claudeLaunchMode: "shared", codexLaunchMode: "shared",
+  claudeLaunchMode: "shared", codexLaunchMode: "shared", agentCommands: "shared",
   claudeLaunchModel: "shared", claudeLaunchEffort: "shared", codexLaunchModel: "shared", codexLaunchEffort: "shared",
 } as const satisfies Record<keyof Settings, "shared" | "device">;
 
@@ -528,6 +530,7 @@ export const DEFAULT_SETTINGS: Settings = {
   reuseExternalLinkTab: false,
   claudeLaunchMode: "default",
   codexLaunchMode: "default",
+  agentCommands: {},
   claudeLaunchModel: "",
   claudeLaunchEffort: "",
   codexLaunchModel: "",
@@ -762,6 +765,7 @@ export function sanitizeSettings(raw: unknown): Settings {
     filesPanel: typeof record["filesPanel"] === "boolean" ? record["filesPanel"] : DEFAULT_SETTINGS.filesPanel,
     webLinks: WEB_LINK_TARGETS.find((target) => target === record["webLinks"]) ?? DEFAULT_SETTINGS.webLinks,
     reuseExternalLinkTab: typeof record["reuseExternalLinkTab"] === "boolean" ? record["reuseExternalLinkTab"] : DEFAULT_SETTINGS.reuseExternalLinkTab,
+    agentCommands: sanitizeAgentCommands(record["agentCommands"]),
     claudeLaunchMode: CLAUDE_LAUNCH_MODES.find((mode) => mode === record["claudeLaunchMode"]) ?? DEFAULT_SETTINGS.claudeLaunchMode,
     codexLaunchMode: CODEX_LAUNCH_MODES.find((mode) => mode === record["codexLaunchMode"]) ?? DEFAULT_SETTINGS.codexLaunchMode,
     // only a name the agent's launch takes: anything else would start it on a flag nobody chose
@@ -996,12 +1000,23 @@ export function enterSendsOn(settings: Pick<Settings, "enterSends">, touch: bool
   return settings.enterSends ?? !touch;
 }
 
+/** Kept apart so older tabs' whole-settings saves cannot erase a full command. */
+export const AGENT_COMMANDS_STORAGE_KEY = "ovis:agent-commands";
+
+function readAgentCommands(fallback: Record<string, string> = {}): Record<string, string> {
+  try {
+    const raw = window.localStorage.getItem(AGENT_COMMANDS_STORAGE_KEY);
+    // Before the dedicated key existed, settings could hold the command map itself.
+    return raw === null ? fallback : sanitizeAgentCommands(JSON.parse(raw));
+  } catch { return fallback; }
+}
+
 export function loadSettings(): Settings {
   // read as the page's boot script reads them (themeBoot.ts), so React starts on the row the first frame showed
   const stored = readStoredAppearance(() => window.localStorage);
   const settings = stored.main === null ? DEFAULT_SETTINGS : sanitizeSettings(stored.main.value);
   const merged = stored.themes === null ? settings : sanitizeSettings({ ...settings, ...stored.themes });
-  return { ...merged, enterSends: readEnterSends(merged.enterSends), uiFontFamily: readUiFontFamily(), terminalMirrorWrap: readMirrorWrap(), sidebarFilter: readSidebarFilter(), pcLoad: readPcLoad(), voiceEngine: readVoiceEngine(), ...readAgentGroups(), ...readFileFont(), composerArtifacts: readComposerArtifacts(),
+  return { ...merged, agentCommands: readAgentCommands(merged.agentCommands), enterSends: readEnterSends(merged.enterSends), uiFontFamily: readUiFontFamily(), terminalMirrorWrap: readMirrorWrap(), sidebarFilter: readSidebarFilter(), pcLoad: readPcLoad(), voiceEngine: readVoiceEngine(), ...readAgentGroups(), ...readFileFont(), composerArtifacts: readComposerArtifacts(),
     expandThinking: readChatFold(EXPAND_THINKING_STORAGE_KEY, DEFAULT_SETTINGS.expandThinking), foldWork: readChatFold(FOLD_WORK_STORAGE_KEY, DEFAULT_SETTINGS.foldWork),
     reuseExternalLinkTab: readChatFold(REUSE_EXTERNAL_LINK_TAB_STORAGE_KEY, DEFAULT_SETTINGS.reuseExternalLinkTab),
     filesPanel: readChatFold(FILES_PANEL_STORAGE_KEY, DEFAULT_SETTINGS.filesPanel),
@@ -1017,14 +1032,15 @@ export function loadSettings(): Settings {
 }
 
 /** false where storage refused the write (private mode, a full quota) */
-export function saveSettings(settings: Settings): boolean {
+export function saveSettings(settings: Settings, saveAgentCommands = true): boolean {
   const mirrored = sanitizeSettings(settings);
   try {
     window.localStorage.setItem(THEMES_STORAGE_KEY, JSON.stringify({
       darkTheme: mirrored.darkTheme, lightTheme: mirrored.lightTheme,
       mirror: { palette: mirrored.palette, paletteDark: mirrored.paletteDark, paletteLight: mirrored.paletteLight },
     }));
-    const { uiFontFamily, terminalMirrorWrap, sidebarFilter, sidebarContext, sidebarAgentTree, foldHelpers, pcLoad, voiceEngine, agentGroups, agentGroupSort, fileFontSize, fileFontBase, composerArtifacts, composerPasteSend, composerBtw, expandThinking, foldWork, reuseExternalLinkTab, filesPanel, terminalImages, terminalAttachButton, terminalKeyboardOnRequest, terminalFoldKeyBar, ...main } = mirrored;
+    const { agentCommands, uiFontFamily, terminalMirrorWrap, sidebarFilter, sidebarContext, sidebarAgentTree, foldHelpers, pcLoad, voiceEngine, agentGroups, agentGroupSort, fileFontSize, fileFontBase, composerArtifacts, composerPasteSend, composerBtw, expandThinking, foldWork, reuseExternalLinkTab, filesPanel, terminalImages, terminalAttachButton, terminalKeyboardOnRequest, terminalFoldKeyBar, ...main } = mirrored;
+    if (saveAgentCommands) window.localStorage.setItem(AGENT_COMMANDS_STORAGE_KEY, JSON.stringify(agentCommands));
     window.localStorage.setItem(VOICE_ENGINE_STORAGE_KEY, JSON.stringify(voiceEngine));
     window.localStorage.setItem(UI_FONT_STORAGE_KEY, JSON.stringify(uiFontFamily));
     window.localStorage.setItem(MIRROR_WRAP_STORAGE_KEY, JSON.stringify(terminalMirrorWrap));
@@ -1133,15 +1149,17 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<Settings>(loadSettings);
   // this tab's whole state at its last load or successful save: a value that differs from it is this tab's own, not yet stored
   const stored = useRef<Settings>(settings);
+  const pendingAgentCommands = useRef<Record<string, string> | null>(null);
   const [systemDark, setSystemDark] = useState(() => resolveTheme("system") === "dark");
 
   useEffect(() => {
     const onStorage = (event: StorageEvent): void => {
-      if (event.storageArea !== window.localStorage || (event.key !== SETTINGS_STORAGE_KEY && event.key !== ENTER_SENDS_STORAGE_KEY && event.key !== VOICE_ENGINE_STORAGE_KEY && event.key !== null)) return;
+      if (event.storageArea !== window.localStorage || (event.key !== SETTINGS_STORAGE_KEY && event.key !== ENTER_SENDS_STORAGE_KEY && event.key !== VOICE_ENGINE_STORAGE_KEY && event.key !== AGENT_COMMANDS_STORAGE_KEY && event.key !== null)) return;
       // the recognition another tab chose: audio must not keep going where this tab last sent it
-      const { shortcutOverrides, enterSends, voiceEngine } = loadSettings();
-      stored.current = { ...stored.current, shortcutOverrides, enterSends, voiceEngine };
-      setSettings((current) => ({ ...current, shortcutOverrides, enterSends, voiceEngine }));
+      const { shortcutOverrides, enterSends, voiceEngine, agentCommands: savedCommands } = loadSettings();
+      const agentCommands = pendingAgentCommands.current ?? savedCommands;
+      stored.current = { ...stored.current, shortcutOverrides, enterSends, voiceEngine, agentCommands };
+      setSettings((current) => ({ ...current, shortcutOverrides, enterSends, voiceEngine, agentCommands }));
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
@@ -1189,10 +1207,16 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       };
       const latest = (): Settings => !readable() ? current
         : sanitizeSettings({ ...loadSettings(), ...Object.fromEntries(Object.entries(current).filter(([key, value]) => differs(key, value, stored.current))) });
-      const next = sanitizeSettings({ ...current, ...(typeof patch === "function" ? made ??= patch(latest()) : patch) });
+      const applied = typeof patch === "function" ? made ??= patch(latest()) : patch;
+      const commandsChanged = Object.hasOwn(applied, "agentCommands");
+      const agentCommands = commandsChanged ? applied.agentCommands : pendingAgentCommands.current ?? readAgentCommands(current.agentCommands);
+      const next = sanitizeSettings({ ...current, ...applied, agentCommands });
       // another tab may have saved since this one loaded (#2485): write only what this tab changed, over what is stored now
       const changed = Object.fromEntries(Object.entries(next).filter(([key, value]) => differs(key, value, current) || differs(key, value, stored.current)));
-      if (saveSettings(sanitizeSettings({ ...loadSettings(), ...changed }))) stored.current = next;
+      const persistCommands = commandsChanged || pendingAgentCommands.current !== null;
+      const saved = saveSettings(sanitizeSettings({ ...loadSettings(), ...changed }), persistCommands);
+      if (saved) stored.current = next;
+      if (persistCommands) pendingAgentCommands.current = saved ? null : next.agentCommands;
       return next;
     });
   }, []);

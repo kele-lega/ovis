@@ -18,6 +18,8 @@ export interface SshTarget {
 export interface Machine {
   /** Read-only identity inherited from the local herdr catalog. */
   herdr_profile_id?: string;
+  /** Whether this owner may revoke the independently provisioned first-time SSH bootstrap. */
+  can_revoke_bootstrap?: boolean;
   id: string;
   name: string;
   /** hc: another machine of this PC's herdr-core (`hc machine add`), reached through that core */
@@ -211,7 +213,8 @@ export function pcAlertKey(machine: Pick<Machine, "name" | "relay" | "server_id"
 }
 
 /** GET /api/machines: with ?verify_source_boot=<id>, also that PC's freshly proved boot id */
-export interface MachineRoster { machines: Machine[]; verified_source_boot?: { machine_id: string; boot_id: string } }
+export interface MachineSetupSummary { id: string; machine_id: string; name: string; phase: SetupPhase; step: string; error: string | null; progress: SetupProgress | null }
+export interface MachineRoster { machines: Machine[]; setups?: MachineSetupSummary[]; verified_source_boot?: { machine_id: string; boot_id: string } }
 /**
  * The herdr behind a PC, as its bridge can serve it. terminal_attach is false on a Windows
  * host: herdr has no `terminal attach` there yet (herdrdev/herdr#4821), and it is false on
@@ -222,6 +225,8 @@ export interface MachineRoster { machines: Machine[]; verified_source_boot?: { m
 export interface HerdrIdentity {
   version: string;
   protocol: number;
+  /** Explicit daemon support; absence is not approval to launch commands. */
+  capabilities?: { atomic_command_launch?: boolean };
   terminal_attach?: boolean;
   /** without attach, the terminal lens shows the pane's screen repainted a few times a second (server/mirror.ts) */
   terminal_mirror?: boolean;
@@ -401,7 +406,7 @@ export interface RemotePairingRequest {
   key: string;
 }
 
-export type MachineEvent = { type: "machines"; machines: Machine[] } | { type: "machine-message"; machine_id: string; message: ServerMessage }
+export type MachineEvent = { type: "machine-setups"; setups: MachineSetupSummary[] } | { type: "machines"; machines: Machine[] } | { type: "machine-message"; machine_id: string; message: ServerMessage }
   | { type: "preferences"; preferences: SharedPreferences }
   /** the `$name` tokens herdr's `[ui.sidebar.agents]` rows draw on this server's PC, for every PC's agent rows (server/herdr-sidebar.ts) */
   | { type: "herdr-sidebar"; agents: AgentRowTokens | null }
@@ -421,8 +426,10 @@ export interface RemotePairingsEvent { type: "remote-pairings"; pairings: Remote
  * serves. `accepted`: its launcher took it as its own past the startup check (absent when no launcher
  * runs it). All three absent from older servers.
  */
-export interface BridgeHealth { ok: true; auth: HealthAuth; bridge_protocol: number; security?: SecuritySummary; web_ui?: { boot_id: string }; runtime?: "herdr" | "herdr-core"; accepted?: boolean; /** a driving owner only, as on the whole answer */ herdr_runtime?: HerdrRuntimeFacts }
+export interface BridgeHealth { ok: true; auth: HealthAuth; bridge_protocol: number; launch_command?: boolean; security?: SecuritySummary; web_ui?: { boot_id: string }; runtime?: "herdr" | "herdr-core"; accepted?: boolean; /** a driving owner only, as on the whole answer */ herdr_runtime?: HerdrRuntimeFacts }
 export interface BridgeIdentity {
+  /** This bridge accepts an exact creation-time command; the daemon is checked separately. */
+  launch_command?: boolean;
   pid: number;
   managed_remote: boolean;
   bridge_protocol: number;

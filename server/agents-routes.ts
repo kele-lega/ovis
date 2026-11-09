@@ -4,7 +4,7 @@
  * The dispatcher in index.ts runs the access gate first.
  */
 import type { AgentKind } from "../shared/agents.ts";
-import { agentManifests } from "./herdr/client.ts";
+import { agentManifests, atomicCommandLaunchSupported, ping } from "./herdr/client.ts";
 import { hcMachine, servingCore } from "./herdr-core/runtime.ts";
 import { badRequest, errorResponse, jsonResponse, setRequestRoute } from "./http.ts";
 import { SHELL_AGENTS, type ShellAgentLocator } from "./shell-agent.ts";
@@ -68,7 +68,8 @@ export async function handleAgentsRequest(request: Request, pathname: string, sh
         shellStarted.has(kind) || Bun.which(kind, { PATH: process.env["PATH"] ?? "" }) !== null || (has !== undefined && await has(kind));
       const agents: AgentKind[] = (await Promise.all([...kinds].map(async (kind) => ({ kind, label: AGENT_LABELS[kind] ?? kind, installed: await installed(kind) }))))
         .sort((left, right) => left.label.localeCompare(right.label) || left.kind.localeCompare(right.kind));
-      return jsonResponse({ agents });
+      const launchCommand = await ping().then((identity) => atomicCommandLaunchSupported(identity), () => false);
+      return jsonResponse({ agents, launch_command: launchCommand });
     } catch (error) {
       return errorResponse(error);
     }

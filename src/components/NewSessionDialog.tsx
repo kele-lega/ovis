@@ -4,7 +4,7 @@ import { FolderOpen, X } from "lucide-react";
 
 import "./NewSessionDialog.css";
 
-import type { AgentKind, SlashCommand } from "../../shared/protocol.ts";
+import type { SlashCommand } from "../../shared/protocol.ts";
 import { MAX_LABEL_CHARS } from "../../shared/labels.ts";
 import { ApiError } from "../lib/api.ts";
 import { AddAgentPanel } from "./AddAgentPanel.tsx";
@@ -20,7 +20,8 @@ import { loadSettings, useSettings } from "../lib/settings.ts";
 import { assignAgentGroup, folderAgentGroup, rememberFolderAgentGroup } from "../lib/namedAgentGroups.ts";
 import { sidebarPinKey } from "../lib/sidebarPins.ts";
 import { learnTabLabel } from "../lib/tabLabels.ts";
-import { launchCapabilities, launchDefaults, modelSuggestions } from "../lib/agentLaunchMode.ts";
+import { agentCommand, launchCapabilities, launchCommandUnsupported, launchDefaults, modelSuggestions } from "../lib/agentLaunchMode.ts";
+import { useLaunchAgents } from "../lib/useLaunchAgents.ts";
 import { MAX_COMPOSER_CHARS } from "../lib/compose.ts";
 import { createRequest, dialogLaunch, firstMessageOutcome, startNewSession } from "../lib/newSession.ts";
 import { useMachineSessions } from "../lib/machineSessionContext.tsx";
@@ -103,7 +104,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
   const machineId = useMachineId();
   const { createTab, createWorkspace, fetchAgentKinds, fetchAgentCommands } = useMachineApi();
   const machineSessions = useMachineSessions();
-  const [agents, setAgents] = useState<AgentKind[]>([]);
+  const { agents, acceptAgents: setAgents, capable: commandCapable, loaded: agentsLoaded, error: agentsError } = useLaunchAgents(open, fetchAgentKinds, settings.agentCommands);
   const [agentKind, setAgentKind] = useState(rememberedAgent);
   const [cwd, setCwd] = useState(defaultCwd ?? "");
   const [name, setName] = useState("");
@@ -194,34 +195,15 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
     setEffort(preset.effort);
     modelEdited.current = false;
     effortEdited.current = false;
-    let cancelled = false;
-    const latest = agentReads.current();
-    void fetchAgentKinds()
-      .then((next) => {
-        if (cancelled || !latest()) return;
-        setAgents(next);
-        // a linked agent herdr does not offer gives way to the last one picked, as an unknown remembered one does to a shell
-        if (stored && !next.some((agent) => agent.kind === stored)) {
-          const kind = stored !== remembered && next.some((agent) => agent.kind === remembered) ? remembered : "";
-          setAgentKind(kind);
-          // what was chosen meanwhile for the agent that gave way goes as pickAgent's choices go
-          const can = launchCapabilities(kind);
-          const fallback = launchDefaults(kind, settings);
-          modelEdited.current = false;
-          setModel(fallback.model);
-          const picked = effortEdited.current && fallback.effort === "";
-          effortEdited.current = picked;
-          setEffort((current) => fallback.effort !== "" ? fallback.effort : picked && can.efforts.includes(current) ? current : "");
-          if (!can.ultracode) setUltracode(false);
-        }
-      })
-      .catch((reason: unknown) => {
-        if (!cancelled && latest()) setError(userErrorMessage(reason));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [open]);
+  }, [open, machineId]);
+
+  useEffect(() => {
+    if (!open || !agentsLoaded) return;
+    if (agentsError !== null) { setError(userErrorMessage(agentsError)); return; }
+    const remembered = rememberedAgent();
+    setAgentKind((kind) => kind && !agents.some((agent) => agent.kind === kind) && agentCommand(kind, settings) === null
+      ? (agents.some((agent) => agent.kind === remembered) ? remembered : "") : kind);
+  }, [open, agentsLoaded, agents, agentsError, settings.agentCommands]);
 
   // the folder's last group, as the folder changes, until the reader picks one
   const groupFolder = tab ? tab.cwd : cwd;
@@ -281,13 +263,16 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
   const agentLabel = selectedAgent?.label ?? agentKind;
   const pendingLabel = selectedAgent ? t("Starting {agent}… up to 60s", { agent: selectedAgent.label }) : t("Starting shell…");
   const fieldsDisabled = pending || refreshing || createdPaneId !== null;
+  const command = agentCommand(agentKind, settings);
   const can = launchCapabilities(agentKind);
   const launched = dialogLaunch({ agent: agentKind, model, effort, ultracode, prompt }, settings);
   const fault = "fault" in launched ? launched.fault : null;
   const launch = "fault" in launched ? null : launched;
+  const commandUnsupported = launchCommandUnsupported(launch?.agent ?? null, commandCapable);
   const suggestions = modelSuggestions(agentKind);
   // what the picker's rows say each launch takes: only the agents whose command line takes a model and a level
   const pickerHints = Object.fromEntries(agents.flatMap((agent) => {
+    if (agentCommand(agent.kind, settings) !== null) return [[agent.kind, t("Custom command")]];
     const takes = launchCapabilities(agent.kind);
     return takes.model && takes.efforts.length > 0 ? [[agent.kind, t("model, effort")]] : [];
   }));
@@ -359,7 +344,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
     if (pending || refreshing || guard.current.busy()) return;
     if (createdPaneId !== null) { onCreated(createdPaneId, createdStarted, createdKept); return; }
     // a combination the launch does not take: Start is disabled for it, and an Enter in a field sends nothing
-    if (launch === null) return;
+    if (launch === null || commandUnsupported) return;
     setPending(true);
     setError(null);
     // a tab keeps the workspace's folder, which the dialog shows and does not ask for. The first message of an
@@ -434,7 +419,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
     if (!pending && event.target === event.currentTarget) onClose();
   };
 
-  const promptHint = launch?.prompt?.via === "positional" || (prompt.trim() === "" && can.positionalPrompt)
+  const promptHint = command === null && (launch?.prompt?.via === "positional" || (prompt.trim() === "" && can.positionalPrompt))
     ? t("Sent to {agent} as it starts.", { agent: agentLabel })
     : t("Queued for {agent}'s first turn: sent once it is ready, shown as a pending message until then.", { agent: agentLabel });
 
@@ -507,7 +492,9 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
             <span className="field-hint">{t("Where the Agents list shows it")}</span>
           </div>}
           {/* the launch's own choices, only where the agent's command line takes them (lib/agentLaunchMode.ts) */}
-          {(can.model || can.efforts.length > 0) && <div className="new-session-launch">
+          {command !== null && <p className="field-hint">{t("Uses the saved custom command for {agent}. Permission, model and effort settings are not added. Resume is unchanged.", { agent: agentLabel })}</p>}
+          {!createdPaneId && commandUnsupported && <p id="new-session-command-unsupported" className="field-hint new-session-error" role="alert">{t("This PC has not confirmed atomic custom launch support. Use a compatible Ovis bridge and running Herdr, or clear this agent's command in Settings > Agents. Nothing will start.")}</p>}
+          {command === null && (can.model || can.efforts.length > 0) && <div className="new-session-launch">
             {can.model && <div className="field">
               <label className="field-label" htmlFor="new-session-model">{t("Model")}</label>
               <input
@@ -540,7 +527,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
           </div>}
           {/* Claude Code's own term, a setting beside the level rather than one of them, on one line under Model and
               Effort; the whole sentence is the switch's description and the line's tooltip; off adds nothing */}
-          {can.ultracode && <div className="new-session-ultracode" title={t("Dynamic workflows at any effort level. Needs Claude Code 2.1.284 or later.")}>
+          {command === null && can.ultracode && <div className="new-session-ultracode" title={t("Dynamic workflows at any effort level. Needs Claude Code 2.1.284 or later.")}>
             <Toggle id="new-session-ultracode" checked={ultracode} label={t("Ultracode")} disabled={fieldsDisabled} describedBy="new-session-ultracode-hint" onChange={setUltracode} />
             <label className="new-session-ultracode-label" htmlFor="new-session-ultracode">{t("Ultracode")}</label>
             <span className="new-session-ultracode-note" aria-hidden="true">{t("Claude Code 2.1.284 or later")}</span>
@@ -588,7 +575,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
         </div>
         <footer className="modal-footer">
           <button type="button" className="btn btn-ghost" disabled={pending} onClick={onClose}>{t("Cancel")}</button>
-          <button type="submit" className="btn btn-primary" disabled={pending || refreshing || fault !== null}>{t(pending ? "Starting…" : createdPaneId !== null ? "Open" : "Start")}</button>
+          <button type="submit" className="btn btn-primary" disabled={pending || refreshing || (createdPaneId === null && (fault !== null || commandUnsupported))} aria-describedby={createdPaneId === null && commandUnsupported ? "new-session-command-unsupported" : undefined}>{t(pending ? "Starting…" : createdPaneId !== null ? "Open" : "Start")}</button>
         </footer></>}
       </form>
     </div>

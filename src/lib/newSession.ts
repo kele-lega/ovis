@@ -7,8 +7,8 @@
  * one send: nothing is typed by this page afterwards.
  */
 import type { CreateTabRequest, CreateWorkspaceRequest, WorkspaceCreated } from "../../shared/protocol.ts";
-import type { ClaudeLaunchMode, CodexLaunchMode } from "./agentLaunchMode.ts";
-import { firstPromptDelivery, launchAgent, launchCapabilities, launchChoiceFault } from "./agentLaunchMode.ts";
+import type { AgentLaunchSettings } from "./agentLaunchMode.ts";
+import { agentCommand, firstPromptDelivery, launchAgent, launchCapabilities, launchChoiceFault } from "./agentLaunchMode.ts";
 
 export interface NewSessionFields {
   /** the agent kind; "" is a plain shell */
@@ -23,11 +23,15 @@ export interface NewSessionFields {
 export type FirstPrompt = { text: string; via: "positional" | "pending" };
 
 export type NewSessionLaunch =
-  | { agent: { kind: string; args?: string[] } | null; prompt: FirstPrompt | null }
+  | { agent: { kind: string; args?: string[]; command?: string } | null; prompt: FirstPrompt | null }
   | { fault: "model" | "effort" | "ultracode" | "prompt" };
 
 /** The create request's agent for the fields, or the first choice the launch does not take. */
-export function newSessionLaunch(fields: NewSessionFields, modes: { claudeLaunchMode: ClaudeLaunchMode; codexLaunchMode: CodexLaunchMode }): NewSessionLaunch {
+export function newSessionLaunch(fields: NewSessionFields, modes: AgentLaunchSettings): NewSessionLaunch {
+  if (agentCommand(fields.agent, modes) !== null) {
+    const text = fields.prompt.trim();
+    return { agent: launchAgent(fields.agent, modes), prompt: text === "" ? null : { text, via: "pending" } };
+  }
   const fault = launchChoiceFault(fields.agent, fields);
   if (fault !== null) return { fault };
   const via = firstPromptDelivery(fields.agent, fields.prompt);
@@ -43,7 +47,7 @@ export function newSessionLaunch(fields: NewSessionFields, modes: { claudeLaunch
  * blocks Start nor goes with the launch. The agent list can move the kind past the picker's resets, as when a
  * remembered Claude Code the PC no longer offers gives way to a shell with Ultracode left on.
  */
-export function dialogLaunch(fields: NewSessionFields, modes: { claudeLaunchMode: ClaudeLaunchMode; codexLaunchMode: CodexLaunchMode }): NewSessionLaunch {
+export function dialogLaunch(fields: NewSessionFields, modes: AgentLaunchSettings): NewSessionLaunch {
   return newSessionLaunch({ ...fields, ultracode: fields.ultracode && launchCapabilities(fields.agent).ultracode }, modes);
 }
 

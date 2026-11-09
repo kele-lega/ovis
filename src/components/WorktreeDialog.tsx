@@ -12,7 +12,7 @@ import { GitBranch, X } from "lucide-react";
 
 import "./WorktreeDialog.css";
 
-import type { AgentKind, WorkspaceInfo, WorktreeEntry, WorktreeOpened } from "../../shared/protocol.ts";
+import type { WorkspaceInfo, WorktreeEntry, WorktreeOpened } from "../../shared/protocol.ts";
 import { MAX_LABEL_CHARS } from "../../shared/labels.ts";
 import { ApiError } from "../lib/api.ts";
 import { AddAgentPanel } from "./AddAgentPanel.tsx";
@@ -21,7 +21,8 @@ import { useMachineApi } from "../lib/machineContext.tsx";
 import { useT } from "../lib/i18n.ts";
 import { latestRead, READ_AGAIN_MS, READ_AGAIN_TIMES, readAgainUntil } from "../lib/latestRead.ts";
 import { useSettings } from "../lib/settings.ts";
-import { launchAgent, launchDefaults } from "../lib/agentLaunchMode.ts";
+import { agentCommand, launchAgent, launchCommandUnsupported, launchDefaults } from "../lib/agentLaunchMode.ts";
+import { useLaunchAgents } from "../lib/useLaunchAgents.ts";
 import { suggestWorktreeBranch, worktreeLabel } from "../lib/worktreeName.ts";
 import { useSheetSwipe } from "../lib/sheets.ts";
 import { usePhoneSheetBack } from "../lib/sheetHistory.ts";
@@ -45,7 +46,7 @@ export function WorktreeDialog({ mode, workspace, onClose, onOpened, onOpenPane 
   const { settings } = useSettings();
   const id = useId();
   const { createWorktree, fetchAgentKinds, listWorktrees, openWorktree } = useMachineApi();
-  const [agents, setAgents] = useState<AgentKind[]>([]);
+  const { agents, acceptAgents: setAgents, capable: commandCapable, loaded: agentsLoaded, error: agentsError } = useLaunchAgents(mode === "create", fetchAgentKinds, settings.agentCommands);
   const [agentKind, setAgentKind] = useState(rememberedAgent);
   // the checkout whose agent did not start: it is there, and the button opens it
   const [made, setMade] = useState<WorktreeOpened | null>(null);
@@ -97,20 +98,10 @@ export function WorktreeDialog({ mode, workspace, onClose, onOpened, onOpenPane 
     return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose, pending]);
   useEffect(() => {
-    if (mode !== "create") return;
-    let cancelled = false;
-    const latest = agentReads.current();
-    fetchAgentKinds().then(
-      (next) => {
-        if (cancelled || !latest()) return;
-        setAgents(next);
-        // a remembered agent this PC cannot start falls back to a shell
-        setAgentKind((kind) => (kind && !next.some((agent) => agent.kind === kind) ? "" : kind));
-      },
-      (reason: unknown) => { if (!cancelled && latest()) setError(said(reason)); },
-    );
-    return () => { cancelled = true; };
-  }, [mode, fetchAgentKinds]);
+    if (mode !== "create" || !agentsLoaded) return;
+    if (agentsError !== null) { setError(said(agentsError)); return; }
+    setAgentKind((kind) => kind && !agents.some((agent) => agent.kind === kind) && agentCommand(kind, settings) === null ? "" : kind);
+  }, [mode, agentsLoaded, agents, agentsError, settings.agentCommands]);
   useEffect(() => {
     if (mode !== "open") return;
     let cancelled = false;
@@ -178,14 +169,16 @@ export function WorktreeDialog({ mode, workspace, onClose, onOpened, onOpenPane 
       setPending(null);
     }
   };
+  const agent = launchAgent(agentKind, settings, launchDefaults(agentKind, settings));
+  const commandUnsupported = launchCommandUnsupported(agent, commandCapable);
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
     if (made) { onOpened(made); return; }
     if (refreshing) return;
     const name = branch.trim();
-    if (!name) return;
+    if (!name || commandUnsupported) return;
     void run(t("Creating the checkout…"), async () => {
-      const result = await createWorktree({ workspace_id: workspace.workspace_id, branch: name, base: base.trim() || null, label: label.trim() || null, agent: launchAgent(agentKind, settings, launchDefaults(agentKind, settings)) });
+      const result = await createWorktree({ workspace_id: workspace.workspace_id, branch: name, base: base.trim() || null, label: label.trim() || null, agent });
       // the default follows what actually started: Shell after a plain checkout, an agent only once it runs
       if (!agentKind || result.agent_started === true) rememberAgent(agentKind);
       return result;
@@ -246,6 +239,8 @@ export function WorktreeDialog({ mode, workspace, onClose, onOpened, onOpenPane 
               <div className="field">
                 <span className="field-label" id={`${id}-agent`}>{t("Agent")}</span>
                 <AgentPicker ref={picker} agents={agents} value={agentKind} disabled={locked} labelledBy={`${id}-agent`} addAgent={{ label: t("Add another agent…"), onSelect: () => setAdding(true) }} onChange={setAgentKind} />
+                {agent?.command !== undefined && <span className="field-hint">{t("Uses the saved custom command for {agent}. Permission, model and effort settings are not added. Resume is unchanged.", { agent: agents.find((item) => item.kind === agentKind)?.label ?? agentKind })}</span>}
+                {!made && commandUnsupported && <span id={`${id}-command-unsupported`} className="field-hint worktree-error" role="alert">{t("This PC has not confirmed atomic custom launch support. Use a compatible Ovis bridge and running Herdr, or clear this agent's command in Settings > Agents. Nothing will start.")}</span>}
               </div>
             </>
           ) : others === null && !error ? (
@@ -273,7 +268,7 @@ export function WorktreeDialog({ mode, workspace, onClose, onOpened, onOpenPane 
         </div>
         <footer className="modal-footer">
           <button type="button" className="btn btn-ghost" disabled={pending !== null} onClick={onClose}>{t("Cancel")}</button>
-          {mode === "create" && <button type="submit" className="btn btn-primary" disabled={pending !== null || refreshing || (!made && !branch.trim())}>{t(made ? "Open" : "Create worktree")}</button>}
+          {mode === "create" && <button type="submit" className="btn btn-primary" disabled={pending !== null || refreshing || (!made && (!branch.trim() || commandUnsupported))} aria-describedby={!made && commandUnsupported ? `${id}-command-unsupported` : undefined}>{t(made ? "Open" : "Create worktree")}</button>}
         </footer></>}
       </form>
     </div>,

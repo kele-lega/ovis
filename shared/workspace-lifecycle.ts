@@ -10,7 +10,7 @@ export interface WorkspaceMoved { ok: true; order_epoch?: string; moved_seq?: nu
 export interface CreateWorkspaceRequest {
   cwd?: string | null;
   label?: string | null;
-  agent?: { kind: string; name?: string; args?: string[] } | null;
+  agent?: { kind: string; name?: string; args?: string[]; command?: string } | null;
   /**
    * the user's first message for the agent, sent by this request: the bridge queues it for the
    * agent's first ready turn through its pending path (server/core/pending.ts), where the pane's
@@ -59,12 +59,14 @@ export interface CreateWorktreeRequest {
   /** an absolute checkout path; herdr's `<worktrees.directory>/<repo>/<branch>` when absent */
   path?: string | null;
   /** started in the new workspace's root pane, as /api/workspace/create starts one */
-  agent?: { kind: string; name?: string; args?: string[] } | null;
+  agent?: { kind: string; name?: string; args?: string[]; command?: string } | null;
 }
 
 /** POST /api/worktree/open: one of path or branch names the checkout. */
 export interface OpenWorktreeRequest {
   workspace_id: string;
+  /** Exact commands only: refuses an already-open checkout instead of typing into it. */
+  agent?: { kind: string; name?: string; command: string } | null;
   path?: string | null;
   branch?: string | null;
   label?: string | null;

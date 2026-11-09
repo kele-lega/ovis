@@ -852,6 +852,13 @@ export type { RepoPerson, RepoCommit, RepoLog, RepoBranch, RepoBranches, RepoCom
 
 export type { AgentKind } from "./agents.ts";
 
+/** GET /api/agents: kinds and capabilities of the exact PC selected for creation. */
+export interface AgentsResponse {
+  agents: import("./agents.ts").AgentKind[];
+  /** Missing or false never permits fallback to a default launch. */
+  launch_command?: boolean;
+}
+
 export type { AgentIntegration, IntegrationsResponse } from "./integrations.ts";
 
 export type { CreateWorkspaceRequest, MoveTabRequest, TabMoved, MoveTabToWorkspaceRequest, TabMovedToWorkspace, CreateTabRequest, CreateWorktreeRequest, OpenWorktreeRequest, WorktreeOpened, RemoveWorktreeRequest, WorktreeRemoved, WorktreeEntry, WorktreeListing, WorktreeInventory, WorktreeInventoryEntry, WorkspaceCreated, TabCreated } from "./workspace-lifecycle.ts";

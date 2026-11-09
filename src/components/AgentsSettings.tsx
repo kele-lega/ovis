@@ -15,7 +15,7 @@ import type { UsageLoginRequest } from "../../shared/usage-login.ts";
 /** A sign-in the page follows in its own dialog, hosted at the page's root so no row or list it came from can take it away. */
 type FollowedSignIn = Extract<UsageLoginRequest, { provider: "claude" | "codex" }>;
 import { agentsPage, signInState, type AgentsPageRow } from "../lib/agentsPage.ts";
-import { CLAUDE_EFFORTS, CLAUDE_LAUNCH_MODES, CODEX_EFFORTS, CODEX_LAUNCH_MODES, launchChoiceFault, modelDraftAfterSync, modelSuggestions, type ClaudeLaunchMode, type CodexLaunchMode } from "../lib/agentLaunchMode.ts";
+import { agentCommand, CLAUDE_EFFORTS, CLAUDE_LAUNCH_MODES, CODEX_EFFORTS, CODEX_LAUNCH_MODES, launchChoiceFault, modelDraftAfterSync, modelSuggestions, type ClaudeLaunchMode, type CodexLaunchMode } from "../lib/agentLaunchMode.ts";
 import { ApiError, cliProxyRequest, fetchAgentCatalog } from "../lib/api.ts";
 import { copyText } from "../lib/clipboard.ts";
 import { useT } from "../lib/i18n.ts";
@@ -27,6 +27,7 @@ import { canSignInAgain, glanceWindow, isHubAccount, meterText, moveInOrder, ord
 import { userErrorMessage, type UserError } from "../lib/userError.ts";
 import { AgentMark } from "./AgentMark.tsx";
 import { AgentTile } from "./AgentTile.tsx";
+import { LaunchSettings } from "./LaunchSettings.tsx";
 import { ConfirmDialog } from "./ConfirmDialog.tsx";
 import { Segmented, SettingsBare, SettingsGroup, SettingsQuery, SettingsRow, SettingsSelect, Toggle } from "./SettingsControls.tsx";
 import { UsageAccountDialog } from "./UsageAccountDialog.tsx";
@@ -266,7 +267,7 @@ function AgentItem({ entry, open, onToggle, allProviders, removed, read, limitsO
   const { settings } = useSettings();
   // T3 Code's provider row: what New tab starts it with, on the row itself
   const launch = agent.id === "claude" ? [settings.claudeLaunchModel, settings.claudeLaunchEffort] : agent.id === "codex" ? [settings.codexLaunchModel, settings.codexLaunchEffort] : null;
-  const defaults = launch === null ? null : launch.some((value) => value !== "") ? launch.map((value) => value || t("Agent default")).join(" · ") : t("Agent default");
+  const defaults = agentCommand(agent.id, settings) !== null ? t("Custom command") : launch === null ? null : launch.some((value) => value !== "") ? launch.map((value) => value || t("Agent default")).join(" · ") : t("Agent default");
   return (
     <li className="agents-item" data-agent={agent.id} data-section={provider === null ? undefined : `accounts-${provider}`} tabIndex={provider === null ? undefined : -1}>
       <div className="agents-summary" onClick={(event) => { if (!(event.target as Element).closest(".agents-row-action, .usage-sign-in-again, .agents-toggle")) onToggle(); }}>
@@ -453,6 +454,8 @@ export function AgentsSettings({ watching, onLocalLogin, onOpenPane, onOpenGuide
           <AgentOwnRows agentId={id} />
         </SettingsGroup>)}
       </SettingsBare.Provider>
+
+      <LaunchSettings />
 
       {/* herdr's integrations for agents without a row above, read only: found ones first, then the ones this PC lacks (each a link's section) */}
       {otherIntegrations.length > 0 && <details className="settings-section agents-more" data-section="integrations" tabIndex={-1} open={searching || undefined}>

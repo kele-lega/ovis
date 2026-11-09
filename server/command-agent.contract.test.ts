@@ -75,7 +75,7 @@ async function post(pathname: string, body: unknown, queue: Queue = unexpectedQu
   return (await handleWorkspaceRequest(new Request(url, { method: "POST", body: JSON.stringify(body) }), url, pathname, { timeout() {} }, () => {}, queue, () => ({ order_epoch: "test", moved_seq: 1 })))!;
 }
 const paths = ["workspace/create", "tab/create", "worktree/create", "worktree/open"];
-const payload = (command: unknown) => ({ workspace_id: "source", branch: "fixture", agent: { kind: "claude", command } });
+const payload = <T>(command: T) => ({ workspace_id: "source", branch: "fixture", agent: { kind: "claude", command } });
 
 describe.skipIf(process.platform === "win32")("atomic custom creation contract", () => {
   it("uses only the additive create RPC with exact whitespace, no send_text or agent.start", async () => {

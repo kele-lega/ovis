@@ -14,7 +14,7 @@ import type { DirectoryCreated, PendingMessage, ServerMessage, TabMoved, TabMove
 import type { MoveReceipt } from "./order-sequence.ts";
 import { agentFault, agentLaunch, type AgentPayload } from "./agent-launch.ts";
 import { createDirectory, listDirectories } from "./directories.ts";
-import { HerdrError, paneMoveToNewTab, sessionSnapshot, tabClose, tabCreate, tabMove, tabRename, workspaceClose, workspaceCreate, workspaceMove, workspaceRename, worktreeCreate, worktreeList, worktreeOpen, worktreeRemove } from "./herdr/client.ts";
+import { HerdrError, paneMoveToNewTab, sessionSnapshot, tabClose, tabCreate, tabCreateWithCommand, tabMove, tabRename, workspaceClose, workspaceCreate, workspaceCreateWithCommand, workspaceMove, workspaceRename, worktreeCreate, worktreeCreateWithCommand, worktreeList, worktreeOpen, worktreeOpenWithCommand, worktreeRemove } from "./herdr/client.ts";
 import { badRequest, conflictResponse, errorResponse, isJsonObject, jsonResponse, readJsonObject, setRequestRoute } from "./http.ts";
 import { paneContext } from "./pane-context.ts";
 import { PullRequestError, mergeInputOf, mergePullRequest, pullRequestLog, pullRequestView } from "./pull-request.ts";
@@ -191,7 +191,7 @@ export async function handleWorkspaceRequest(request: Request, url: URL, pathnam
     setRequestRoute(pathname);
     const inWorkspace = pathname === "/api/tab/create";
     if (request.method !== "POST") return badRequest("method_not_allowed", "use POST");
-    const payload = await readJsonObject<{ workspace_id?: unknown; cwd?: unknown; label?: unknown; agent?: { kind?: unknown; name?: unknown; args?: unknown } | null; first_message?: unknown; first_message_connection?: unknown; env?: unknown }>(request);
+    const payload = await readJsonObject<{ workspace_id?: unknown; cwd?: unknown; label?: unknown; agent?: AgentPayload | null; first_message?: unknown; first_message_connection?: unknown; env?: unknown }>(request);
     if (payload instanceof Response) return payload;
     if (inWorkspace && (typeof payload.workspace_id !== "string" || payload.workspace_id.trim() === "")) {
       return badRequest("missing_workspace_id", "workspace_id is required");
@@ -232,9 +232,14 @@ export async function handleWorkspaceRequest(request: Request, url: URL, pathnam
         ...(typeof payload.label === "string" ? { label: payload.label } : {}),
         ...(payload.env === undefined ? {} : { env: payload.env as Record<string, string> }),
       };
-      const created = inWorkspace
-        ? await tabCreate({ ...options, workspaceId: payload.workspace_id as string })
-        : await workspaceCreate(options);
+      const command = payload.agent?.command;
+      const created = typeof command === "string"
+        ? inWorkspace
+          ? await tabCreateWithCommand({ ...options, workspaceId: payload.workspace_id as string, command })
+          : await workspaceCreateWithCommand({ ...options, command })
+        : inWorkspace
+          ? await tabCreate({ ...options, workspaceId: payload.workspace_id as string })
+          : await workspaceCreate(options);
       const workspaceId = created.tab.workspace_id;
       // the page selects the pane on this answer but draws it only once the roster lists it: the roster is read as
       // the answer goes, not after the collector's debounced pane.created (500 ms). Not before the launch either:
@@ -248,8 +253,12 @@ export async function handleWorkspaceRequest(request: Request, url: URL, pathnam
       const launched = await agentLaunch(created.root_pane.pane_id, payload.agent, (pid) => { launchedPid = pid; }, shellAgents);
       // the request's first message is the user's send: queued for the agent's first ready turn through the
       // bridge's pending path (server/core/pending.ts), never typed here; an agent that did not start gets none
+      const unboundCommand = typeof command === "string" && launchedPid === null;
       const firstMessage = launched.agent_started && typeof payload.first_message === "string"
-        ? await queueFirstMessage(created.root_pane.pane_id, payload.first_message, payload.agent.kind as string, requester, launchedPid).then((message): { id: string; held?: string } | ReturnType<typeof notQueued> => ({
+        ? unboundCommand
+          // Kind-only binding could deliver to a replacement process. Keep the client's not_queued draft.
+          ? notQueued(new HerdrError("first_message_not_queued", "The custom agent started, but its process could not be identified safely; the first message was not queued"))
+          : await queueFirstMessage(created.root_pane.pane_id, payload.first_message, payload.agent.kind as string, requester, launchedPid).then((message): { id: string; held?: string } | ReturnType<typeof notQueued> => ({
           id: message.id,
           // held from the start (no page to type it, #2743): said, so a client tells it from a queued one
           ...(message.state === "held" && message.error ? { held: message.error.code } : {}),
@@ -363,20 +372,27 @@ export async function handleWorkspaceRequest(request: Request, url: URL, pathnam
     }
     if (path !== undefined && !isAbsolute(path)) return badRequest("invalid_path", "path must be absolute");
     const creating = pathname === "/api/worktree/create";
-    // a new checkout can start an agent in its pane, as a new workspace can; null is "not given"
-    const agent = creating ? payload.agent ?? undefined : undefined;
+    // Opening an existing worktree with a command must use the atomic RPC too; it must never
+    // type into an already-open pane. Herdr refuses that case before creating anything.
+    const hasCommand = payload.agent !== null && typeof payload.agent === "object" && Object.hasOwn(payload.agent, "command");
+    const agent = creating || hasCommand ? payload.agent ?? undefined : undefined;
     const fault = agentFault(agent);
     if (fault !== null) return badRequest("invalid_agent", fault);
     if (creating && branch === undefined) return badRequest("missing_branch", "branch is required");
     if (!creating && branch === undefined && path === undefined) return badRequest("missing_target", "path or branch is required");
     // a checkout of a large repository can take a while; Bun's default idle timeout is shorter.
     // and agent.start after it can take a minute more.
-    if (creating) bunServer.timeout(request, agent ? 150 : 75);
+    if (creating || agent) bunServer.timeout(request, agent ? 150 : 75);
     try {
       const asked = payload.workspace_id;
-      const from = (workspaceId: string) => creating
-        ? worktreeCreate({ workspaceId, branch: branch as string, base, label, path })
-        : worktreeOpen({ workspaceId, path, branch, label });
+      const command = agent?.command;
+      const from = (workspaceId: string) => typeof command === "string"
+        ? creating
+          ? worktreeCreateWithCommand({ workspaceId, branch: branch as string, base, label, path, command })
+          : worktreeOpenWithCommand({ workspaceId, path, branch, label, command })
+        : creating
+          ? worktreeCreate({ workspaceId, branch: branch as string, base, label, path })
+          : worktreeOpen({ workspaceId, path, branch, label });
       // herdr starts a worktree only from the workspace on the repository's main checkout. Asked
       // from a workspace on another checkout (herdr does not mark one it did not open as a
       // worktree, so the row offers the action), the call goes to that workspace when it is open.

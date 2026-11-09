@@ -32,5 +32,6 @@ export function useLaunchAgents(active: boolean, fetchAgents: FetchAgents, comma
     return () => { cancelled = true; };
   }, [active, fetchAgents, keys]);
   const current = active && result?.source === fetchAgents && result.keys === keys ? result : null;
-  return { agents: current?.agents ?? Object.keys(commands).filter((kind) => SUPPORTED_AGENT_KINDS.has(kind)).map((kind) => ({ kind, label: kind })), capable: current?.capable ?? false, loaded: current !== null, error: current?.error ?? null };
+  const acceptAgents = (agents: AgentKind[]): void => setResult((current) => current?.source === fetchAgents && current.keys === keys ? { ...current, agents } : current);
+  return { acceptAgents, agents: current?.agents ?? Object.keys(commands).filter((kind) => SUPPORTED_AGENT_KINDS.has(kind)).map((kind) => ({ kind, label: kind })), capable: current?.capable ?? false, loaded: current !== null, error: current?.error ?? null };
 }

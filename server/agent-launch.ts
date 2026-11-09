@@ -8,18 +8,25 @@ import { launchedAgents } from "./launched-agents.ts";
 import { isShellAgentKind, startShellAgent, type ShellAgentLocator } from "./shell-agent.ts";
 import { agentStart, HerdrError, sessionSnapshot } from "./herdr/client.ts";
 import { agentStartArgs } from "./claude-settings-file.ts";
-import { launchArgsFault } from "../shared/launch-rules.ts";
+import { launchArgsFault, launchCommandFault } from "../shared/launch-rules.ts";
+import { SUPPORTED_AGENT_KINDS } from "../shared/supported-agents.ts";
+import { observeCommandAgent } from "./command-agent.ts";
 import { hcMachine } from "./herdr-core/runtime.ts";
 
-export type AgentPayload = { kind?: unknown; name?: unknown; args?: unknown };
+export type AgentPayload = { kind?: unknown; name?: unknown; args?: unknown; command?: unknown };
 
 /** What is wrong with a request's `agent`, in the API's words; null when it can be started. */
-export function agentFault(agent: AgentPayload | undefined): string | null {
+export function agentFault(agent: AgentPayload | undefined, platform: string = process.platform): string | null {
   if (agent === undefined) return null;
-  if (typeof agent !== "object" || typeof agent.kind !== "string" || agent.kind.length === 0) return "agent.kind is required";
+  if (agent === null || typeof agent !== "object" || typeof agent.kind !== "string" || agent.kind.length === 0) return "agent.kind is required";
+  if (Object.hasOwn(agent, "command") && agent.args !== undefined) return "agent.command and agent.args are mutually exclusive";
   if ((agent.name !== undefined && typeof agent.name !== "string")
     || (agent.args !== undefined && (!Array.isArray(agent.args) || !agent.args.every((arg) => typeof arg === "string")))) {
     return "agent.name must be a string and agent.args must be an array of strings";
+  }
+  if (Object.hasOwn(agent, "command")) {
+    if (!SUPPORTED_AGENT_KINDS.has(agent.kind)) return "agent.command needs a supported agent kind";
+    return launchCommandFault(agent.command) ?? (platform === "win32" ? "agent.command is not supported on Windows" : null);
   }
   // the dialog's model, effort and Codex prompt, checked as the dialog checks them: a client is not trusted to
   return agent.args === undefined ? null : launchArgsFault(agent.kind, agent.args as string[]);
@@ -36,7 +43,15 @@ export async function agentLaunch(paneId: string, agent: AgentPayload, launched?
   try {
     const kind = agent.kind as string;
     const args = agent.args as string[] | undefined;
-    if (isShellAgentKind(kind)) {
+    if (Object.hasOwn(agent, "command")) {
+      const fault = agentFault(agent, options.platform);
+      if (fault !== null) throw new HerdrError("invalid_agent", fault);
+      const pid = await observeCommandAgent(kind, paneId, {
+        ...(typeof agent.name === "string" ? { name: agent.name } : {}),
+      });
+      if (pid !== null) launched?.(pid);
+    }
+    else if (isShellAgentKind(kind)) {
       // another machine of the core: its path would be this PC's, and its start is never seen there (no pids)
       if (hcMachine() !== null) return { agent_started: false, error: { code: "other_machine", message: `${kind} starts only on the PC that runs Ovis` } };
       const pid = await startShellAgent(kind, paneId, args, locator ? { locator } : {});

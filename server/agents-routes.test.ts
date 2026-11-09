@@ -21,6 +21,7 @@ describe("GET /api/agents", () => {
   const located: string[] = [];
   const shellAgents = { executable: async (kind: string) => { located.push(kind); return kind === "gjc" || kind === "dsh-tui" ? `/opt/${kind}/bin/${kind}` : null; }, stop: async () => undefined } as unknown as ShellAgentLocator;
   const manifests = spyOn(herdr, "agentManifests").mockImplementation(async () => ({ manifests: [{ agent: "codex" }, { agent: "pi" }, { agent: "someagent" }, { agent: "cmd" }, { agent: "copilot" }, { agent: "letta" }] }) as unknown as Awaited<ReturnType<typeof herdr.agentManifests>>);
+  const ping = spyOn(herdr, "ping").mockResolvedValue({ version: "fixture", protocol: 1 });
   const url = (path: string) => `http://127.0.0.1:${server.port}${path}`;
 
   beforeAll(() => {
@@ -40,6 +41,7 @@ describe("GET /api/agents", () => {
   afterAll(() => {
     server.stop();
     manifests.mockRestore();
+    ping.mockRestore();
     rmSync(stateDir, { recursive: true, force: true });
     rmSync(bin, { recursive: true, force: true });
     rmSync(emptyHome, { recursive: true, force: true });
@@ -50,6 +52,7 @@ describe("GET /api/agents", () => {
     const response = await fetch(url("/api/agents"));
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
+      launch_command: false,
       agents: [
         { kind: "claude", label: "Claude Code", installed: false },
         { kind: "codex", label: "Codex", installed: true },
