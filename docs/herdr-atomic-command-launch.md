@@ -6,7 +6,9 @@ The normal launch/resume paths remain compatible with older daemons. Native Wind
 and the upstream `herdr-core` runtime do not support this custom-command contract and
 fail closed; Ovis never falls back to typing into a terminal. Having a `terminal.run`
 argv API does not establish atomic worktree creation, no-replay or completed-pane retention.
-The runtime is not switched to enable this feature.
+The supported implementation is the patched Unix Herdr path below. Ping still preserves the
+upstream runtime and layout identity; a core runtime does not acquire atomic support merely by
+carrying a capability bit. The runtime is not switched to enable this feature.
 
 ## Source delivery
 

@@ -5,6 +5,16 @@
  * Register and fixed terms follow ../i18n.ja.ts; a key another feature also uses goes there.
  */
 export const SETTINGS_JA: Record<string, string> = {
+  "Full commands": "完全なコマンド",
+  "Applies to New workspace, New tab and New worktree only. Resume is unchanged. Save a full command to replace the normal launch; clear it to use the agent's defaults again.": "新しいワークスペース、タブ、ワークツリーのみに適用され、再開には影響しません。完全なコマンドを保存すると通常の起動を置き換え、消去するとエージェントの既定の起動に戻ります。",
+  "Full command for {agent}": "{agent} の完全なコマンド",
+  "Save command for {agent}": "{agent} のコマンドを保存",
+  "Clear command for {agent}": "{agent} のコマンドを消去",
+  "Clear command": "コマンドを消去",
+  "Use one nonblank line, at most 2000 characters, with no control characters. Invalid text is not saved.": "空白だけではない1行で、制御文字を含めず2000文字以内にしてください。無効なテキストは保存されません。",
+  "Not saved. The previous launch setting is still used.": "未保存です。以前の起動設定が引き続き使われます。",
+  "No custom command. Uses the agent's default launch.": "カスタムコマンドはありません。エージェントの既定の起動を使います。",
+  "Commands are stored in plaintext and shared across devices. Do not include passwords, API keys or other secrets. Use a wrapper script or environment variables on the PC instead.": "コマンドは平文で保存され、デバイス間で共有されます。パスワードや API キーなどの秘密情報を含めないでください。代わりに PC 上のラッパースクリプトや環境変数を使ってください。",
   "Direct typing": "直接入力",
   "Terminal input mode": "端末入力モード",
   "Reset shortcuts": "ショートカットをリセット",

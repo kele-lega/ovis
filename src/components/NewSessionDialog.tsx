@@ -15,7 +15,7 @@ import { Toggle } from "./SettingsControls.tsx";
 import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
 import { useAgentSkills } from "../lib/useAgentSkills.ts";
 import { useT } from "../lib/i18n.ts";
-import { latestRead, READ_AGAIN_MS, READ_AGAIN_TIMES, readAgainUntil } from "../lib/latestRead.ts";
+import { READ_AGAIN_MS, READ_AGAIN_TIMES, readAgainUntil } from "../lib/latestRead.ts";
 import { loadSettings, useSettings } from "../lib/settings.ts";
 import { assignAgentGroup, folderAgentGroup, rememberFolderAgentGroup } from "../lib/namedAgentGroups.ts";
 import { sidebarPinKey } from "../lib/sidebarPins.ts";
@@ -104,7 +104,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
   const machineId = useMachineId();
   const { createTab, createWorkspace, fetchAgentKinds, fetchAgentCommands } = useMachineApi();
   const machineSessions = useMachineSessions();
-  const { agents, acceptAgents: setAgents, capable: commandCapable, loaded: agentsLoaded, error: agentsError } = useLaunchAgents(open, fetchAgentKinds, settings.agentCommands);
+  const { agents, refresh: refreshAgents, capable: commandCapable, loaded: agentsLoaded, error: agentsError } = useLaunchAgents(open, fetchAgentKinds, settings.agentCommands);
   const [agentKind, setAgentKind] = useState(rememberedAgent);
   const [cwd, setCwd] = useState(defaultCwd ?? "");
   const [name, setName] = useState("");
@@ -138,7 +138,6 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
   // counts openings and closings, so an answer for an earlier opening changes nothing
   const openings = useRef(0);
   // the agent list as read last: the read as the dialog opened may answer after the one an install asked for
-  const agentReads = useRef(latestRead());
   const [recentFolders, setRecentFolders] = useState(() => recentDirectories.read(machineId));
   // folders kept before worktrees and temporary folders were left out are left out here too
   const shownFolders = recentFolders.filter((path) => !passingFolder(path, worktrees)).slice(0, RECENT_FOLDERS_SHOWN);
@@ -201,9 +200,20 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
     if (!open || !agentsLoaded) return;
     if (agentsError !== null) { setError(userErrorMessage(agentsError)); return; }
     const remembered = rememberedAgent();
-    setAgentKind((kind) => kind && !agents.some((agent) => agent.kind === kind) && agentCommand(kind, settings) === null
-      ? (agents.some((agent) => agent.kind === remembered) ? remembered : "") : kind);
-  }, [open, agentsLoaded, agents, agentsError, settings.agentCommands]);
+    if (agentKind && !agents.some((agent) => agent.kind === agentKind) && agentCommand(agentKind, settings) === null) {
+      const kind = agents.some((agent) => agent.kind === remembered) ? remembered : "";
+      setAgentKind(kind);
+      // Preserve upstream fallback behavior even when the reader edited choices before the catalog arrived.
+      const can = launchCapabilities(kind);
+      const fallback = launchDefaults(kind, settings);
+      modelEdited.current = false;
+      setModel(fallback.model);
+      const picked = effortEdited.current && fallback.effort === "";
+      effortEdited.current = picked;
+      setEffort((current) => fallback.effort !== "" ? fallback.effort : picked && can.efforts.includes(current) ? current : "");
+      if (!can.ultracode) setUltracode(false);
+    }
+  }, [open, agentsLoaded, agents, agentsError, agentKind, settings.agentCommands]);
 
   // the folder's last group, as the folder changes, until the reader picks one
   const groupFolder = tab ? tab.cwd : cwd;
@@ -308,14 +318,13 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
     // the fields stay off while it waits: nothing the user picks or starts meanwhile is overridden; each
     // read's outcome is taken once (a late answer after its deadline is ignored), and the last one,
     // a stalled read included, turns the fields back on
-    readingAgain.current = readAgainUntil(() => { agentReads.current(); return fetchAgentKinds(); }, {
+    readingAgain.current = readAgainUntil(refreshAgents, {
       every: READ_AGAIN_MS,
       times: READ_AGAIN_TIMES,
       later: (run, ms) => { const timer = window.setTimeout(run, ms); return () => window.clearTimeout(timer); },
       apply: (outcome, last) => {
         if (openings.current !== opening) return true;
         if (outcome.kind === "answer") {
-          setAgents(outcome.value);
           if (outcome.value.some((agent) => agent.kind === kind)) { pickAgent(kind); setError(null); setRefreshing(false); return true; }
         }
         if (!last) { setError({ message: t("It is installed. Waiting for this PC to offer it here…"), detail: null }); return false; }

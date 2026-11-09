@@ -1004,11 +1004,13 @@ export function enterSendsOn(settings: Pick<Settings, "enterSends">, touch: bool
 export const AGENT_COMMANDS_STORAGE_KEY = "ovis:agent-commands";
 
 function readAgentCommands(fallback: Record<string, string> = {}): Record<string, string> {
-  try {
-    const raw = window.localStorage.getItem(AGENT_COMMANDS_STORAGE_KEY);
-    // Before the dedicated key existed, settings could hold the command map itself.
-    return raw === null ? fallback : sanitizeAgentCommands(JSON.parse(raw));
-  } catch { return fallback; }
+  let raw: string | null;
+  try { raw = window.localStorage.getItem(AGENT_COMMANDS_STORAGE_KEY); }
+  catch { return fallback; }
+  // Before the dedicated key existed, settings could hold the command map itself.
+  if (raw === null) return fallback;
+  try { return sanitizeAgentCommands(JSON.parse(raw)); }
+  catch { return {}; }
 }
 
 export function loadSettings(): Settings {
@@ -1214,7 +1216,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       // another tab may have saved since this one loaded (#2485): write only what this tab changed, over what is stored now
       const changed = Object.fromEntries(Object.entries(next).filter(([key, value]) => differs(key, value, current) || differs(key, value, stored.current)));
       const persistCommands = commandsChanged || pendingAgentCommands.current !== null;
-      const saved = saveSettings(sanitizeSettings({ ...loadSettings(), ...changed }), persistCommands);
+      const saved = saveSettings(sanitizeSettings({ ...loadSettings(), ...changed, agentCommands: next.agentCommands }), persistCommands);
       if (saved) stored.current = next;
       if (persistCommands) pendingAgentCommands.current = saved ? null : next.agentCommands;
       return next;

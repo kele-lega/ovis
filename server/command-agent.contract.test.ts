@@ -32,7 +32,7 @@ const created = {
   root_pane: { pane_id: target }, worktree: { path: "/fixture/checkout", branch: "fixture" }, already_open: false,
 };
 interface Rpc { id: string; method: string; params: Record<string, unknown> }
-async function daemon(capability: unknown = true, processEvidence: "single" | "ambiguous" | "failed" = "single") {
+async function daemon(capability: unknown = true, processEvidence: "single" | "ambiguous" | "failed" = "single", extraCapabilities: Record<string, unknown> = {}) {
   const dir = mkdtempSync(join(tmpdir(), "ovis-atomic-contract-")), path = join(dir, "herdr.sock");
   const calls: Rpc[] = [], open = new Set<Socket>();
   let failCreate: string | null = null, creates = 0;
@@ -44,7 +44,7 @@ async function daemon(capability: unknown = true, processEvidence: "single" | "a
       const request = JSON.parse(data.slice(0, data.indexOf("\n"))) as Rpc; calls.push(request);
       const answer = (result: unknown) => socket.end(`${JSON.stringify({ id: request.id, result })}\n`);
       switch (request.method) {
-        case "ping": return answer({ version: "test", protocol: 1, capabilities: capability === undefined ? {} : { atomic_command_launch: capability } });
+        case "ping": return answer({ version: "test", protocol: 1, capabilities: { ...extraCapabilities, ...(capability === undefined ? {} : { atomic_command_launch: capability }) } });
         case "session.snapshot": return answer({ snapshot: { panes: [{ pane_id: target, agent: "claude" }], agents: [] } });
         case "pane.process_info": {
           if (processEvidence === "failed") return socket.end(`${JSON.stringify({ id: request.id, error: { code: "process_info_failed", message: "private diagnostic" } })}\n`);
@@ -159,6 +159,21 @@ describe.skipIf(process.platform === "win32")("atomic custom creation contract",
     const old = await daemon(false); expect((await bridgeIdentity(false)).launch_command).toBeFalse();
     expect((await ping(old.path)).capabilities).toEqual({ atomic_command_launch: false });
     const invalid = await daemon("true"); expect((await ping(invalid.path)).capabilities).toBeUndefined();
+  });
+  it("preserves upstream core identity and layout while refusing its unsupported atomic semantics", async () => {
+    const f = await daemon(true, "single", { runtime: "herdr-core", direct_terminal_attach: false, layout: { rename: true, split: true, move: false, arrange: true, worktrees: true } });
+    const identity = await ping(f.path);
+    expect(identity).toMatchObject({ runtime: "herdr-core", terminal_attach: false, terminal_mirror: true,
+      layout: { rename: true, split: true, move: false, arrange: true, worktrees: true }, capabilities: { atomic_command_launch: true } });
+    expect(atomicCommandLaunchSupported(identity)).toBeFalse();
+    await expect(workspaceCreateWithCommand({ command: "fixture" }, f.path)).rejects.toMatchObject({ code: "command_launch_unsupported" });
+    expect(f.creates()).toBe(0);
+  });
+  it("does not retry an already-open worktree refusal or observe/type into its existing pane", async () => {
+    const f = await daemon(); f.fail("worktree_already_open");
+    const response = await post("/api/worktree/open", payload("fixture"));
+    expect(response.ok).toBeFalse();
+    expect(f.calls.map((call) => call.method)).toEqual(["ping", "worktree.open_with_command"]);
   });
   it("checks capability even for direct wrapper callers", async () => {
     const f = await daemon(false); await expect(workspaceCreateWithCommand({ command: "fixture" }, f.path)).rejects.toMatchObject({ code: "command_launch_unsupported" }); expect(f.creates()).toBe(0);

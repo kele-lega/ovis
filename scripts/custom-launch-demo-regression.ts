@@ -25,13 +25,13 @@ const probe = `(() => {
   };
 })();`;
 const creates = (page: Page) => page.evaluate(() => (window as unknown as { launchProbe: { creates: { path: string; body: { agent: unknown; first_message?: string } }[] } }).launchProbe.creates);
-const openSettings = async (page: Page, chat: string, back: string) => {
+const openSettings = async (page: Page, agents: string, back: string) => {
   await page.keyboard.press("ControlOrMeta+Shift+Comma");
-  await openSettingsPage(page, chat, back);
+  await openSettingsPage(page, agents, back);
 };
 const openWorkspace = async (page: Page, width: number) => {
   if (width < 640) await page.locator('[aria-controls="workspace-drawer"]').click();
-  await page.locator(".machine-new").first().click();
+  await page.locator(".machine-new-row, .machine-new").first().click();
   await page.locator(".new-session-modal").waitFor();
 };
 
@@ -64,7 +64,12 @@ try {
           page.on("pageerror", (error) => errors.push(error.message));
           await page.goto(`http://127.0.0.1:${server.port}/`);
           await page.locator(".conn-live").waitFor();
-          await openSettings(page, label("Chat"), label("Back to settings"));
+          await openSettings(page, label("Agents"), label("Back to settings"));
+          const openDefaults = async () => {
+            const toggle = page.locator('.agents-item[data-agent="claude"] .agents-toggle');
+            if (await toggle.count() > 0 && await toggle.getAttribute("aria-expanded") === "false") await toggle.click();
+          };
+          await openDefaults();
           const field = page.getByLabel(label("Full command for {agent}").replace("{agent}", "Claude Code"), { exact: true });
           const row = field.locator("xpath=../..");
           await field.fill(command);
@@ -141,8 +146,9 @@ try {
             await worktree.getByRole("button", { name: label("Close worktree dialog"), exact: true }).click();
             console.log("PASS legacy worktree refusal blocks even a synthetic form submission");
           }
-          await openSettings(page, label("Chat"), label("Back to settings"));
+          await openSettings(page, label("Agents"), label("Back to settings"));
           await row.getByRole("button", { name: label("Clear command for {agent}").replace("{agent}", "Claude Code"), exact: true }).click();
+          await openDefaults();
           assert.equal(await field.inputValue(), "");
           assert.equal(await page.locator("#settings-claude-launch-mode").isEnabled(), true);
           assert.deepEqual(errors, []);
@@ -161,13 +167,13 @@ try {
         const offline = `http://127.0.0.1:${server.port}/?launch_preferences_offline=1`;
         await Promise.all([a.goto(offline), b.goto(`${offline}&launch_stale_tab=1`)]);
         await Promise.all([a.locator(".conn-live").waitFor(), b.locator(".conn-live").waitFor()]);
-        await openSettings(a, "Chat", "Back to settings");
+        await openSettings(a, "Agents", "Back to settings");
         const aField = a.getByLabel("Full command for Claude Code", { exact: true });
         await aField.fill(command);
         await aField.locator("xpath=../..").getByRole("button", { name: "Save command for Claude Code", exact: true }).click();
         await a.waitForFunction((command) => JSON.parse(localStorage.getItem("ovis:agent-commands") ?? "{}").claude === command, command);
         await b.keyboard.press("ControlOrMeta+Shift+Comma");
-        await openSettingsPage(b, "Terminal", "Back to settings");
+        await openSettingsPage(b, "Appearance", "Back to settings");
         await b.getByRole("button", { name: "Increase terminal font size", exact: true }).click();
         assert.equal(await b.evaluate(() => JSON.parse(localStorage.getItem("ovis:agent-commands") ?? "{}").claude), command, "a stale tab's unrelated save cannot erase the command");
         await b.locator(".settings-dialog").getByRole("button", { name: "Close settings", exact: true }).click();
@@ -177,7 +183,7 @@ try {
         await b.locator(".new-session-modal").getByText("Uses the saved custom command", { exact: false }).waitFor();
         await a.reload();
         await a.locator(".conn-live").waitFor();
-        await openSettings(a, "Chat", "Back to settings");
+        await openSettings(a, "Agents", "Back to settings");
         assert.equal(await aField.inputValue(), command);
         console.log("PASS two offline-sync tabs retain a saved command across stale unrelated updates and reload");
       } finally { await tabs.close(); }

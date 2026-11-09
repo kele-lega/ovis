@@ -5,6 +5,16 @@
  * Register and fixed terms follow ../i18n.ko.ts; a key another feature also uses goes there.
  */
 export const SETTINGS_KO: Record<string, string> = {
+  "Full commands": "전체 명령",
+  "Applies to New workspace, New tab and New worktree only. Resume is unchanged. Save a full command to replace the normal launch; clear it to use the agent's defaults again.": "새 워크스페이스, 새 탭, 새 워크트리에만 적용되며 이어하기는 바뀌지 않습니다. 전체 명령을 저장하면 기본 실행을 대체하고, 지우면 에이전트 기본 실행으로 돌아갑니다.",
+  "Full command for {agent}": "{agent} 전체 명령",
+  "Save command for {agent}": "{agent} 명령 저장",
+  "Clear command for {agent}": "{agent} 명령 지우기",
+  "Clear command": "명령 지우기",
+  "Use one nonblank line, at most 2000 characters, with no control characters. Invalid text is not saved.": "제어 문자 없이 2000자 이하의 비어 있지 않은 한 줄을 입력하세요. 올바르지 않은 텍스트는 저장되지 않습니다.",
+  "Not saved. The previous launch setting is still used.": "저장되지 않았습니다. 이전 실행 설정을 계속 사용합니다.",
+  "No custom command. Uses the agent's default launch.": "사용자 명령이 없습니다. 에이전트 기본 실행을 사용합니다.",
+  "Commands are stored in plaintext and shared across devices. Do not include passwords, API keys or other secrets. Use a wrapper script or environment variables on the PC instead.": "명령은 평문으로 저장되어 기기 간에 공유됩니다. 비밀번호, API 키 등 비밀 정보를 넣지 마세요. 대신 PC의 래퍼 스크립트나 환경 변수를 사용하세요.",
   "Direct typing": "직접 입력",
   "Terminal input mode": "터미널 입력 방식",
   "Reset shortcuts": "단축키 초기화",

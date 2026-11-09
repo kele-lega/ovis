@@ -5,6 +5,8 @@
  * Register and fixed terms follow ../i18n.zh.ts; a key another feature also uses goes there.
  */
 export const WORKSPACE_ZH: Record<string, string> = {
+  "Uses the saved custom command for {agent}. Permission, model and effort settings are not added. Resume is unchanged.": "使用已保存的 {agent} 自定义命令，不会附加权限、模型或推理强度设置。不影响继续会话。",
+  "This PC has not confirmed atomic custom launch support. Use a compatible Ovis bridge and running Herdr, or clear this agent's command in Settings > Agents. Nothing will start.": "这台 PC 尚未确认支持原子式自定义启动。请使用兼容的 Ovis 桥接及正在运行的 Herdr，或在设置 > 代理中清除此代理的命令。不会启动任何内容。",
   "Use folder {path}": "使用文件夹 {path}",
   "{n} more recent folders": "另外 {n} 个最近的文件夹",
   "New worktree · {name}": "新建工作树 · {name}",

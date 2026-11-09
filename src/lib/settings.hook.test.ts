@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createElement, StrictMode } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { COMPOSER_ARTIFACTS_STORAGE_KEY, DEFAULT_SETTINGS, ENTER_SENDS_STORAGE_KEY, enterSendsOn, SettingsProvider, useSettings, VOICE_ENGINE_STORAGE_KEY, type Settings } from "./settings.ts";
+import { AGENT_COMMANDS_STORAGE_KEY, COMPOSER_ARTIFACTS_STORAGE_KEY, DEFAULT_SETTINGS, ENTER_SENDS_STORAGE_KEY, enterSendsOn, SettingsProvider, useSettings, VOICE_ENGINE_STORAGE_KEY, type Settings } from "./settings.ts";
 import { SETTINGS_STORAGE_KEY } from "./themeBoot.ts";
 
 describe("settings across tabs", () => {
@@ -293,6 +293,44 @@ describe("settings across tabs", () => {
     // Then this tab's next dictation uses it too, without writing anything.
     expect(settings.voiceEngine).toBe("browser");
     expect(writes).toBe(0);
+  });
+
+  it.each([false, true])("preserves exact commands across a missed event and unrelated update (StrictMode=%j)", async (strict) => {
+    await open(strict);
+    const commands = { codex: "  wrapper --profile 'two words'  " };
+    records.set(AGENT_COMMANDS_STORAGE_KEY, JSON.stringify(commands));
+    await act(async () => { update({ terminalFontSize: 24 }); });
+    expect(settings.agentCommands).toEqual(commands);
+    expect(JSON.parse(records.get(AGENT_COMMANDS_STORAGE_KEY)!)).toEqual(commands);
+    await act(async () => { update({ agentCommands: {} }); });
+    expect(JSON.parse(records.get(AGENT_COMMANDS_STORAGE_KEY)!)).toEqual({});
+  });
+
+  it("takes cross-tab commands without echoing writes and keeps a failed explicit save until storage recovers", async () => {
+    await open();
+    const commands = { claude: "  saved wrapper  " };
+    records.set(AGENT_COMMANDS_STORAGE_KEY, JSON.stringify(commands));
+    await storage(AGENT_COMMANDS_STORAGE_KEY);
+    expect(settings.agentCommands).toEqual(commands);
+    expect(writes).toBe(0);
+    full = true;
+    await act(async () => { update({ agentCommands: { claude: "  session wrapper  " } }); });
+    await storage(SETTINGS_STORAGE_KEY);
+    await act(async () => { update({ terminalFontSize: 26 }); });
+    expect(settings.agentCommands.claude).toBe("  session wrapper  ");
+    full = false;
+    await act(async () => { update({ terminalFontSize: 27 }); });
+    expect(JSON.parse(records.get(AGENT_COMMANDS_STORAGE_KEY)!).claude).toBe("  session wrapper  ");
+  });
+
+  it("reads the original whole-settings command map until an explicit clear creates the dedicated key", async () => {
+    records.set(SETTINGS_STORAGE_KEY, JSON.stringify({ agentCommands: { codex: "  legacy wrapper  " } }));
+    await open();
+    expect(settings.agentCommands.codex).toBe("  legacy wrapper  ");
+    await act(async () => { update({ agentCommands: {} }); });
+    await act(async () => { renderer?.unmount(); });
+    await open();
+    expect(settings.agentCommands).toEqual({});
   });
 
   it("ignores storage events for unrelated keys", async () => {

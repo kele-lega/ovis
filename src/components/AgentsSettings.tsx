@@ -104,11 +104,11 @@ function LaunchDefaultRows({ agent, model, effort, efforts, onModel, onEffort }:
 function AgentOwnRows({ agentId }: { agentId: string }) {
   const { settings, update } = useSettings();
   const t = useT();
-  const launch = t("Applies to agents started from New workspace, New tab and New worktree. Agent default adds no flag, so the agent's own configuration decides.");
+  const launch = agentCommand(agentId, settings) !== null ? t("Saved custom command. No permission, model or effort flags are added.") : t("Applies to agents started from New workspace, New tab and New worktree. Agent default adds no flag, so the agent's own configuration decides.");
   switch (agentId) {
     case "claude": return <>
       <SettingsRow icon={ShieldCheck} label={t("Permission mode")} description={launch} htmlFor="settings-claude-launch-mode" reset={["claudeLaunchMode"]}>
-        <SettingsSelect id="settings-claude-launch-mode" value={settings.claudeLaunchMode} onChange={(event) => update({ claudeLaunchMode: event.target.value as ClaudeLaunchMode })}>
+        <SettingsSelect id="settings-claude-launch-mode" value={settings.claudeLaunchMode} disabled={agentCommand(agentId, settings) !== null} onChange={(event) => update({ claudeLaunchMode: event.target.value as ClaudeLaunchMode })}>
           {CLAUDE_LAUNCH_MODES.map((mode) => <option key={mode} value={mode}>{claudeModeName(mode, t)}</option>)}
         </SettingsSelect>
       </SettingsRow>
@@ -117,7 +117,7 @@ function AgentOwnRows({ agentId }: { agentId: string }) {
     </>;
     case "codex": return <>
       <SettingsRow icon={Shield} label={t("Sandbox and approvals")} description={launch} htmlFor="settings-codex-launch-mode" reset={["codexLaunchMode"]}>
-        <SettingsSelect id="settings-codex-launch-mode" value={settings.codexLaunchMode} onChange={(event) => update({ codexLaunchMode: event.target.value as CodexLaunchMode })}>
+        <SettingsSelect id="settings-codex-launch-mode" value={settings.codexLaunchMode} disabled={agentCommand(agentId, settings) !== null} onChange={(event) => update({ codexLaunchMode: event.target.value as CodexLaunchMode })}>
           {CODEX_LAUNCH_MODES.map((mode) => <option key={mode} value={mode}>{codexModeName(mode, t)}</option>)}
         </SettingsSelect>
       </SettingsRow>

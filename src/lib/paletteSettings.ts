@@ -38,6 +38,7 @@ export function settingsPageEntries(t: Translate): SettingsPageEntry[] {
     { id: "chat", section: "voice", label: t("Voice input"), aliases: t("dictation microphone speech openai") },
     { id: "chat", section: "voice-more", label: t("Dictation language"), aliases: "" },
     { id: "devices", section: "devices", label: t("Connected to this PC"), aliases: t("machines computers ssh bridge plugins phone pair relay QR code Remote PCs") },
+    { id: "agents", section: "launch-modes", label: t("Full commands"), aliases: t("Custom command") },
     { id: "agents", section: "guide", label: t("Setup guide"), aliases: t("onboarding first run getting started welcome") },
     { id: "appearance", section: "typography", label: t("Typography"), aliases: [t("Interface font size"), t("Interface font"), t("Terminal font"), t("Terminal font size"), t("Chat font"), t("Chat font size")].join(" ") },
     { id: "appearance", section: "typography-more", label: `${t("Typography")} · ${t("More settings")}`, aliases: "" },

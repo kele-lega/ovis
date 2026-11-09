@@ -5,6 +5,8 @@
  * Register and fixed terms follow ../i18n.ko.ts; a key another feature also uses goes there.
  */
 export const WORKSPACE_KO: Record<string, string> = {
+  "Uses the saved custom command for {agent}. Permission, model and effort settings are not added. Resume is unchanged.": "저장된 {agent} 사용자 명령을 사용합니다. 권한, 모델, 노력 수준 설정은 추가되지 않습니다. 이어하기는 바뀌지 않습니다.",
+  "This PC has not confirmed atomic custom launch support. Use a compatible Ovis bridge and running Herdr, or clear this agent's command in Settings > Agents. Nothing will start.": "이 PC는 원자적 사용자 명령 실행 지원을 확인하지 못했습니다. 호환되는 Ovis 브리지와 실행 중인 Herdr를 사용하거나 설정 > 에이전트에서 이 에이전트의 명령을 지우세요. 아무것도 시작하지 않습니다.",
   "Use folder {path}": "{path} 폴더 사용",
   "{n} more recent folders": "최근 폴더 {n}개 더",
   "New worktree · {name}": "새 워크트리 · {name}",

@@ -31,7 +31,7 @@ describe("newSessionLaunch", () => {
     const command = " wrapper --my-options  ";
     for (const kind of ["claude", "codex", "omp"]) {
       const settings = { ...plain, agentCommands: { [kind]: command } };
-      const launch = newSessionLaunch({ agent: kind, model: "stale invalid model", effort: "stale effort", prompt: "  update\nthen review  " }, settings);
+      const launch = newSessionLaunch({ agent: kind, model: "stale invalid model", effort: "stale effort", ultracode: true, prompt: "  update\nthen review  " }, settings);
       expect(launch).toEqual({ agent: { kind, command }, prompt: { text: "update\nthen review", via: "pending" } });
       if ("fault" in launch) throw new Error("unexpected fault");
       for (const tab of [null, { workspaceId: "w1", cwd: "/work" }]) {

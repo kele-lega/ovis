@@ -378,7 +378,7 @@ once the draft is sent or cleared in the terminal.
 
 ## Custom agent launch commands
 
-**Settings → Chat → New agents** saves an optional single-line launch command for each agent.
+**Settings → Agents → Full commands** saves an optional single-line launch command for each agent.
 Choose the agent, enter the complete command and press **Save**. **Clear** restores that agent's
 normal launch behavior. For example, a command may name an absolute executable path, a wrapper,
 or shell environment assignments. The selected kind still tells Ovis which agent to recognize
@@ -396,7 +396,7 @@ Herdr's saved session never replays this one-shot command.
 
 Commands are shared settings, so the same saved text runs on each selected PC, using that PC's
 PATH and installed tools. Both the target's Ovis bridge and its running Herdr daemon must
-explicitly support atomic command creation. An older bridge, an older daemon or native Windows
+explicitly support atomic command creation. An older bridge, an older daemon, herdr-core or native Windows
 is refused before creation, with no default-agent fallback. Updating Ovis alone does not add
 this daemon capability; install a compatible Herdr separately or clear the command to use the
 normal launch path. Resuming a session is unchanged and never uses these commands.

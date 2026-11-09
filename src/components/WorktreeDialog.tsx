@@ -19,7 +19,7 @@ import { AddAgentPanel } from "./AddAgentPanel.tsx";
 import { AgentPicker, rememberAgent, rememberedAgent } from "./AgentPicker.tsx";
 import { useMachineApi } from "../lib/machineContext.tsx";
 import { useT } from "../lib/i18n.ts";
-import { latestRead, READ_AGAIN_MS, READ_AGAIN_TIMES, readAgainUntil } from "../lib/latestRead.ts";
+import { READ_AGAIN_MS, READ_AGAIN_TIMES, readAgainUntil } from "../lib/latestRead.ts";
 import { useSettings } from "../lib/settings.ts";
 import { agentCommand, launchAgent, launchCommandUnsupported, launchDefaults } from "../lib/agentLaunchMode.ts";
 import { useLaunchAgents } from "../lib/useLaunchAgents.ts";
@@ -46,7 +46,7 @@ export function WorktreeDialog({ mode, workspace, onClose, onOpened, onOpenPane 
   const { settings } = useSettings();
   const id = useId();
   const { createWorktree, fetchAgentKinds, listWorktrees, openWorktree } = useMachineApi();
-  const { agents, acceptAgents: setAgents, capable: commandCapable, loaded: agentsLoaded, error: agentsError } = useLaunchAgents(mode === "create", fetchAgentKinds, settings.agentCommands);
+  const { agents, refresh: refreshAgents, capable: commandCapable, loaded: agentsLoaded, error: agentsError } = useLaunchAgents(mode === "create", fetchAgentKinds, settings.agentCommands);
   const [agentKind, setAgentKind] = useState(rememberedAgent);
   // the checkout whose agent did not start: it is there, and the button opens it
   const [made, setMade] = useState<WorktreeOpened | null>(null);
@@ -120,7 +120,6 @@ export function WorktreeDialog({ mode, workspace, onClose, onOpened, onOpenPane 
     if (wasAdding.current && !refreshing) { wasAdding.current = false; picker.current?.focus(); }
   }, [adding, refreshing]);
   // the agent list as read last: the read as the dialog opened may answer after the one an install asked for
-  const agentReads = useRef(latestRead());
   // the installed agent is offered once the PC lists it: picked then. Its installer may still be
   // editing the shell profile: until then the dialog says why and reads again (lib/latestRead.ts)
   const readingAgain = useRef<() => void>(() => undefined);
@@ -132,14 +131,13 @@ export function WorktreeDialog({ mode, workspace, onClose, onOpened, onOpenPane 
     // the fields stay off while it waits: nothing the user picks or starts meanwhile is overridden; each
     // read's outcome is taken once (a late answer after its deadline is ignored), and the last one,
     // a stalled read included, turns the fields back on
-    readingAgain.current = readAgainUntil(() => { agentReads.current(); return fetchAgentKinds(); }, {
+    readingAgain.current = readAgainUntil(refreshAgents, {
       every: READ_AGAIN_MS,
       times: READ_AGAIN_TIMES,
       later: (run, ms) => { const timer = window.setTimeout(run, ms); return () => window.clearTimeout(timer); },
       apply: (outcome, last) => {
         if (!mounted.current) return true;
         if (outcome.kind === "answer") {
-          setAgents(outcome.value);
           if (outcome.value.some((agent) => agent.kind === kind)) { setAgentKind(kind); setError(null); setRefreshing(false); return true; }
         }
         if (!last) { setError(t("It is installed. Waiting for this PC to offer it here…")); return false; }

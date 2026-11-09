@@ -86,6 +86,22 @@ describe("creation catalog capabilities", () => {
     expect(seen.loaded).toBeFalse();
   });
 
+  it("lets an install refresh finish before the opening read and rechecks its exact capability", async () => {
+    const opening = pending(), installed = pending();
+    let reads = 0;
+    const fetch: Fetch = (callback, kinds) => (++reads === 1 ? opening : installed).fetch(callback, kinds);
+    await act(async () => { renderer = create(createElement(Probe, { active: true, fetch, commands: command })); });
+    let refreshing: Promise<AgentKind[]>;
+    await act(async () => { refreshing = seen.refresh(); });
+    installed.capabilities({ launch_command: true });
+    await act(async () => { installed.answer([{ kind: "codex", label: "Installed" }]); await refreshing; });
+    expect(seen.loaded).toBeTrue();
+    expect(seen.capable).toBeTrue();
+    await act(async () => { opening.capabilities({}); opening.answer([{ kind: "codex", label: "Old" }]); });
+    expect(seen.agents[0]?.label).toBe("Installed");
+    expect(seen.capable).toBeTrue();
+  });
+
   it("rechecks availability when configured kinds change without rereading for every command edit", async () => {
     let count = 0;
     const fetch: Fetch = async (callback) => { count++; callback?.({ launch_command: true }); return []; };

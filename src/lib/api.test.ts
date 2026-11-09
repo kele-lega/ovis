@@ -70,6 +70,20 @@ it("offers installed Copilot in agent menus while filtering missing and unsuppor
   expect(await fetchAgentKinds()).toEqual([agents[3]!]);
 });
 
+it("reads command capability only from the selected PC and keeps configured kinds absent from PATH", async () => {
+  const paths: string[] = [], offered: boolean[] = [];
+  globalThis.fetch = (async (url: string) => {
+    if (url.endsWith("/direct-access")) return Response.json({}, { status: 404 });
+    paths.push(url);
+    return Response.json({ agents: [{ kind: "codex", label: "Codex", installed: false }], launch_command: url.includes("/office/") ? true : "true" });
+  }) as typeof fetch;
+  expect(await fetchAgentKinds("office", (value) => offered.push(value.launch_command === true), ["codex"]))
+    .toEqual([{ kind: "codex", label: "Codex", installed: false }]);
+  expect(await fetchAgentKinds("local", (value) => offered.push(value.launch_command === true))).toEqual([]);
+  expect(offered).toEqual([true, false]);
+  expect(paths).toEqual(["/api/machines/office/agents", "/api/agents"]);
+});
+
 it("offers Copilot from an older remote bridge without installation metadata", async () => {
   const requests: string[] = [];
   const copilot = { kind: "copilot", label: "GitHub Copilot" };

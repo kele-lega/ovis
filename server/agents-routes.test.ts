@@ -69,6 +69,18 @@ describe("GET /api/agents", () => {
     expect(located.sort()).toEqual(["gjc", "omo"]);
   });
 
+  it("advertises only live strict atomic capability on the selected runtime", async () => {
+    for (const identity of [
+      { version: "fixture", protocol: 1, capabilities: { atomic_command_launch: true } },
+      { version: "fixture", protocol: 1, runtime: "herdr-core" as const, capabilities: { atomic_command_launch: true } },
+      { version: "fixture", protocol: 1 },
+    ]) {
+      ping.mockResolvedValueOnce(identity);
+      const body = await (await fetch(url("/api/agents"))).json() as { launch_command?: boolean };
+      expect(body.launch_command).toBe(process.platform !== "win32" && identity.runtime !== "herdr-core" && identity.capabilities?.atomic_command_launch === true);
+    }
+  });
+
   it("offers on herdr-core only the kinds its manifests name: none of herdr's own beside them", async () => {
     process.env["PATH"] = bin;
     const serving = spyOn(runtime, "servingCore").mockReturnValue(true);

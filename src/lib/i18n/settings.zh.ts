@@ -5,6 +5,16 @@
  * Register and fixed terms follow ../i18n.zh.ts; a key another feature also uses goes there.
  */
 export const SETTINGS_ZH: Record<string, string> = {
+  "Full commands": "完整命令",
+  "Applies to New workspace, New tab and New worktree only. Resume is unchanged. Save a full command to replace the normal launch; clear it to use the agent's defaults again.": "仅适用于新建工作区、新建标签页和新建工作树，不影响继续会话。保存完整命令可替换正常启动方式；清除后恢复代理默认启动方式。",
+  "Full command for {agent}": "{agent} 的完整命令",
+  "Save command for {agent}": "保存 {agent} 的命令",
+  "Clear command for {agent}": "清除 {agent} 的命令",
+  "Clear command": "清除命令",
+  "Use one nonblank line, at most 2000 characters, with no control characters. Invalid text is not saved.": "请输入一行非空命令，不超过 2000 个字符，且不含控制字符。无效文本不会保存。",
+  "Not saved. The previous launch setting is still used.": "尚未保存，仍使用之前的启动设置。",
+  "No custom command. Uses the agent's default launch.": "未设置自定义命令，使用代理默认启动方式。",
+  "Commands are stored in plaintext and shared across devices. Do not include passwords, API keys or other secrets. Use a wrapper script or environment variables on the PC instead.": "命令以明文存储并在设备间共享。请勿包含密码、API 密钥或其他机密。请改用 PC 上的包装脚本或环境变量。",
   "Direct typing": "直接输入",
   "Terminal input mode": "终端输入模式",
   "Reset shortcuts": "重置快捷键",

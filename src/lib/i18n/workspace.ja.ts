@@ -5,6 +5,8 @@
  * Register and fixed terms follow ../i18n.ja.ts; a key another feature also uses goes there.
  */
 export const WORKSPACE_JA: Record<string, string> = {
+  "Uses the saved custom command for {agent}. Permission, model and effort settings are not added. Resume is unchanged.": "保存済みの {agent} のカスタムコマンドを使います。権限、モデル、推論レベルの設定は追加されません。再開には影響しません。",
+  "This PC has not confirmed atomic custom launch support. Use a compatible Ovis bridge and running Herdr, or clear this agent's command in Settings > Agents. Nothing will start.": "この PC では原子的なカスタム起動の対応が確認できません。対応する Ovis ブリッジと実行中の Herdr を使うか、設定 > エージェントでこのエージェントのコマンドを消去してください。何も起動しません。",
   "Use folder {path}": "フォルダー {path} を使用",
   "{n} more recent folders": "最近のフォルダーをあと {n} 件",
   "New worktree · {name}": "新しいワークツリー · {name}",
