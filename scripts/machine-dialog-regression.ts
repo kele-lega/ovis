@@ -102,6 +102,7 @@ try {
           // A password is an uncontrolled DOM value: submit clears it synchronously, before a
           // held reply, and a different challenge mounts an empty field instead of reusing it.
           const secretActions: unknown[] = [];
+          const secretSent = Promise.withResolvers<void>();
           let secretReply: (() => void) | undefined;
           let secretChallenge = "secret-1";
           await page.route("**/api/machines/setup**", async (route) => {
@@ -110,7 +111,7 @@ try {
               job = { id: "secret", machine_id: "fixture", target: { destination: "fixture-only" }, phase: "authentication", step: "Fictional password question", error: null, installations: [], challenge: { id: secretChallenge, kind: "secret", prompt: "Fixture SSH password" }, ssh_output: null };
             } else if (request.method() === "POST") {
               secretActions.push(request.postDataJSON());
-              await new Promise<void>((resolve) => { secretReply = resolve; });
+              await new Promise<void>((resolve) => { secretReply = resolve; secretSent.resolve(); });
               job = { ...job!, phase: "connected", challenge: null, step: "Connected" };
             } else job = { ...job!, challenge: { id: secretChallenge, kind: "secret", prompt: "Fixture SSH password" } };
             await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(job!) });
@@ -126,6 +127,14 @@ try {
           await secret.press("Enter");
           await page.waitForFunction(() => document.querySelector<HTMLInputElement>('input[name="ssh-secret"]')?.disabled === true);
           assert.equal(await secret.inputValue(), "", "the input is cleared while the network reply is held");
+          // Clearing/disabling is synchronous; Playwright may not have delivered the POST yet.
+          // Observe that delivery without releasing its held response, rather than racing it.
+          let sentDeadline: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([secretSent.promise, new Promise<never>((_resolve, reject) => {
+              sentDeadline = setTimeout(() => reject(new Error("the held SSH answer never reached the fixture")), 10_000);
+            })]);
+          } finally { clearTimeout(sentDeadline); }
           assert.deepEqual(secretActions, [{ action: "answer", challenge_id: "secret-2", answer: "Fictional password not a credential" }]);
           assert.equal(await page.evaluate(() => JSON.stringify(localStorage).includes("Fictional password")), false);
           secretReply!();
